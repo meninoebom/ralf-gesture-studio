@@ -1,10 +1,12 @@
 use eframe::egui;
 
 use crate::model::Vocabulary;
+use crate::osc::{OscReceiverHandle, ConnectionStatus};
 
 // Custom colors - gold instead of yellow for better readability
 const GOLD: egui::Color32 = egui::Color32::from_rgb(255, 185, 50);
 const BRIGHT_GREEN: egui::Color32 = egui::Color32::from_rgb(100, 220, 100);
+const BRIGHT_RED: egui::Color32 = egui::Color32::from_rgb(255, 100, 100);
 
 /// The two modes of the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,11 +30,13 @@ pub struct GestureStudioApp {
     vocabulary: Vocabulary,
     /// Current application mode
     mode: AppMode,
+    /// Handle to the OSC receiver
+    osc_receiver: OscReceiverHandle,
 }
 
 impl GestureStudioApp {
     /// Create a new application with a demo vocabulary
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, osc_receiver: OscReceiverHandle) -> Self {
         // Configure larger fonts for better readability
         let mut style = (*cc.egui_ctx.style()).clone();
 
@@ -56,12 +60,19 @@ impl GestureStudioApp {
         Self {
             vocabulary,
             mode: AppMode::Training,
+            osc_receiver,
         }
     }
 }
 
 impl eframe::App for GestureStudioApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll the OSC receiver for new events
+        self.osc_receiver.poll();
+
+        // Request continuous repaints to keep the UI responsive
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+
         // Top panel with title and mode selector
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -163,10 +174,37 @@ impl GestureStudioApp {
                         ui.label("Address:");
                         ui.label(&self.vocabulary.input.address);
                     });
+
+                    // Show live connection status
                     ui.horizontal(|ui| {
-                        ui.colored_label(GOLD, "●");
-                        ui.colored_label(GOLD, "LISTENING");
-                        ui.label("(no data yet)");
+                        let (color, status_text, detail) = match self.osc_receiver.state.status {
+                            ConnectionStatus::Stopped => {
+                                (egui::Color32::GRAY, "STOPPED", String::new())
+                            }
+                            ConnectionStatus::Listening => {
+                                (GOLD, "LISTENING", "(waiting for data)".to_string())
+                            }
+                            ConnectionStatus::Receiving => {
+                                let ms = self.osc_receiver.ms_since_last_frame().unwrap_or(0);
+                                (BRIGHT_GREEN, "RECEIVING", format!("({}ms ago)", ms))
+                            }
+                            ConnectionStatus::Error => {
+                                let msg = self.osc_receiver.state.error_message
+                                    .as_deref()
+                                    .unwrap_or("Unknown error");
+                                (BRIGHT_RED, "ERROR", format!("({})", msg))
+                            }
+                        };
+                        ui.colored_label(color, "●");
+                        ui.colored_label(color, status_text);
+                        if !detail.is_empty() {
+                            ui.label(detail);
+                        }
+                    });
+
+                    // Show frame count
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Frames: {}", self.osc_receiver.state.frame_count));
                     });
                 });
 

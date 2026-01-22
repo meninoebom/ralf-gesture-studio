@@ -39,10 +39,16 @@ ralf/
 ├── Cargo.toml                 # Dependencies and project metadata
 ├── src/
 │   ├── main.rs                # Entry point and integration tests
-│   └── model/
+│   ├── model/
+│   │   ├── mod.rs             # Module exports
+│   │   ├── vocabulary.rs      # Core data structures
+│   │   └── persistence.rs     # JSON file save/load
+│   ├── gui/
+│   │   └── mod.rs             # egui GUI (Training/Performance modes)
+│   └── osc/
 │       ├── mod.rs             # Module exports
-│       ├── vocabulary.rs      # Core data structures
-│       └── persistence.rs     # JSON file save/load
+│       └── receiver.rs        # Async OSC receiver with status tracking
+├── test_osc_sender.py         # Python script to test OSC input
 ├── CLAUDE.md                  # AI development guidelines
 ├── requirements.md            # Full specification document
 └── .llm/
@@ -79,10 +85,13 @@ cargo test -- --nocapture
 
 Expected output:
 ```
-running 14 tests
+running 17 tests
 test model::persistence::tests::test_default_vocabulary_dir ... ok
 test model::persistence::tests::test_load_nonexistent_file ... ok
 test model::persistence::tests::test_save_and_load_roundtrip ... ok
+test osc::receiver::tests::test_frame_count_increments ... ok
+test osc::receiver::tests::test_handle_polls_events ... ok
+test osc::receiver::tests::test_receiver_creation ... ok
 test tests::test_add_example_to_gesture ... ok
 test tests::test_add_gesture ... ok
 test tests::test_add_multiple_gestures ... ok
@@ -95,7 +104,49 @@ test tests::test_remove_gesture ... ok
 test tests::test_save_and_load_roundtrip ... ok
 test tests::test_vocabulary_file_is_readable_json ... ok
 
-test result: ok. 14 passed; 0 failed
+test result: ok. 17 passed; 0 failed
+```
+
+## Testing OSC Input
+
+A Python test script is included to simulate skeleton tracking data. Requires [uv](https://github.com/astral-sh/uv) (recommended) or Python with `python-osc`.
+
+### Using uv (recommended)
+
+```bash
+# Install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Run the test sender (dependencies auto-installed)
+uv run test_osc_sender.py
+```
+
+### Manual Testing
+
+```bash
+# In terminal 1: Start the app
+cargo run
+
+# In terminal 2: Send test OSC data
+uv run test_osc_sender.py
+```
+
+You should see the GUI update:
+- **LISTENING** (yellow) → waiting for data
+- **RECEIVING** (green) → data arriving, shows ms since last frame
+- **Frames: N** → increments as data arrives
+
+### Test Script Options
+
+```bash
+uv run test_osc_sender.py --help
+
+Options:
+  --host HOST        Target host (default: 127.0.0.1)
+  --port PORT        Target port (default: 6448)
+  --address ADDRESS  OSC address (default: /wek/inputs)
+  --fps FPS          Frames per second (default: 60)
+  --dimensions N     Number of floats per frame (default: 4)
 ```
 
 ## Data Model
@@ -140,15 +191,26 @@ Default save location: `~/Documents/RALF/`
 ### Milestone 1: Data Model ✅
 - [x] Vocabulary, Gesture, Example structs
 - [x] JSON serialization (save/load .ralf files)
-- [x] 14 passing tests
 
-### Milestone 2: GUI Shell (next)
-- [ ] egui window with panel layout
-- [ ] Display vocabulary info
+### Milestone 2: GUI Shell ✅
+- [x] egui window with panel layout
+- [x] Training and Performance mode views
+- [x] Vocabulary, Connection, Gestures panels
+- [x] Custom gold color for better readability
+- [x] 30% larger fonts for accessibility
+
+### Milestone 3: OSC Receiver ✅
+- [x] Async UDP receiver with tokio
+- [x] Live connection status (Stopped → Listening → Receiving)
+- [x] Frame counter and time-since-last-frame display
+- [x] Error handling and status indicators
+- [x] 17 passing tests
+
+### Milestone 4: OSC Sender (next)
+- [ ] Send hit messages when gestures are recognized
+- [ ] Configurable output host/port
 
 ### Future Milestones
-- OSC receiver (skeleton input)
-- OSC sender (hit output)
 - DTW recognition algorithm
 - Recording and matching
 - Training session workflow

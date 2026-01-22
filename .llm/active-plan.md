@@ -5,17 +5,17 @@
 
 ---
 
-## Milestone 1: Project Setup + Data Model
+## Milestone 1: Project Setup + Data Model ✅
 
 **Goal**: Rust project that can create, save, and load vocabulary files.
 
 ### What to Build
 
-- [ ] Cargo project with dependencies
-- [ ] `Vocabulary` struct with nested `Gesture` and `Example`
-- [ ] JSON serialization (save to .ralf file)
-- [ ] JSON deserialization (load from .ralf file)
-- [ ] Default file location (`~/Documents/RALF/`)
+- [x] Cargo project with dependencies
+- [x] `Vocabulary` struct with nested `Gesture` and `Example`
+- [x] JSON serialization (save to .ralf file)
+- [x] JSON deserialization (load from .ralf file)
+- [x] Default file location (`~/Documents/RALF/`)
 
 ### Tests to Write
 
@@ -80,18 +80,18 @@ test model::tests::test_save_and_load_roundtrip ... ok
 
 ---
 
-## Milestone 2: Minimal GUI Shell
+## Milestone 2: Minimal GUI Shell ✅
 
 **Goal**: A window that displays vocabulary info and has the basic panel layout.
 
 ### What to Build
 
-- [ ] eframe app skeleton
-- [ ] Main window with title bar
-- [ ] Mode selector (Training/Performance) - visual only, no logic yet
-- [ ] Vocabulary panel showing name and gesture count
-- [ ] Placeholder panels for Connection, Gestures, Train
-- [ ] Load a hardcoded or test vocabulary on startup
+- [x] eframe app skeleton
+- [x] Main window with title bar
+- [x] Mode selector (Training/Performance) - visual only, no logic yet
+- [x] Vocabulary panel showing name and gesture count
+- [x] Placeholder panels for Connection, Gestures, Train
+- [x] Load a hardcoded or test vocabulary on startup
 
 ### GUI Appearance
 
@@ -139,19 +139,19 @@ cargo run
 
 ---
 
-## Milestone 3: OSC Receiver
+## Milestone 3: OSC Receiver ✅
 
 **Goal**: Receive skeleton data via OSC and show connection status in GUI.
 
 ### What to Build
 
-- [ ] UDP socket listener on configurable port (default 6448)
-- [ ] OSC message parsing with `rosc`
-- [ ] Filter for configured address (default `/wek/inputs`)
-- [ ] Channel to send frames from receiver task to GUI
-- [ ] Connection status indicator (LISTENING → RECEIVING)
-- [ ] Frame counter in GUI
-- [ ] "Time since last frame" display
+- [x] UDP socket listener on configurable port (default 6448)
+- [x] OSC message parsing with `rosc`
+- [x] Filter for configured address (default `/wek/inputs`)
+- [x] Channel to send frames from receiver task to GUI
+- [x] Connection status indicator (LISTENING → RECEIVING)
+- [x] Frame counter in GUI
+- [x] "Time since last frame" display
 
 ### GUI Appearance
 

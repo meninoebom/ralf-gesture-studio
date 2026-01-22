@@ -1,9 +1,20 @@
 mod model;
 mod gui;
+mod osc;
 
 use gui::GestureStudioApp;
+use osc::OscReceiver;
 
 fn main() -> eframe::Result<()> {
+    // Create the OSC receiver and get the handle for the GUI
+    let (receiver, receiver_handle) = OscReceiver::new(6448, "/wek/inputs");
+
+    // Start the tokio runtime in a background thread for async OSC receiving
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(receiver.run());
+    });
+
     // Configure the native window
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -16,7 +27,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "RALF Gesture Studio",
         options,
-        Box::new(|cc| Ok(Box::new(GestureStudioApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(GestureStudioApp::new(cc, receiver_handle)))),
     )
 }
 

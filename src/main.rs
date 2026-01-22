@@ -1,43 +1,23 @@
 mod model;
+mod gui;
 
-use model::{Vocabulary, load_vocabulary, save_vocabulary, default_vocabulary_dir};
+use gui::GestureStudioApp;
 
-fn main() {
-    println!("RALF Gesture Studio v0.1.0");
-    println!("==========================");
-    println!();
+fn main() -> eframe::Result<()> {
+    // Configure the native window
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([800.0, 700.0])
+            .with_min_inner_size([600.0, 400.0]),
+        ..Default::default()
+    };
 
-    // Show default vocabulary directory
-    match default_vocabulary_dir() {
-        Ok(dir) => println!("Vocabulary directory: {}", dir.display()),
-        Err(e) => println!("Could not determine vocabulary directory: {}", e),
-    }
-    println!();
-
-    // Create a test vocabulary to demonstrate the data model
-    let mut vocab = Vocabulary::new("Demo Vocabulary");
-    println!("Created vocabulary: {}", vocab.name);
-
-    // Add some gestures
-    vocab.add_gesture("wave");
-    vocab.add_gesture("jump");
-    vocab.add_gesture("spin");
-    println!("Added {} gestures", vocab.gestures.len());
-
-    // Show the gestures
-    for gesture in &vocab.gestures {
-        println!(
-            "  - {} (id: {}, osc: {}, examples: {})",
-            gesture.name,
-            gesture.id,
-            gesture.osc_address,
-            gesture.example_count()
-        );
-    }
-
-    println!();
-    println!("Milestone 1 complete! Data model is working.");
-    println!("Run 'cargo test' to verify all tests pass.");
+    // Launch the GUI application
+    eframe::run_native(
+        "RALF Gesture Studio",
+        options,
+        Box::new(|cc| Ok(Box::new(GestureStudioApp::new(cc)))),
+    )
 }
 
 // =============================================================================
@@ -46,8 +26,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use model::Example;
+    use crate::model::{Vocabulary, Example, load_vocabulary, save_vocabulary};
     use tempfile::tempdir;
 
     #[test]

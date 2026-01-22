@@ -219,17 +219,17 @@ while True:
 
 ---
 
-## Milestone 4: OSC Sender
+## Milestone 4: OSC Sender ✅
 
 **Goal**: Send OSC hit messages and verify with test button.
 
 ### What to Build
 
-- [ ] OSC sender task/function
-- [ ] Configurable output host and port (default localhost:12000)
-- [ ] "Send Test Hit" button in GUI
-- [ ] Output status indicator (READY → SENT)
-- [ ] "Time since last send" display
+- [x] OSC sender task/function
+- [x] Configurable output host and port (default localhost:12000)
+- [x] "Send Test Hit" button in GUI
+- [x] Output status indicator (READY → SENT)
+- [x] "Time since last send" display
 
 ### GUI Appearance
 

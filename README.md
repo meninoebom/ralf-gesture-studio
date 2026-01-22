@@ -47,8 +47,10 @@ ralf/
 │   │   └── mod.rs             # egui GUI (Training/Performance modes)
 │   └── osc/
 │       ├── mod.rs             # Module exports
-│       └── receiver.rs        # Async OSC receiver with status tracking
+│       ├── receiver.rs        # Async OSC receiver with status tracking
+│       └── sender.rs          # OSC sender for hit messages
 ├── test_osc_sender.py         # Python script to test OSC input
+├── test_osc_receiver.py       # Python script to test OSC output
 ├── CLAUDE.md                  # AI development guidelines
 ├── requirements.md            # Full specification document
 └── .llm/
@@ -85,13 +87,17 @@ cargo test -- --nocapture
 
 Expected output:
 ```
-running 17 tests
+running 21 tests
 test model::persistence::tests::test_default_vocabulary_dir ... ok
 test model::persistence::tests::test_load_nonexistent_file ... ok
 test model::persistence::tests::test_save_and_load_roundtrip ... ok
 test osc::receiver::tests::test_frame_count_increments ... ok
 test osc::receiver::tests::test_handle_polls_events ... ok
 test osc::receiver::tests::test_receiver_creation ... ok
+test osc::sender::tests::test_ms_since_last_send ... ok
+test osc::sender::tests::test_send_increments_count ... ok
+test osc::sender::tests::test_sender_config_update ... ok
+test osc::sender::tests::test_sender_creation ... ok
 test tests::test_add_example_to_gesture ... ok
 test tests::test_add_gesture ... ok
 test tests::test_add_multiple_gestures ... ok
@@ -104,7 +110,7 @@ test tests::test_remove_gesture ... ok
 test tests::test_save_and_load_roundtrip ... ok
 test tests::test_vocabulary_file_is_readable_json ... ok
 
-test result: ok. 17 passed; 0 failed
+test result: ok. 21 passed; 0 failed
 ```
 
 ## Testing OSC Input
@@ -147,6 +153,41 @@ Options:
   --address ADDRESS  OSC address (default: /wek/inputs)
   --fps FPS          Frames per second (default: 60)
   --dimensions N     Number of floats per frame (default: 4)
+```
+
+## Testing OSC Output
+
+A Python test receiver script is included to verify hit messages are being sent.
+
+### Testing the Send Button
+
+```bash
+# In terminal 1: Start the receiver
+uv run test_osc_receiver.py
+
+# In terminal 2: Start the app
+cargo run
+
+# In the app: Click "Send Test Hit" button in the CONNECTION panel
+```
+
+You should see output in the receiver terminal:
+```
+[14:32:01.123] /test/hit → 1.0
+```
+
+The GUI will show:
+- **SENT** (green) → message sent, shows ms since last send
+- **Sent: N** → increments each time you click the button
+
+### Receiver Script Options
+
+```bash
+uv run test_osc_receiver.py --help
+
+Options:
+  --host HOST   Listen host (default: 127.0.0.1)
+  --port PORT   Listen port (default: 12000)
 ```
 
 ## Data Model
@@ -204,14 +245,19 @@ Default save location: `~/Documents/RALF/`
 - [x] Live connection status (Stopped → Listening → Receiving)
 - [x] Frame counter and time-since-last-frame display
 - [x] Error handling and status indicators
-- [x] 17 passing tests
 
-### Milestone 4: OSC Sender (next)
-- [ ] Send hit messages when gestures are recognized
-- [ ] Configurable output host/port
+### Milestone 4: OSC Sender ✅
+- [x] Send hit messages via UDP
+- [x] "Send Test Hit" button in GUI
+- [x] Output status indicator (Ready → Sent)
+- [x] Time-since-last-send and send count display
+- [x] 21 passing tests
+
+### Milestone 5: DTW Algorithm (next)
+- [ ] DTW distance function for two sequences
+- [ ] Multi-dimensional frame support
 
 ### Future Milestones
-- DTW recognition algorithm
 - Recording and matching
 - Training session workflow
 - Performance mode with threshold tuning

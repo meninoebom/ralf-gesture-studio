@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::model::Vocabulary;
-use crate::osc::{OscReceiverHandle, ConnectionStatus};
+use crate::osc::{OscReceiverHandle, ConnectionStatus, OscSender, SenderStatus};
 
 // Custom colors - gold instead of yellow for better readability
 const GOLD: egui::Color32 = egui::Color32::from_rgb(255, 185, 50);
@@ -32,6 +32,8 @@ pub struct GestureStudioApp {
     mode: AppMode,
     /// Handle to the OSC receiver
     osc_receiver: OscReceiverHandle,
+    /// OSC sender for hit messages
+    osc_sender: OscSender,
 }
 
 impl GestureStudioApp {
@@ -57,10 +59,14 @@ impl GestureStudioApp {
         vocabulary.add_gesture("jump");
         vocabulary.add_gesture("spin");
 
+        // Create OSC sender with default output settings
+        let osc_sender = OscSender::new(&vocabulary.output.host, vocabulary.output.port);
+
         Self {
             vocabulary,
             mode: AppMode::Training,
             osc_receiver,
+            osc_sender,
         }
     }
 }
@@ -155,7 +161,7 @@ impl GestureStudioApp {
     }
 
     /// Render the connection panel
-    fn show_connection_panel(&self, ui: &mut egui::Ui) {
+    fn show_connection_panel(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
 
@@ -219,10 +225,41 @@ impl GestureStudioApp {
                         ui.label("Port:");
                         ui.label(format!("{}", self.vocabulary.output.port));
                     });
+
+                    // Show sender status
                     ui.horizontal(|ui| {
-                        ui.colored_label(BRIGHT_GREEN, "●");
-                        ui.colored_label(BRIGHT_GREEN, "READY");
+                        let (color, status_text, detail) = match self.osc_sender.state.status {
+                            SenderStatus::Ready => {
+                                (BRIGHT_GREEN, "READY", String::new())
+                            }
+                            SenderStatus::Sent => {
+                                let ms = self.osc_sender.ms_since_last_send().unwrap_or(0);
+                                (BRIGHT_GREEN, "SENT", format!("({}ms ago)", ms))
+                            }
+                            SenderStatus::Error => {
+                                let msg = self.osc_sender.state.error_message
+                                    .as_deref()
+                                    .unwrap_or("Unknown error");
+                                (BRIGHT_RED, "ERROR", format!("({})", msg))
+                            }
+                        };
+                        ui.colored_label(color, "●");
+                        ui.colored_label(color, status_text);
+                        if !detail.is_empty() {
+                            ui.label(detail);
+                        }
                     });
+
+                    // Show send count
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Sent: {}", self.osc_sender.state.send_count));
+                    });
+
+                    // Send Test Hit button
+                    ui.add_space(4.0);
+                    if ui.add(egui::Button::new("Send Test Hit").min_size(egui::vec2(120.0, 28.0))).clicked() {
+                        let _ = self.osc_sender.send_hit("/test/hit");
+                    }
                 });
             });
         });

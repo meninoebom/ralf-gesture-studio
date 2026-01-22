@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn test_default_output_config() {
         let vocab = Vocabulary::new("Test");
-        assert_eq!(vocab.output.host, "localhost");
+        assert_eq!(vocab.output.host, "127.0.0.1");
         assert_eq!(vocab.output.port, 12000);
     }
 

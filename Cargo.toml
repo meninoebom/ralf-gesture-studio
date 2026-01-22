@@ -1,0 +1,23 @@
+[package]
+name = "ralf-gesture-studio"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop application for training and recognizing movement gestures using DTW"
+license = "MIT"
+
+[dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Cross-platform paths
+directories = "5.0"
+
+# Error handling
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"

@@ -1,0 +1,46 @@
+digraph RALF {
+    rankdir=LR;
+    node [shape=box, style=rounded];
+    
+    // Training Mode
+    subgraph cluster_training {
+        label="Training Mode";
+        style=dashed;
+        color=blue;
+        
+        music [label="Music", shape=ellipse];
+        dancer_train [label="Dancer"];
+        input_train [label="Input\n(Sensors/Camera)"];
+        mocap_train [label="Motion Capture"];
+        ml_train [label="ML Model\n(Dynamic Time Warping)"];
+        vocabulary [label="Gestural\nVocabulary", shape=ellipse, style=filled, fillcolor=lightblue];
+        
+        music -> dancer_train [label="inspires"];
+        dancer_train -> input_train;
+        input_train -> mocap_train;
+        mocap_train -> ml_train;
+        ml_train -> vocabulary;
+    }
+    
+    // Performance Mode
+    subgraph cluster_performance {
+        label="Performance Mode";
+        style=dashed;
+        color=green;
+        
+        input_perf [label="Input\n(Sensors/Camera)"];
+        mocap_perf [label="Motion Capture"];
+        ml_perf [label="ML Model\n(Recognition)"];
+        music_gen [label="Generative\nMusic Output", shape=ellipse];
+        dancer_perf [label="Dancer"];
+        
+        input_perf -> mocap_perf;
+        mocap_perf -> ml_perf;
+        ml_perf -> music_gen [label="triggers"];
+        music_gen -> dancer_perf [label="inspires"];
+        dancer_perf -> input_perf [label="response"];
+    }
+    
+    // Connection between modes
+    vocabulary -> ml_perf [label="informs", style=dotted, color=gray];
+}

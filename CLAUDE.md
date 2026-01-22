@@ -28,13 +28,23 @@ This application replaces Wekinator for gesture recognition in choreomusical per
 
 ```
 src/
-├── main.rs                     # Entry point, launch GUI
-├── model/                      # Core data structures (Vocabulary, Gesture, Example)
-├── engine/                     # DTW recognition engine
-├── session/                    # Training session state machine
-├── osc/                        # OSC send/receive
-├── app/                        # Application state
-└── gui/                        # egui UI components
+├── main.rs                     # Entry point, integration tests
+├── model/
+│   ├── mod.rs                  # Module exports
+│   ├── vocabulary.rs           # Vocabulary, Gesture, Example structs
+│   └── persistence.rs          # JSON file save/load
+├── engine/
+│   ├── mod.rs                  # Module exports
+│   ├── dtw.rs                  # Dynamic Time Warping algorithm
+│   ├── buffer.rs               # Frame buffer and recording session
+│   ├── recognizer.rs           # Real-time gesture recognition
+│   └── training.rs             # Training session state machine with audio
+├── osc/
+│   ├── mod.rs                  # Module exports
+│   ├── receiver.rs             # Async OSC receiver
+│   └── sender.rs               # OSC sender for hit messages
+└── gui/
+    └── mod.rs                  # egui GUI (Training/Performance modes)
 ```
 
 ### Key Dependencies
@@ -45,8 +55,10 @@ src/
 | `rosc` | OSC message encoding/decoding |
 | `tokio` | Async runtime for OSC + timers |
 | `rodio` | Audio feedback (training beeps) |
+| `rfd` | Native file dialogs (Open, Save As) |
 | `serde` + `serde_json` | Vocabulary serialization |
 | `directories` | Cross-platform default paths |
+| `crossbeam-channel` | Thread-safe communication |
 
 ## Data Model
 
@@ -58,14 +70,20 @@ src/
 
 File location: `~/Documents/RALF/` by default
 
-## Implementation Phases
+## Implementation Status
 
-Development follows four phases (see requirements.md for details):
+**v0.1.0 COMPLETE** - All 8 milestones implemented:
 
-1. **Phase 1 - Foundation**: Basic recording and recognition of one gesture
-2. **Phase 2 - Training UX**: Full training session workflow with audio feedback
-3. **Phase 3 - Full GUI**: Complete interface with both modes
-4. **Phase 4 - Polish**: Error handling, optimization, packaging
+1. ✅ Data Model - Vocabulary/Gesture/Example structs, JSON persistence
+2. ✅ GUI Shell - eframe/egui window with panel layout
+3. ✅ OSC Receiver - Async UDP receiver with status tracking
+4. ✅ OSC Sender - Hit message output with test button
+5. ✅ DTW Algorithm - Dynamic Time Warping for gesture matching
+6. ✅ Recording + Matching - Real-time recognition with refractory period
+7. ✅ Training Session - State machine with audio cues (rodio)
+8. ✅ Polish + Performance Mode - File dialogs, threshold sliders, auto-save
+
+See `.llm/active-plan.md` for detailed milestone documentation.
 
 ## Coding Guidelines
 

@@ -299,16 +299,16 @@ server.serve_forever()
 
 ---
 
-## Milestone 5: DTW Algorithm
+## Milestone 5: DTW Algorithm ✅
 
 **Goal**: Implement Dynamic Time Warping and verify with tests.
 
 ### What to Build
 
-- [ ] DTW distance function for two sequences
-- [ ] Support for multi-dimensional frames (e.g., 68 floats per frame)
-- [ ] Euclidean distance for frame comparison
-- [ ] Tests with known sequences and expected distances
+- [x] DTW distance function for two sequences
+- [x] Support for multi-dimensional frames (e.g., 68 floats per frame)
+- [x] Euclidean distance for frame comparison
+- [x] Tests with known sequences and expected distances
 
 ### Tests to Write
 

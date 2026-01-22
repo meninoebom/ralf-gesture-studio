@@ -49,6 +49,9 @@ ralf/
 │       ├── mod.rs             # Module exports
 │       ├── receiver.rs        # Async OSC receiver with status tracking
 │       └── sender.rs          # OSC sender for hit messages
+│   └── engine/
+│       ├── mod.rs             # Module exports
+│       └── dtw.rs             # Dynamic Time Warping algorithm
 ├── test_osc_sender.py         # Python script to test OSC input
 ├── test_osc_receiver.py       # Python script to test OSC output
 ├── CLAUDE.md                  # AI development guidelines
@@ -87,7 +90,7 @@ cargo test -- --nocapture
 
 Expected output:
 ```
-running 21 tests
+running 43 tests
 test model::persistence::tests::test_default_vocabulary_dir ... ok
 test model::persistence::tests::test_load_nonexistent_file ... ok
 test model::persistence::tests::test_save_and_load_roundtrip ... ok
@@ -98,6 +101,10 @@ test osc::sender::tests::test_ms_since_last_send ... ok
 test osc::sender::tests::test_send_increments_count ... ok
 test osc::sender::tests::test_sender_config_update ... ok
 test osc::sender::tests::test_sender_creation ... ok
+test engine::dtw::tests::test_dtw_identical_sequences ... ok
+test engine::dtw::tests::test_dtw_time_warping_slower ... ok
+test engine::dtw::tests::test_euclidean_simple ... ok
+... (22 DTW tests total)
 test tests::test_add_example_to_gesture ... ok
 test tests::test_add_gesture ... ok
 test tests::test_add_multiple_gestures ... ok
@@ -110,7 +117,7 @@ test tests::test_remove_gesture ... ok
 test tests::test_save_and_load_roundtrip ... ok
 test tests::test_vocabulary_file_is_readable_json ... ok
 
-test result: ok. 21 passed; 0 failed
+test result: ok. 43 passed; 0 failed
 ```
 
 ## Testing OSC Input
@@ -251,14 +258,20 @@ Default save location: `~/Documents/RALF/`
 - [x] "Send Test Hit" button in GUI
 - [x] Output status indicator (Ready → Sent)
 - [x] Time-since-last-send and send count display
-- [x] 21 passing tests
 
-### Milestone 5: DTW Algorithm (next)
-- [ ] DTW distance function for two sequences
-- [ ] Multi-dimensional frame support
+### Milestone 5: DTW Algorithm ✅
+- [x] Euclidean distance for frame comparison
+- [x] DTW distance function with dynamic programming
+- [x] Normalized DTW for comparing different-length sequences
+- [x] Best match finder for gesture recognition
+- [x] 43 passing tests (22 DTW-specific)
+
+### Milestone 6: Recording + Matching (next)
+- [ ] Frame buffer for incoming OSC data
+- [ ] Record button to capture examples
+- [ ] Real-time gesture matching
 
 ### Future Milestones
-- Recording and matching
 - Training session workflow
 - Performance mode with threshold tuning
 

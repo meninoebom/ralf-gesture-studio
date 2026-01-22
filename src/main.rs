@@ -1,6 +1,7 @@
 mod model;
 mod gui;
 mod osc;
+mod engine;
 
 use gui::GestureStudioApp;
 use osc::OscReceiver;

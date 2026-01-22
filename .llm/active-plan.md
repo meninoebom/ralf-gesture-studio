@@ -371,20 +371,20 @@ All DTW tests should pass. This is a pure algorithm milestone - no GUI changes.
 
 ---
 
-## Milestone 6: Recording + Matching
+## Milestone 6: Recording + Matching ✅
 
 **Goal**: Record examples and recognize gestures in real-time.
 
 ### What to Build
 
-- [ ] Frame buffer that stores incoming OSC data
-- [ ] "Record" button that captures N seconds of frames
-- [ ] Store recorded frames as Example in current Gesture
-- [ ] Sliding window buffer for real-time matching
-- [ ] Continuous DTW comparison against stored examples
-- [ ] Hit detection when distance < threshold
-- [ ] Fire OSC hit when gesture detected
-- [ ] Refractory period (don't re-trigger same gesture immediately)
+- [x] Frame buffer that stores incoming OSC data
+- [x] "Record" button that captures N seconds of frames
+- [x] Store recorded frames as Example in current Gesture
+- [x] Sliding window buffer for real-time matching
+- [x] Continuous DTW comparison against stored examples
+- [x] Hit detection when distance < threshold
+- [x] Fire OSC hit when gesture detected
+- [x] Refractory period (don't re-trigger same gesture immediately)
 
 ### GUI Appearance
 

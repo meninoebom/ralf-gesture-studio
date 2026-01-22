@@ -4,6 +4,8 @@
 //! including Dynamic Time Warping (DTW) for comparing gesture sequences.
 
 pub mod dtw;
+pub mod buffer;
+pub mod recognizer;
 
 pub use dtw::{
     Frame,
@@ -12,4 +14,18 @@ pub use dtw::{
     dtw_distance,
     dtw_distance_normalized,
     find_best_match,
+};
+
+pub use buffer::{
+    FrameBuffer,
+    RecordingSession,
+    TimestampedFrame,
+};
+
+pub use recognizer::{
+    Recognizer,
+    GestureState,
+    RecognitionResult,
+    HitLog,
+    HitLogEntry,
 };

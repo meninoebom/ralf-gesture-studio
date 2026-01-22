@@ -51,7 +51,9 @@ ralf/
 │       └── sender.rs          # OSC sender for hit messages
 │   └── engine/
 │       ├── mod.rs             # Module exports
-│       └── dtw.rs             # Dynamic Time Warping algorithm
+│       ├── dtw.rs             # Dynamic Time Warping algorithm
+│       ├── buffer.rs          # Frame buffer and recording session
+│       └── recognizer.rs      # Real-time gesture recognition
 ├── test_osc_sender.py         # Python script to test OSC input
 ├── test_osc_receiver.py       # Python script to test OSC output
 ├── CLAUDE.md                  # AI development guidelines
@@ -90,7 +92,7 @@ cargo test -- --nocapture
 
 Expected output:
 ```
-running 43 tests
+running 66 tests
 test model::persistence::tests::test_default_vocabulary_dir ... ok
 test model::persistence::tests::test_load_nonexistent_file ... ok
 test model::persistence::tests::test_save_and_load_roundtrip ... ok
@@ -117,7 +119,7 @@ test tests::test_remove_gesture ... ok
 test tests::test_save_and_load_roundtrip ... ok
 test tests::test_vocabulary_file_is_readable_json ... ok
 
-test result: ok. 43 passed; 0 failed
+test result: ok. 66 passed; 0 failed
 ```
 
 ## Testing OSC Input
@@ -264,15 +266,22 @@ Default save location: `~/Documents/RALF/`
 - [x] DTW distance function with dynamic programming
 - [x] Normalized DTW for comparing different-length sequences
 - [x] Best match finder for gesture recognition
-- [x] 43 passing tests (22 DTW-specific)
 
-### Milestone 6: Recording + Matching (next)
-- [ ] Frame buffer for incoming OSC data
-- [ ] Record button to capture examples
-- [ ] Real-time gesture matching
+### Milestone 6: Recording + Matching ✅
+- [x] Frame buffer for incoming OSC data
+- [x] Recording session with progress bar
+- [x] Real-time gesture recognition with DTW
+- [x] Hit detection and OSC hit output
+- [x] Refractory period (1 second between same-gesture hits)
+- [x] Hit log with timestamps
+- [x] 66 passing tests
+
+### Milestone 7: Training Session (next)
+- [ ] Countdown timer before recording
+- [ ] Audio cues for recording start/stop
+- [ ] Multi-rep training workflow
 
 ### Future Milestones
-- Training session workflow
 - Performance mode with threshold tuning
 
 See `.llm/active-plan.md` for the full implementation roadmap.

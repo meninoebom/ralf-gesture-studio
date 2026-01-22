@@ -62,15 +62,19 @@ pub struct OscReceiverHandle {
 }
 
 impl OscReceiverHandle {
-    /// Poll for new events and update state
-    /// Call this every frame in the GUI update loop
-    pub fn poll(&mut self) {
+    /// Poll for new events and update state.
+    /// Returns any frames received since last poll.
+    /// Call this every frame in the GUI update loop.
+    pub fn poll(&mut self) -> Vec<Vec<f32>> {
+        let mut frames = Vec::new();
+
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
-                ReceiverEvent::Frame(_) => {
+                ReceiverEvent::Frame(data) => {
                     self.state.frame_count += 1;
                     self.state.last_frame_time = Some(Instant::now());
                     self.state.status = ConnectionStatus::Receiving;
+                    frames.push(data);
                 }
                 ReceiverEvent::StatusChanged(status) => {
                     self.state.status = status;
@@ -81,6 +85,8 @@ impl OscReceiverHandle {
                 }
             }
         }
+
+        frames
     }
 
     /// Get time since last frame in milliseconds

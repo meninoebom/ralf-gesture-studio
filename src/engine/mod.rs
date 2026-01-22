@@ -6,10 +6,15 @@
 pub mod dtw;
 pub mod buffer;
 pub mod recognizer;
+pub mod training;
 
 // Core types used by the app
-pub use buffer::RecordingSession;
 pub use recognizer::{Recognizer, HitLog};
+pub use training::{TrainingSession, TrainingConfig, SessionState};
+
+// Re-export for future use
+#[allow(unused_imports)]
+pub use buffer::RecordingSession;
 
 // Re-export for external consumers and future use
 #[allow(unused_imports)]

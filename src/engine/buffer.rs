@@ -120,6 +120,9 @@ impl FrameBuffer {
 }
 
 /// Recording session that captures frames for a fixed duration.
+/// Note: This is now superseded by TrainingSession for the full workflow,
+/// but kept for simpler use cases and testing.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RecordingSession {
     /// Frames captured during this session
@@ -132,6 +135,7 @@ pub struct RecordingSession {
     completed: bool,
 }
 
+#[allow(dead_code)]
 impl RecordingSession {
     /// Start a new recording session.
     ///

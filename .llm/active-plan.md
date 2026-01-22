@@ -468,22 +468,22 @@ fn test_recognition_fires_hit() {
 
 ---
 
-## Milestone 7: Training Session
+## Milestone 7: Training Session ✅
 
 **Goal**: Full training workflow with countdown, capture, rest, and audio cues.
 
 ### What to Build
 
-- [ ] Training session state machine (IDLE → COUNTDOWN → CAPTURING → RESTING → COMPLETE)
-- [ ] Configurable parameters (reps, duration, rest time)
-- [ ] Countdown timer with visual display
-- [ ] Audio beeps using `rodio`:
+- [x] Training session state machine (IDLE → COUNTDOWN → CAPTURING → RESTING → COMPLETE)
+- [x] Configurable parameters (reps, duration, rest time)
+- [x] Countdown timer with visual display
+- [x] Audio beeps using `rodio`:
   - Countdown ticks (300 Hz, short)
   - Capture start (800 Hz, long)
   - Capture end (600 Hz, long)
   - Session complete (1000 Hz, double ding)
-- [ ] Spacebar to start, Escape to cancel
-- [ ] Progress indicator ("Recording 3 of 5")
+- [x] Spacebar to start, Escape to cancel
+- [x] Progress indicator ("Recording 3 of 5")
 
 ### GUI Appearance (During Capture)
 
@@ -562,29 +562,29 @@ fn test_session_cancel() {
 
 ---
 
-## Milestone 8: Polish + Performance Mode
+## Milestone 8: Polish + Performance Mode ✅
 
 **Goal**: Complete the app with both modes, threshold tuning, and hit log.
 
 ### What to Build
 
-- [ ] Mode switching (Training ↔ Performance)
-- [ ] Performance mode layout:
+- [x] Mode switching (Training ↔ Performance)
+- [x] Performance mode layout:
   - Live distance display for each gesture
   - Threshold sliders (adjustable in real-time)
   - Hit detection indicator
   - Hit log with timestamps
-- [ ] File operations in GUI:
+- [x] File operations in GUI:
   - New vocabulary
   - Open vocabulary (file picker)
   - Save As
-- [ ] Gesture management:
+- [x] Gesture management:
   - Add gesture
   - Rename gesture (inline edit)
   - Delete gesture
   - Edit OSC address
-- [ ] Input/output port configuration
-- [ ] Auto-save after changes
+- [ ] Input/output port configuration (deferred to future)
+- [x] Auto-save after changes
 
 ### GUI: Performance Mode
 

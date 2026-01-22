@@ -53,7 +53,8 @@ ralf/
 │       ├── mod.rs             # Module exports
 │       ├── dtw.rs             # Dynamic Time Warping algorithm
 │       ├── buffer.rs          # Frame buffer and recording session
-│       └── recognizer.rs      # Real-time gesture recognition
+│       ├── recognizer.rs      # Real-time gesture recognition
+│       └── training.rs        # Training session state machine with audio cues
 ├── test_osc_sender.py         # Python script to test OSC input
 ├── test_osc_receiver.py       # Python script to test OSC output
 ├── CLAUDE.md                  # AI development guidelines
@@ -92,7 +93,7 @@ cargo test -- --nocapture
 
 Expected output:
 ```
-running 66 tests
+running 76 tests
 test model::persistence::tests::test_default_vocabulary_dir ... ok
 test model::persistence::tests::test_load_nonexistent_file ... ok
 test model::persistence::tests::test_save_and_load_roundtrip ... ok
@@ -104,9 +105,8 @@ test osc::sender::tests::test_send_increments_count ... ok
 test osc::sender::tests::test_sender_config_update ... ok
 test osc::sender::tests::test_sender_creation ... ok
 test engine::dtw::tests::test_dtw_identical_sequences ... ok
-test engine::dtw::tests::test_dtw_time_warping_slower ... ok
 test engine::dtw::tests::test_euclidean_simple ... ok
-... (22 DTW tests total)
+... (22 DTW tests, 10 training tests)
 test tests::test_add_example_to_gesture ... ok
 test tests::test_add_gesture ... ok
 test tests::test_add_multiple_gestures ... ok
@@ -119,7 +119,7 @@ test tests::test_remove_gesture ... ok
 test tests::test_save_and_load_roundtrip ... ok
 test tests::test_vocabulary_file_is_readable_json ... ok
 
-test result: ok. 66 passed; 0 failed
+test result: ok. 76 passed; 0 failed
 ```
 
 ## Testing OSC Input
@@ -274,15 +274,24 @@ Default save location: `~/Documents/RALF/`
 - [x] Hit detection and OSC hit output
 - [x] Refractory period (1 second between same-gesture hits)
 - [x] Hit log with timestamps
-- [x] 66 passing tests
 
-### Milestone 7: Training Session (next)
-- [ ] Countdown timer before recording
-- [ ] Audio cues for recording start/stop
-- [ ] Multi-rep training workflow
+### Milestone 7: Training Session ✅
+- [x] Training session state machine (IDLE → COUNTDOWN → CAPTURING → RESTING → COMPLETE)
+- [x] Configurable parameters (reps, duration, rest time)
+- [x] Countdown timer with visual display
+- [x] Audio beeps using rodio (countdown ticks, capture start/end, completion ding)
+- [x] Spacebar to start, Escape to cancel
+- [x] Progress indicator ("Recording 3 of 5")
+- [x] 76 passing tests
 
-### Future Milestones
-- Performance mode with threshold tuning
+### Milestone 8: Polish + Performance Mode ✅
+- [x] File operations (New, Open, Save As) with native file dialogs
+- [x] Gesture management (add, rename, delete)
+- [x] Threshold sliders in Performance mode (real-time adjustment)
+- [x] OSC address editing
+- [x] Auto-save when file path exists
+- [x] Dirty indicator in title bar
+- [x] 76 passing tests
 
 See `.llm/active-plan.md` for the full implementation roadmap.
 

@@ -92,6 +92,7 @@ pub fn dtw_distance(seq1: &Sequence, seq2: &Sequence) -> f32 {
 /// # Returns
 ///
 /// The normalized DTW distance. Returns `f32::INFINITY` if either sequence is empty.
+#[allow(dead_code)]
 pub fn dtw_distance_normalized(seq1: &Sequence, seq2: &Sequence) -> f32 {
     if seq1.is_empty() || seq2.is_empty() {
         return f32::INFINITY;
@@ -114,6 +115,7 @@ pub fn dtw_distance_normalized(seq1: &Sequence, seq2: &Sequence) -> f32 {
 /// # Returns
 ///
 /// `Some((index, distance))` of the best match, or `None` if examples is empty.
+#[allow(dead_code)]
 pub fn find_best_match(input: &Sequence, examples: &[Sequence]) -> Option<(usize, f32)> {
     if examples.is_empty() || input.is_empty() {
         return None;

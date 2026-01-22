@@ -176,6 +176,7 @@ impl Vocabulary {
 
     /// Remove a gesture by ID
     /// Returns true if a gesture was removed
+    #[allow(dead_code)]
     pub fn remove_gesture(&mut self, id: u32) -> bool {
         let len_before = self.gestures.len();
         self.gestures.retain(|g| g.id != id);
@@ -192,6 +193,7 @@ impl Vocabulary {
     }
 
     /// Recalculate next_gesture_id after loading from file
+    #[allow(dead_code)]
     pub fn recalculate_next_id(&mut self) {
         self.next_gesture_id = self
             .gestures

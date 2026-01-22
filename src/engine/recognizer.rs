@@ -18,8 +18,10 @@ pub struct RecognitionResult {
     /// Distance to the best matching example
     pub distance: f32,
     /// The threshold that was used
+    #[allow(dead_code)]
     pub threshold: f32,
     /// Whether this counts as a hit
+    #[allow(dead_code)]
     pub is_hit: bool,
 }
 
@@ -80,6 +82,7 @@ impl GestureState {
     }
 
     /// Get time since last hit in milliseconds
+    #[allow(dead_code)]
     pub fn ms_since_last_hit(&self) -> Option<u64> {
         self.last_hit_time.map(|t| t.elapsed().as_millis() as u64)
     }
@@ -133,6 +136,7 @@ impl Recognizer {
     }
 
     /// Get all gestures
+    #[allow(dead_code)]
     pub fn gestures(&self) -> &[GestureState] {
         &self.gestures
     }
@@ -235,6 +239,7 @@ impl Recognizer {
     }
 
     /// Update threshold for a gesture
+    #[allow(dead_code)]
     pub fn set_threshold(&mut self, gesture_id: u32, threshold: f32) {
         if let Some(gesture) = self.get_gesture_mut(gesture_id) {
             gesture.threshold = threshold;
@@ -242,6 +247,7 @@ impl Recognizer {
     }
 
     /// Clear all gesture examples
+    #[allow(dead_code)]
     pub fn clear_examples(&mut self, gesture_id: u32) {
         if let Some(gesture) = self.get_gesture_mut(gesture_id) {
             gesture.examples.clear();
@@ -260,6 +266,7 @@ impl Recognizer {
 #[derive(Debug, Clone)]
 pub struct HitLogEntry {
     pub timestamp: Instant,
+    #[allow(dead_code)]
     pub gesture_id: u32,
     pub gesture_name: String,
     pub distance: f32,
@@ -315,11 +322,13 @@ impl HitLog {
     }
 
     /// Check if empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Clear the log
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.entries.clear();
     }

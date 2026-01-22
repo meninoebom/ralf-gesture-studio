@@ -12,6 +12,7 @@ use super::dtw::Frame;
 #[derive(Debug, Clone)]
 pub struct TimestampedFrame {
     pub data: Frame,
+    #[allow(dead_code)]
     pub timestamp: Instant,
 }
 
@@ -60,11 +61,13 @@ impl FrameBuffer {
     }
 
     /// Check if the buffer is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
     }
 
     /// Clear all frames from the buffer.
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.frames.clear();
     }
@@ -82,11 +85,13 @@ impl FrameBuffer {
     }
 
     /// Get all frames currently in the buffer.
+    #[allow(dead_code)]
     pub fn all_frames(&self) -> Vec<Frame> {
         self.frames.iter().map(|f| f.data.clone()).collect()
     }
 
     /// Get frames from the last N milliseconds.
+    #[allow(dead_code)]
     pub fn frames_since(&self, duration: Duration) -> Vec<Frame> {
         let cutoff = Instant::now() - duration;
         self.frames
@@ -97,11 +102,13 @@ impl FrameBuffer {
     }
 
     /// Get the timestamp of the most recent frame.
+    #[allow(dead_code)]
     pub fn last_frame_time(&self) -> Option<Instant> {
         self.frames.back().map(|f| f.timestamp)
     }
 
     /// Get the duration covered by the buffer (oldest to newest frame).
+    #[allow(dead_code)]
     pub fn duration(&self) -> Option<Duration> {
         if self.frames.len() < 2 {
             return None;
@@ -169,6 +176,7 @@ impl RecordingSession {
     }
 
     /// Check if recording is complete.
+    #[allow(dead_code)]
     pub fn is_complete(&self) -> bool {
         self.completed
     }
@@ -184,6 +192,7 @@ impl RecordingSession {
     }
 
     /// Get remaining time in seconds.
+    #[allow(dead_code)]
     pub fn remaining_secs(&self) -> f32 {
         let remaining = self.target_duration.saturating_sub(self.elapsed());
         remaining.as_secs_f32()
@@ -324,9 +333,8 @@ mod tests {
         let mut session = RecordingSession::new(0.05); // 50ms
 
         // Add frames until complete
-        let mut complete = false;
         for i in 0..100 {
-            complete = session.add_frame(vec![i as f32]);
+            let complete = session.add_frame(vec![i as f32]);
             if complete {
                 break;
             }

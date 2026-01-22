@@ -1,12 +1,10 @@
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use rosc::{OscMessage, OscPacket, OscType};
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
 
 /// Connection status for the OSC receiver
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +54,7 @@ pub struct OscReceiverHandle {
     /// Channel to receive events from the receiver
     pub event_rx: Receiver<ReceiverEvent>,
     /// Flag to signal shutdown
+    #[allow(dead_code)]
     shutdown: Arc<AtomicBool>,
     /// Current state (updated by polling events)
     pub state: OscReceiverState,
@@ -95,6 +94,7 @@ impl OscReceiverHandle {
     }
 
     /// Signal the receiver to shut down
+    #[allow(dead_code)]
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
     }

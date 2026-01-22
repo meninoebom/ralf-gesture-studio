@@ -7,6 +7,12 @@ pub mod dtw;
 pub mod buffer;
 pub mod recognizer;
 
+// Core types used by the app
+pub use buffer::RecordingSession;
+pub use recognizer::{Recognizer, HitLog};
+
+// Re-export for external consumers and future use
+#[allow(unused_imports)]
 pub use dtw::{
     Frame,
     Sequence,
@@ -16,16 +22,8 @@ pub use dtw::{
     find_best_match,
 };
 
-pub use buffer::{
-    FrameBuffer,
-    RecordingSession,
-    TimestampedFrame,
-};
+#[allow(unused_imports)]
+pub use buffer::{FrameBuffer, TimestampedFrame};
 
-pub use recognizer::{
-    Recognizer,
-    GestureState,
-    RecognitionResult,
-    HitLog,
-    HitLogEntry,
-};
+#[allow(unused_imports)]
+pub use recognizer::{GestureState, RecognitionResult, HitLogEntry};

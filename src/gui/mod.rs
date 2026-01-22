@@ -116,6 +116,7 @@ impl GestureStudioApp {
     }
 
     /// Sync recognizer with vocabulary examples
+    #[allow(dead_code)]
     fn sync_recognizer_examples(&mut self) {
         for gesture in &self.vocabulary.gestures {
             // Clear existing examples in recognizer
@@ -309,7 +310,8 @@ impl GestureStudioApp {
                             }
                             ConnectionStatus::Receiving => {
                                 let ms = self.osc_receiver.ms_since_last_frame().unwrap_or(0);
-                                (BRIGHT_GREEN, "RECEIVING", format!("({}ms ago)", ms))
+                                let secs = ms as f32 / 1000.0;
+                                (BRIGHT_GREEN, "RECEIVING", format!("({:.1}s ago)", secs))
                             }
                             ConnectionStatus::Error => {
                                 let msg = self.osc_receiver.state.error_message
@@ -351,7 +353,8 @@ impl GestureStudioApp {
                             }
                             SenderStatus::Sent => {
                                 let ms = self.osc_sender.ms_since_last_send().unwrap_or(0);
-                                (BRIGHT_GREEN, "SENT", format!("({}ms ago)", ms))
+                                let secs = ms as f32 / 1000.0;
+                                (BRIGHT_GREEN, "SENT", format!("({:.1}s ago)", secs))
                             }
                             SenderStatus::Error => {
                                 let msg = self.osc_sender.state.error_message

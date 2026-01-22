@@ -1,5 +1,4 @@
 use std::net::UdpSocket;
-use std::sync::Arc;
 use std::time::Instant;
 
 use rosc::{OscMessage, OscPacket, OscType, encoder};
@@ -119,21 +118,25 @@ impl OscSender {
     }
 
     /// Update the target host
+    #[allow(dead_code)]
     pub fn set_host(&mut self, host: &str) {
         self.host = host.to_string();
     }
 
     /// Update the target port
+    #[allow(dead_code)]
     pub fn set_port(&mut self, port: u16) {
         self.port = port;
     }
 
     /// Get current host
+    #[allow(dead_code)]
     pub fn host(&self) -> &str {
         &self.host
     }
 
     /// Get current port
+    #[allow(dead_code)]
     pub fn port(&self) -> u16 {
         self.port
     }

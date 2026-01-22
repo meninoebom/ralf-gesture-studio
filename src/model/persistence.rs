@@ -7,6 +7,7 @@ use thiserror::Error;
 use super::Vocabulary;
 
 /// Errors that can occur when saving or loading vocabularies
+#[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum PersistenceError {
     #[error("Failed to read file: {0}")]
@@ -23,6 +24,7 @@ pub enum PersistenceError {
 }
 
 /// Get the default directory for vocabulary files: ~/Documents/RALF/
+#[allow(dead_code)]
 pub fn default_vocabulary_dir() -> Result<PathBuf, PersistenceError> {
     let user_dirs = UserDirs::new().ok_or(PersistenceError::NoDocumentsDir)?;
     let documents = user_dirs
@@ -32,6 +34,7 @@ pub fn default_vocabulary_dir() -> Result<PathBuf, PersistenceError> {
 }
 
 /// Ensure the default vocabulary directory exists
+#[allow(dead_code)]
 pub fn ensure_vocabulary_dir() -> Result<PathBuf, PersistenceError> {
     let dir = default_vocabulary_dir()?;
     if !dir.exists() {
@@ -41,6 +44,7 @@ pub fn ensure_vocabulary_dir() -> Result<PathBuf, PersistenceError> {
 }
 
 /// Save a vocabulary to a .ralf file (JSON format)
+#[allow(dead_code)]
 pub fn save_vocabulary(vocabulary: &Vocabulary, path: &Path) -> Result<(), PersistenceError> {
     let json = serde_json::to_string_pretty(vocabulary)?;
     fs::write(path, json)?;
@@ -48,6 +52,7 @@ pub fn save_vocabulary(vocabulary: &Vocabulary, path: &Path) -> Result<(), Persi
 }
 
 /// Load a vocabulary from a .ralf file
+#[allow(dead_code)]
 pub fn load_vocabulary(path: &Path) -> Result<Vocabulary, PersistenceError> {
     let json = fs::read_to_string(path)?;
     let mut vocabulary: Vocabulary = serde_json::from_str(&json)?;

@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use super::buffer::FrameBuffer;
-use super::dtw::{dtw_distance, Frame, Sequence};
+use super::dtw::{dtw_distance_normalized, Frame, Sequence};
 
 /// Result of a recognition check
 #[derive(Debug, Clone)]
@@ -42,6 +42,8 @@ pub struct GestureState {
     pub current_distance: Option<f32>,
     /// Last time this gesture was triggered
     pub last_hit_time: Option<Instant>,
+    /// Whether armed for next hit (must go above threshold after a hit before next hit)
+    pub armed: bool,
 }
 
 impl GestureState {
@@ -55,6 +57,7 @@ impl GestureState {
             examples: Vec::new(),
             current_distance: None,
             last_hit_time: None,
+            armed: true, // Start armed, ready for first hit
         }
     }
 
@@ -197,7 +200,7 @@ impl Recognizer {
             // Find best match among all examples
             let mut best_distance = f32::INFINITY;
             for example in &gesture.examples {
-                let distance = dtw_distance(&window, example);
+                let distance = dtw_distance_normalized(&window, example);
                 if distance < best_distance {
                     best_distance = distance;
                 }
@@ -205,12 +208,21 @@ impl Recognizer {
 
             gesture.current_distance = Some(best_distance);
 
-            // Check if it's a hit
+            // Hysteresis: re-arm when distance goes above threshold (5% buffer)
+            // This prevents rapid re-triggering when distance oscillates around threshold
+            let rearm_threshold = gesture.threshold * 1.05;
+            if best_distance >= rearm_threshold {
+                gesture.armed = true;
+            }
+
+            // Check if it's a hit (must be armed and below threshold)
             let is_hit = best_distance < gesture.threshold
+                && gesture.armed
                 && !gesture.in_refractory(self.refractory_duration);
 
             if is_hit {
                 gesture.record_hit();
+                gesture.armed = false; // Disarm until distance goes above threshold again
 
                 let result = RecognitionResult {
                     gesture_id: Some(gesture.id),
@@ -231,10 +243,11 @@ impl Recognizer {
     }
 
     /// Get current distances for all gestures (for display)
-    pub fn current_distances(&self) -> Vec<(u32, String, Option<f32>, f32)> {
+    /// Returns: (id, name, current_distance, threshold, armed)
+    pub fn current_distances(&self) -> Vec<(u32, String, Option<f32>, f32, bool)> {
         self.gestures
             .iter()
-            .map(|g| (g.id, g.name.clone(), g.current_distance, g.threshold))
+            .map(|g| (g.id, g.name.clone(), g.current_distance, g.threshold, g.armed))
             .collect()
     }
 
@@ -340,16 +353,16 @@ mod tests {
 
     #[test]
     fn test_gesture_state_creation() {
-        let gesture = GestureState::new(1, "wave", "/gesture/1", 150.0);
+        let gesture = GestureState::new(1, "wave", "/gesture/1", 15.0);
         assert_eq!(gesture.id, 1);
         assert_eq!(gesture.name, "wave");
-        assert_eq!(gesture.threshold, 150.0);
+        assert_eq!(gesture.threshold, 15.0);
         assert!(!gesture.has_examples());
     }
 
     #[test]
     fn test_gesture_add_example() {
-        let mut gesture = GestureState::new(1, "wave", "/gesture/1", 150.0);
+        let mut gesture = GestureState::new(1, "wave", "/gesture/1", 15.0);
         gesture.add_example(vec![vec![1.0], vec![2.0]]);
 
         assert!(gesture.has_examples());
@@ -358,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_gesture_refractory() {
-        let mut gesture = GestureState::new(1, "wave", "/gesture/1", 150.0);
+        let mut gesture = GestureState::new(1, "wave", "/gesture/1", 15.0);
 
         // Not in refractory initially
         assert!(!gesture.in_refractory(Duration::from_millis(500)));
@@ -384,8 +397,8 @@ mod tests {
     #[test]
     fn test_recognizer_add_gesture() {
         let mut recognizer = Recognizer::new(1000, 100, 500);
-        recognizer.add_gesture(1, "wave", "/gesture/1", 150.0);
-        recognizer.add_gesture(2, "jump", "/gesture/2", 200.0);
+        recognizer.add_gesture(1, "wave", "/gesture/1", 15.0);
+        recognizer.add_gesture(2, "jump", "/gesture/2", 20.0);
 
         assert_eq!(recognizer.gestures().len(), 2);
         assert!(recognizer.get_gesture(1).is_some());
@@ -396,7 +409,7 @@ mod tests {
     #[test]
     fn test_recognizer_add_example() {
         let mut recognizer = Recognizer::new(1000, 100, 500);
-        recognizer.add_gesture(1, "wave", "/gesture/1", 150.0);
+        recognizer.add_gesture(1, "wave", "/gesture/1", 15.0);
 
         let example = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
         assert!(recognizer.add_example(1, example));
@@ -407,7 +420,7 @@ mod tests {
     #[test]
     fn test_recognizer_process_frame_inactive() {
         let mut recognizer = Recognizer::new(1000, 10, 500);
-        recognizer.add_gesture(1, "wave", "/gesture/1", 150.0);
+        recognizer.add_gesture(1, "wave", "/gesture/1", 15.0);
 
         // Add example
         let example = vec![vec![1.0]; 10];
@@ -421,7 +434,7 @@ mod tests {
     #[test]
     fn test_recognizer_detects_match() {
         let mut recognizer = Recognizer::new(1000, 5, 500);
-        recognizer.add_gesture(1, "wave", "/gesture/1", 10.0); // Low threshold
+        recognizer.add_gesture(1, "wave", "/gesture/1", 5.0); // Low threshold (normalized scale)
 
         // Add a simple example
         let example = vec![vec![1.0], vec![2.0], vec![3.0], vec![4.0], vec![5.0]];
@@ -443,7 +456,7 @@ mod tests {
     #[test]
     fn test_recognizer_refractory_prevents_double_trigger() {
         let mut recognizer = Recognizer::new(1000, 3, 1000); // 1 second refractory
-        recognizer.add_gesture(1, "wave", "/gesture/1", 10.0);
+        recognizer.add_gesture(1, "wave", "/gesture/1", 5.0); // Normalized scale
 
         let example = vec![vec![1.0], vec![1.0], vec![1.0]];
         recognizer.add_example(1, example);

@@ -92,7 +92,7 @@ impl Gesture {
             id,
             name: name.to_string(),
             osc_address: format!("/gesture/{}", id),
-            threshold: 150.0, // Default threshold
+            threshold: 1500.0, // Default threshold (DTW distance - adjust based on your data scale)
             created_at: Utc::now(),
             examples: Vec::new(),
         }
@@ -130,6 +130,9 @@ pub struct Vocabulary {
     pub input: InputConfig,
     /// OSC output configuration
     pub output: OutputConfig,
+    /// Baseline frames (user standing still) - used for auto-calibration
+    #[serde(default)]
+    pub baseline: Option<Vec<Vec<f32>>>,
     /// List of gestures in this vocabulary
     pub gestures: Vec<Gesture>,
     /// Counter for generating unique gesture IDs
@@ -148,6 +151,7 @@ impl Vocabulary {
             modified_at: now,
             input: InputConfig::default(),
             output: OutputConfig::default(),
+            baseline: None,
             gestures: Vec::new(),
             next_gesture_id: 1,
         }

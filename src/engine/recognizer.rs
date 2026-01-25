@@ -2,27 +2,59 @@
 //!
 //! Performs continuous DTW matching against stored examples and fires hits
 //! when gestures are recognized.
+//!
+//! ## Hit Detection Logic
+//!
+//! A hit fires when ALL conditions are met:
+//! 1. Distance < Threshold (gesture matches)
+//! 2. Distance has been below threshold for `confirm_ms` (debounce - filters noise)
+//! 3. Not in cooldown from previous hit (rate limiting)
+//!
+//! ## Configuration
+//!
+//! - `confirm_ms`: How long distance must stay below threshold before firing (debounce)
+//! - `refractory_ms`: Minimum time between hits for same gesture (cooldown/rate limit)
 
 use std::time::{Duration, Instant};
 
 use super::buffer::FrameBuffer;
 use super::dtw::{dtw_distance_normalized, Frame, Sequence};
 
+/// Configuration for gesture recognition behavior
+#[derive(Debug, Clone)]
+pub struct RecognitionConfig {
+    /// Debounce: distance must stay below threshold for this long before hit fires (ms)
+    /// Higher = more stable, filters oscillation. Lower = more responsive.
+    /// Recommended: 50-150ms
+    pub confirm_ms: u64,
+
+    /// Cooldown: minimum time between hits for same gesture (ms)
+    /// Prevents rapid-fire hits. Lower = faster repetition allowed.
+    /// Recommended: 300-800ms
+    pub refractory_ms: u64,
+}
+
+impl Default for RecognitionConfig {
+    fn default() -> Self {
+        Self {
+            confirm_ms: 80,      // 80ms debounce - filters brief noise
+            refractory_ms: 500,  // 500ms cooldown - allows 2 hits/sec
+        }
+    }
+}
+
 /// Result of a recognition check
 #[derive(Debug, Clone)]
 pub struct RecognitionResult {
-    /// ID of the gesture that was recognized (if any)
+    /// ID of the gesture that was recognized
     pub gesture_id: Option<u32>,
-    /// Name of the gesture (if recognized)
+    /// Name of the gesture
     pub gesture_name: Option<String>,
     /// Distance to the best matching example
     pub distance: f32,
-    /// The threshold that was used
+    /// The threshold that was used (for debugging/display)
     #[allow(dead_code)]
     pub threshold: f32,
-    /// Whether this counts as a hit
-    #[allow(dead_code)]
-    pub is_hit: bool,
 }
 
 /// State for a single gesture being tracked
@@ -34,16 +66,17 @@ pub struct GestureState {
     pub name: String,
     /// OSC address to send on hit
     pub osc_address: String,
-    /// Recognition threshold
+    /// Recognition threshold (distance must be below this to match)
     pub threshold: f32,
     /// Training examples for this gesture
     pub examples: Vec<Sequence>,
-    /// Current distance to best match
+    /// Current distance to best match (for display)
     pub current_distance: Option<f32>,
-    /// Last time this gesture was triggered
+    /// Last time this gesture fired a hit (for cooldown)
     pub last_hit_time: Option<Instant>,
-    /// Whether armed for next hit (must go above threshold after a hit before next hit)
-    pub armed: bool,
+    /// When distance first dropped below threshold (for debounce)
+    /// None = currently above threshold
+    below_threshold_since: Option<Instant>,
 }
 
 impl GestureState {
@@ -57,7 +90,15 @@ impl GestureState {
             examples: Vec::new(),
             current_distance: None,
             last_hit_time: None,
-            armed: true, // Start armed, ready for first hit
+            below_threshold_since: None,
+        }
+    }
+
+    /// Check if distance has been below threshold long enough (debounce check)
+    pub fn is_confirmed(&self, confirm_duration: Duration) -> bool {
+        match self.below_threshold_since {
+            Some(since) => since.elapsed() >= confirm_duration,
+            None => false,
         }
     }
 
@@ -98,8 +139,8 @@ pub struct Recognizer {
     pub buffer: FrameBuffer,
     /// Gestures being tracked
     gestures: Vec<GestureState>,
-    /// Refractory period (minimum time between hits for same gesture)
-    refractory_duration: Duration,
+    /// Recognition configuration (debounce, cooldown)
+    config: RecognitionConfig,
     /// Whether recognition is active
     active: bool,
     /// Window size for matching (in frames)
@@ -107,20 +148,47 @@ pub struct Recognizer {
 }
 
 impl Recognizer {
-    /// Create a new recognizer
+    /// Create a new recognizer with default config
     ///
     /// # Arguments
     /// * `buffer_size` - Maximum frames to keep in buffer
     /// * `window_size` - Number of frames to use for matching
-    /// * `refractory_ms` - Minimum milliseconds between hits for same gesture
-    pub fn new(buffer_size: usize, window_size: usize, refractory_ms: u64) -> Self {
+    #[allow(dead_code)]
+    pub fn new(buffer_size: usize, window_size: usize) -> Self {
+        Self::with_config(buffer_size, window_size, RecognitionConfig::default())
+    }
+
+    /// Create a new recognizer with custom config
+    pub fn with_config(buffer_size: usize, window_size: usize, config: RecognitionConfig) -> Self {
         Self {
             buffer: FrameBuffer::new(buffer_size),
             gestures: Vec::new(),
-            refractory_duration: Duration::from_millis(refractory_ms),
+            config,
             active: false,
             window_size,
         }
+    }
+
+    /// Get the current recognition config
+    #[allow(dead_code)]
+    pub fn config(&self) -> &RecognitionConfig {
+        &self.config
+    }
+
+    /// Update recognition config
+    #[allow(dead_code)]
+    pub fn set_config(&mut self, config: RecognitionConfig) {
+        self.config = config;
+    }
+
+    /// Set debounce time (confirm_ms)
+    pub fn set_confirm_ms(&mut self, ms: u64) {
+        self.config.confirm_ms = ms;
+    }
+
+    /// Set cooldown time (refractory_ms)
+    pub fn set_refractory_ms(&mut self, ms: u64) {
+        self.config.refractory_ms = ms;
     }
 
     /// Add a gesture to track
@@ -208,28 +276,40 @@ impl Recognizer {
 
             gesture.current_distance = Some(best_distance);
 
-            // Hysteresis: re-arm when distance goes above threshold (5% buffer)
-            // This prevents rapid re-triggering when distance oscillates around threshold
-            let rearm_threshold = gesture.threshold * 1.05;
-            if best_distance >= rearm_threshold {
-                gesture.armed = true;
+            // Track debounce timing: when did we first go below threshold?
+            let below_threshold = best_distance < gesture.threshold;
+
+            if below_threshold {
+                // Start tracking if we just dropped below threshold
+                if gesture.below_threshold_since.is_none() {
+                    gesture.below_threshold_since = Some(Instant::now());
+                }
+            } else {
+                // Reset tracking when we go above threshold
+                gesture.below_threshold_since = None;
             }
 
-            // Check if it's a hit (must be armed and below threshold)
-            let is_hit = best_distance < gesture.threshold
-                && gesture.armed
-                && !gesture.in_refractory(self.refractory_duration);
+            // Hit fires when:
+            // 1. Below threshold
+            // 2. Has been below threshold for confirm_ms (debounce)
+            // 3. Not in cooldown (refractory period)
+            let confirm_duration = Duration::from_millis(self.config.confirm_ms);
+            let refractory_duration = Duration::from_millis(self.config.refractory_ms);
+
+            let is_confirmed = gesture.is_confirmed(confirm_duration);
+            let not_in_cooldown = !gesture.in_refractory(refractory_duration);
+            let is_hit = below_threshold && is_confirmed && not_in_cooldown;
 
             if is_hit {
                 gesture.record_hit();
-                gesture.armed = false; // Disarm until distance goes above threshold again
+                // Reset debounce tracking after hit (so we need to re-confirm for next hit)
+                gesture.below_threshold_since = None;
 
                 let result = RecognitionResult {
                     gesture_id: Some(gesture.id),
                     gesture_name: Some(gesture.name.clone()),
                     distance: best_distance,
                     threshold: gesture.threshold,
-                    is_hit: true,
                 };
 
                 // Keep track of best hit (lowest distance)
@@ -243,16 +323,15 @@ impl Recognizer {
     }
 
     /// Get current distances for all gestures (for display)
-    /// Returns: (id, name, current_distance, threshold, armed)
-    pub fn current_distances(&self) -> Vec<(u32, String, Option<f32>, f32, bool)> {
+    /// Returns: (id, name, current_distance, threshold)
+    pub fn current_distances(&self) -> Vec<(u32, String, Option<f32>, f32)> {
         self.gestures
             .iter()
-            .map(|g| (g.id, g.name.clone(), g.current_distance, g.threshold, g.armed))
+            .map(|g| (g.id, g.name.clone(), g.current_distance, g.threshold))
             .collect()
     }
 
     /// Update threshold for a gesture
-    #[allow(dead_code)]
     pub fn set_threshold(&mut self, gesture_id: u32, threshold: f32) {
         if let Some(gesture) = self.get_gesture_mut(gesture_id) {
             gesture.threshold = threshold;
@@ -273,6 +352,18 @@ impl Recognizer {
             .map(|g| g.examples.len())
             .unwrap_or(0)
     }
+
+    /// Get the current refractory period in milliseconds
+    #[allow(dead_code)]
+    pub fn refractory_ms(&self) -> u64 {
+        self.config.refractory_ms
+    }
+
+    /// Get the current confirm (debounce) period in milliseconds
+    #[allow(dead_code)]
+    pub fn confirm_ms(&self) -> u64 {
+        self.config.confirm_ms
+    }
 }
 
 /// Hit log entry
@@ -282,6 +373,7 @@ pub struct HitLogEntry {
     #[allow(dead_code)]
     pub gesture_id: u32,
     pub gesture_name: String,
+    #[allow(dead_code)]
     pub distance: f32,
     pub osc_address: String,
 }
@@ -389,14 +481,14 @@ mod tests {
 
     #[test]
     fn test_recognizer_creation() {
-        let recognizer = Recognizer::new(1000, 100, 500);
+        let recognizer = Recognizer::new(1000, 100);
         assert!(!recognizer.is_active());
         assert_eq!(recognizer.gestures().len(), 0);
     }
 
     #[test]
     fn test_recognizer_add_gesture() {
-        let mut recognizer = Recognizer::new(1000, 100, 500);
+        let mut recognizer = Recognizer::new(1000, 100);
         recognizer.add_gesture(1, "wave", "/gesture/1", 15.0);
         recognizer.add_gesture(2, "jump", "/gesture/2", 20.0);
 
@@ -408,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_recognizer_add_example() {
-        let mut recognizer = Recognizer::new(1000, 100, 500);
+        let mut recognizer = Recognizer::new(1000, 100);
         recognizer.add_gesture(1, "wave", "/gesture/1", 15.0);
 
         let example = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
@@ -419,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_recognizer_process_frame_inactive() {
-        let mut recognizer = Recognizer::new(1000, 10, 500);
+        let mut recognizer = Recognizer::new(1000, 10);
         recognizer.add_gesture(1, "wave", "/gesture/1", 15.0);
 
         // Add example
@@ -433,7 +525,12 @@ mod tests {
 
     #[test]
     fn test_recognizer_detects_match() {
-        let mut recognizer = Recognizer::new(1000, 5, 500);
+        // Use zero confirm_ms for instant hit detection in tests
+        let config = RecognitionConfig {
+            confirm_ms: 0,
+            refractory_ms: 500,
+        };
+        let mut recognizer = Recognizer::with_config(1000, 5, config);
         recognizer.add_gesture(1, "wave", "/gesture/1", 5.0); // Low threshold (normalized scale)
 
         // Add a simple example
@@ -455,7 +552,12 @@ mod tests {
 
     #[test]
     fn test_recognizer_refractory_prevents_double_trigger() {
-        let mut recognizer = Recognizer::new(1000, 3, 1000); // 1 second refractory
+        // Use zero confirm_ms for instant hit, 1 second cooldown
+        let config = RecognitionConfig {
+            confirm_ms: 0,
+            refractory_ms: 1000,
+        };
+        let mut recognizer = Recognizer::with_config(1000, 3, config);
         recognizer.add_gesture(1, "wave", "/gesture/1", 5.0); // Normalized scale
 
         let example = vec![vec![1.0], vec![1.0], vec![1.0]];
@@ -472,6 +574,35 @@ mod tests {
 
         // Immediately after, should be in refractory
         assert!(gesture.in_refractory(Duration::from_millis(1000)));
+    }
+
+    #[test]
+    fn test_debounce_prevents_instant_hit() {
+        // Use 100ms debounce
+        let config = RecognitionConfig {
+            confirm_ms: 100,
+            refractory_ms: 500,
+        };
+        let mut recognizer = Recognizer::with_config(1000, 3, config);
+        recognizer.add_gesture(1, "wave", "/gesture/1", 5.0);
+
+        let example = vec![vec![1.0], vec![1.0], vec![1.0]];
+        recognizer.add_example(1, example);
+
+        recognizer.start();
+
+        // First frames should NOT trigger hit immediately due to debounce
+        let result = recognizer.process_frame(vec![1.0]);
+        assert!(result.is_none()); // No hit yet - need to wait for confirm_ms
+
+        recognizer.process_frame(vec![1.0]);
+        let result = recognizer.process_frame(vec![1.0]);
+        assert!(result.is_none()); // Still no hit - confirm_ms not elapsed
+
+        // After waiting, the hit should fire
+        std::thread::sleep(Duration::from_millis(110));
+        let result = recognizer.process_frame(vec![1.0]);
+        assert!(result.is_some()); // Now we get the hit
     }
 
     #[test]

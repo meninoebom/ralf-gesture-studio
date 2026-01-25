@@ -4,7 +4,7 @@ use eframe::egui;
 
 use crate::model::{Vocabulary, Example, save_vocabulary, load_vocabulary, default_vocabulary_dir};
 use crate::osc::{OscReceiverHandle, ConnectionStatus, OscSender, SenderStatus};
-use crate::engine::{Recognizer, HitLog, TrainingSession, TrainingConfig, BaselineConfig, SessionState};
+use crate::engine::{Recognizer, HitLog, TrainingSession, TrainingConfig, BaselineConfig, SessionState, RecognitionConfig};
 
 // Custom colors - gold instead of yellow for better readability
 const GOLD: egui::Color32 = egui::Color32::from_rgb(255, 185, 50);
@@ -82,6 +82,8 @@ pub struct GestureStudioApp {
     baseline_state: BaselineState,
     /// Baseline recording configuration
     baseline_config: BaselineConfig,
+    /// Recognition config (debounce + cooldown)
+    recognition_config: RecognitionConfig,
 }
 
 impl GestureStudioApp {
@@ -111,7 +113,9 @@ impl GestureStudioApp {
         let osc_sender = OscSender::new(&vocabulary.output.host, vocabulary.output.port);
 
         // Create recognizer - buffer 10 seconds at 60fps, match window of 3 seconds
-        let mut recognizer = Recognizer::new(600, 180, 1000);
+        // Default recognition config: 80ms debounce, 500ms cooldown
+        let recognition_config = RecognitionConfig::default();
+        let mut recognizer = Recognizer::with_config(600, 180, recognition_config.clone());
 
         // Add gestures to recognizer
         for gesture in &vocabulary.gestures {
@@ -143,6 +147,7 @@ impl GestureStudioApp {
             renaming_vocabulary: None,
             baseline_state: BaselineState::Idle,
             baseline_config: BaselineConfig::default(),
+            recognition_config,
         }
     }
 
@@ -152,7 +157,7 @@ impl GestureStudioApp {
         let was_active = self.recognizer.is_active();
 
         // Rebuild recognizer with current vocabulary
-        self.recognizer = Recognizer::new(600, 180, 1000);
+        self.recognizer = Recognizer::with_config(600, 180, self.recognition_config.clone());
 
         for gesture in &self.vocabulary.gestures {
             self.recognizer.add_gesture(
@@ -365,7 +370,16 @@ impl eframe::App for GestureStudioApp {
         });
 
         // Poll the OSC receiver for new frames
-        let frames = self.osc_receiver.poll();
+        let mut frames = self.osc_receiver.poll();
+
+        // In Performance mode, only process the most recent frame to avoid backlog
+        // (DTW is expensive, we can't keep up with 60fps of full processing)
+        if self.mode == AppMode::Performance && frames.len() > 1 {
+            // Keep only the last frame, discard older ones
+            let last_frame = frames.pop().unwrap();
+            frames.clear();
+            frames.push(last_frame);
+        }
 
         // Process frames
         for frame in frames {
@@ -1216,19 +1230,70 @@ impl GestureStudioApp {
 
     /// Render the gesture monitor panel (Performance mode)
     fn show_monitor_panel(&mut self, ui: &mut egui::Ui) {
+        // Check for recent hits (for flash indicators)
+        let recent_hits = self.hit_log.recent(1);
+        let recent_hit_info: Option<(String, u128)> = recent_hits.first().map(|h| {
+            (h.gesture_name.clone(), h.timestamp.elapsed().as_millis())
+        });
+
+        // LARGE HIT INDICATOR - visible from far away
+        egui::Frame::group(ui.style())
+            .fill(egui::Color32::from_rgb(20, 20, 20))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_height(80.0);
+
+                ui.centered_and_justified(|ui| {
+                    if let Some((hit_name, ms)) = &recent_hit_info {
+                        if *ms < 800 {
+                            ui.colored_label(
+                                BRIGHT_GREEN,
+                                egui::RichText::new(format!("● {}", hit_name))
+                                    .size(48.0)
+                                    .strong()
+                            );
+                        } else {
+                            ui.colored_label(
+                                egui::Color32::DARK_GRAY,
+                                egui::RichText::new("—").size(48.0)
+                            );
+                        }
+                    } else {
+                        ui.colored_label(
+                            egui::Color32::DARK_GRAY,
+                            egui::RichText::new("—").size(48.0)
+                        );
+                    }
+                });
+            });
+
+        ui.add_space(8.0);
+
+        // Baseline info panel
+        if let Some(ref baseline) = self.vocabulary.baseline {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::GRAY,
+                        egui::RichText::new(format!("Baseline: {} frames | Thresholds auto-calibrated", baseline.len())).size(14.0));
+                });
+            });
+            ui.add_space(4.0);
+        }
+
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
 
             ui.horizontal(|ui| {
-                ui.strong("GESTURE MONITOR");
+                ui.label(egui::RichText::new("GESTURE MONITOR").strong().size(16.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Show buffer status
                     let buffer_len = self.recognizer.buffer.len();
                     let buffer_needed = 90; // window_size / 2
                     if buffer_len < buffer_needed {
-                        ui.colored_label(GOLD, format!("Buffer: {}/{}", buffer_len, buffer_needed));
+                        ui.colored_label(GOLD, egui::RichText::new(format!("Buffer: {}/{}", buffer_len, buffer_needed)).size(14.0));
                     } else {
-                        ui.colored_label(BRIGHT_GREEN, format!("Buffer: {}", buffer_len));
+                        ui.colored_label(BRIGHT_GREEN, egui::RichText::new(format!("Buffer: {}", buffer_len)).size(14.0));
                     }
 
                     ui.add_space(20.0);
@@ -1236,7 +1301,7 @@ impl GestureStudioApp {
                     // Show recognizer status
                     let status_text = if self.recognizer.is_active() { "ACTIVE" } else { "STOPPED" };
                     let status_color = if self.recognizer.is_active() { BRIGHT_GREEN } else { BRIGHT_RED };
-                    ui.colored_label(status_color, status_text);
+                    ui.colored_label(status_color, egui::RichText::new(status_text).size(14.0));
                 });
             });
             ui.separator();
@@ -1247,28 +1312,21 @@ impl GestureStudioApp {
             // Collect threshold changes to apply after
             let mut threshold_changes: Vec<(u32, f32)> = Vec::new();
 
-            // Check for recent hits (for flash indicators)
-            let recent_hits = self.hit_log.recent(1);
-            let recent_hit_info: Option<(String, u128)> = recent_hits.first().map(|h| {
-                (h.gesture_name.clone(), h.timestamp.elapsed().as_millis())
-            });
-
-            // Use Grid for clean layout
+            // Use Grid for clean layout - LARGER FONTS
             egui::Grid::new("gesture_monitor_grid")
-                .num_columns(5)
-                .spacing([12.0, 8.0])
+                .num_columns(4)
+                .spacing([16.0, 12.0])
                 .striped(true)
                 .show(ui, |ui| {
                     // Header row
-                    ui.strong("Gesture");
-                    ui.strong("Distance");
-                    ui.strong("Threshold");
-                    ui.label(""); // Armed indicator
-                    ui.label(""); // Status column
+                    ui.label(egui::RichText::new("Gesture").strong().size(16.0));
+                    ui.label(egui::RichText::new("Distance").strong().size(16.0));
+                    ui.label(egui::RichText::new("< Threshold").strong().size(16.0));
+                    ui.label(""); // Hit column
                     ui.end_row();
 
                     // Gesture rows
-                    for (id, name, current_dist, threshold, armed) in &distances {
+                    for (id, name, current_dist, threshold) in &distances {
                         let example_count = self.recognizer.example_count(*id);
                         let has_examples = example_count > 0;
 
@@ -1279,24 +1337,24 @@ impl GestureStudioApp {
 
                         // Gesture name with example count (fixed width)
                         ui.allocate_ui_with_layout(
-                            egui::vec2(120.0, 20.0),
+                            egui::vec2(140.0, 28.0),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
                                 if has_examples {
-                                    ui.label(format!("{} ({})", name, example_count));
+                                    ui.label(egui::RichText::new(format!("{} ({})", name, example_count)).size(18.0));
                                 } else {
-                                    ui.colored_label(GOLD, format!("{} (train)", name));
+                                    ui.colored_label(GOLD, egui::RichText::new(format!("{} (train)", name)).size(18.0));
                                 }
                             }
                         );
 
-                        // Current distance (fixed width) - this is what user needs to get BELOW threshold
+                        // Current distance (fixed width) - LARGE, this is key info
                         ui.allocate_ui_with_layout(
-                            egui::vec2(60.0, 20.0),
+                            egui::vec2(90.0, 28.0),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
                                 if !has_examples {
-                                    ui.label("--");
+                                    ui.label(egui::RichText::new("--").size(22.0));
                                 } else {
                                     match current_dist {
                                         Some(dist) => {
@@ -1306,10 +1364,10 @@ impl GestureStudioApp {
                                             } else {
                                                 egui::Color32::LIGHT_GRAY
                                             };
-                                            ui.colored_label(color, format!("{:.0}", dist));
+                                            ui.colored_label(color, egui::RichText::new(format!("{:.0}", dist)).size(22.0).strong());
                                         }
                                         None => {
-                                            ui.colored_label(egui::Color32::GRAY, "...");
+                                            ui.colored_label(egui::Color32::GRAY, egui::RichText::new("...").size(22.0));
                                         }
                                     }
                                 }
@@ -1328,32 +1386,17 @@ impl GestureStudioApp {
                                 threshold_changes.push((*id, thresh));
                             }
 
-                            // Show numeric value
-                            ui.colored_label(egui::Color32::GRAY, format!("{:.0}", thresh));
+                            // Show numeric value - larger
+                            ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("{:.0}", thresh)).size(16.0));
                         });
-
-                        // Armed indicator (fixed width)
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(50.0, 20.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                if !has_examples {
-                                    ui.label("");
-                                } else if *armed {
-                                    ui.colored_label(BRIGHT_GREEN, "READY");
-                                } else {
-                                    ui.colored_label(egui::Color32::DARK_GRAY, "wait");
-                                }
-                            }
-                        );
 
                         // Hit indicator (fixed width)
                         ui.allocate_ui_with_layout(
-                            egui::vec2(50.0, 20.0),
+                            egui::vec2(70.0, 28.0),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
                                 if had_recent_hit {
-                                    ui.colored_label(BRIGHT_GREEN, "● HIT");
+                                    ui.colored_label(BRIGHT_GREEN, egui::RichText::new("● HIT").size(18.0).strong());
                                 }
                             }
                         );
@@ -1363,8 +1406,41 @@ impl GestureStudioApp {
                 });
 
             ui.add_space(8.0);
-            ui.colored_label(egui::Color32::GRAY, "Distance must go BELOW threshold to trigger. Higher threshold = easier to hit.");
-            ui.colored_label(egui::Color32::GRAY, "After a hit, return to rest position (READY) before next hit can trigger.");
+
+            // Recognition timing controls
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::GRAY, egui::RichText::new("HIT fires when Distance stays below Threshold").size(13.0));
+            });
+
+            ui.horizontal(|ui| {
+                // Debounce control
+                ui.label("Debounce:");
+                let mut confirm = self.recognition_config.confirm_ms as i32;
+                if ui.add(egui::DragValue::new(&mut confirm)
+                    .range(0..=500)
+                    .speed(5)
+                    .suffix("ms")).changed()
+                {
+                    self.recognition_config.confirm_ms = confirm as u64;
+                    self.recognizer.set_confirm_ms(self.recognition_config.confirm_ms);
+                }
+                ui.colored_label(egui::Color32::GRAY, "(filters noise)");
+
+                ui.add_space(20.0);
+
+                // Cooldown control
+                ui.label("Cooldown:");
+                let mut refractory = self.recognition_config.refractory_ms as i32;
+                if ui.add(egui::DragValue::new(&mut refractory)
+                    .range(100..=2000)
+                    .speed(10)
+                    .suffix("ms")).changed()
+                {
+                    self.recognition_config.refractory_ms = refractory as u64;
+                    self.recognizer.set_refractory_ms(self.recognition_config.refractory_ms);
+                }
+                ui.colored_label(egui::Color32::GRAY, "(min time between hits)");
+            });
 
             // Apply threshold changes
             for (id, new_threshold) in threshold_changes {

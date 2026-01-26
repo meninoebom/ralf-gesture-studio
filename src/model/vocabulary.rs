@@ -92,7 +92,7 @@ impl Gesture {
             id,
             name: name.to_string(),
             osc_address: format!("/gesture/{}", id),
-            threshold: 1500.0, // Default threshold (DTW distance - adjust based on your data scale)
+            threshold: 5000.0, // Default threshold - higher value for smoother recognition
             created_at: Utc::now(),
             examples: Vec::new(),
         }

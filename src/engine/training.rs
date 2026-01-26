@@ -40,9 +40,9 @@ impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             reps: 5,
-            duration_secs: 3.0,
+            duration_secs: 2.0,  // Reduced from 3.0 for quicker training
             rest_secs: 2.0,
-            countdown_secs: 3.0,
+            countdown_secs: 2.0, // Reduced from 3.0 for quicker count-in
         }
     }
 }

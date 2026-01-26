@@ -13,6 +13,10 @@ const BRIGHT_RED: egui::Color32 = egui::Color32::from_rgb(255, 100, 100);
 const BRIGHT_BLUE: egui::Color32 = egui::Color32::from_rgb(100, 150, 255);
 const BRIGHT_ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 165, 50);
 
+// Panel background colors for improved contrast
+const PANEL_BG_DARK: egui::Color32 = egui::Color32::from_rgb(28, 28, 32);
+const PANEL_BG_MEDIUM: egui::Color32 = egui::Color32::from_rgb(35, 35, 40);
+
 /// The two modes of the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -372,15 +376,36 @@ impl eframe::App for GestureStudioApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Mode selector dropdown (disabled during training)
+                    // Mode selector toggle buttons (disabled during training)
                     let old_mode = self.mode;
                     ui.add_enabled_ui(!self.training_session.is_active(), |ui| {
-                        egui::ComboBox::from_id_salt("mode_selector")
-                            .selected_text(self.mode.as_str())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.mode, AppMode::Training, "Training");
-                                ui.selectable_value(&mut self.mode, AppMode::Performance, "Performance");
-                            });
+                        // Performance button (right side in RTL layout)
+                        let perf_selected = self.mode == AppMode::Performance;
+                        let perf_btn = egui::Button::new(
+                            egui::RichText::new("PERFORMANCE")
+                                .size(16.0)
+                                .color(if perf_selected { egui::Color32::WHITE } else { egui::Color32::GRAY })
+                        )
+                        .fill(if perf_selected { BRIGHT_GREEN } else { egui::Color32::from_rgb(50, 50, 50) })
+                        .min_size(egui::vec2(130.0, 32.0));
+
+                        if ui.add(perf_btn).clicked() && !perf_selected {
+                            self.mode = AppMode::Performance;
+                        }
+
+                        // Training button
+                        let train_selected = self.mode == AppMode::Training;
+                        let train_btn = egui::Button::new(
+                            egui::RichText::new("TRAINING")
+                                .size(16.0)
+                                .color(if train_selected { egui::Color32::WHITE } else { egui::Color32::GRAY })
+                        )
+                        .fill(if train_selected { BRIGHT_BLUE } else { egui::Color32::from_rgb(50, 50, 50) })
+                        .min_size(egui::vec2(110.0, 32.0));
+
+                        if ui.add(train_btn).clicked() && !train_selected {
+                            self.mode = AppMode::Training;
+                        }
                     });
 
                     // Start/stop recognizer when switching modes
@@ -447,7 +472,9 @@ impl eframe::App for GestureStudioApp {
 impl GestureStudioApp {
     /// Render the vocabulary panel
     fn show_vocabulary_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        egui::Frame::group(ui.style())
+            .fill(PANEL_BG_DARK)
+            .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
             ui.horizontal(|ui| {
@@ -523,7 +550,9 @@ impl GestureStudioApp {
 
     /// Render the connection panel
     fn show_connection_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        egui::Frame::group(ui.style())
+            .fill(PANEL_BG_MEDIUM)
+            .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
             ui.horizontal(|ui| {
@@ -633,7 +662,9 @@ impl GestureStudioApp {
         // Disable during active training
         let enabled = !self.training_session.is_active();
 
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        egui::Frame::group(ui.style())
+            .fill(PANEL_BG_DARK)
+            .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
             ui.horizontal(|ui| {
@@ -806,7 +837,9 @@ impl GestureStudioApp {
 
     /// Render the training panel
     fn show_train_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        egui::Frame::group(ui.style())
+            .fill(PANEL_BG_MEDIUM)
+            .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
             ui.horizontal(|ui| {
@@ -832,30 +865,30 @@ impl GestureStudioApp {
                 ui.add_enabled_ui(is_idle, |ui| {
                     ui.label("Reps:");
                     let mut reps = self.training_config.reps as i32;
-                    if ui.add(egui::DragValue::new(&mut reps).range(1..=20)).changed() {
+                    if ui.add(egui::DragValue::new(&mut reps).range(1..=20).speed(0.5)).changed() {
                         self.training_config.reps = reps as u32;
                     }
 
                     ui.add_space(10.0);
                     ui.label("Count-in:");
-                    ui.add(egui::DragValue::new(&mut self.training_config.countdown_secs)
-                        .range(1.0..=10.0)
-                        .speed(0.1)
-                        .suffix("s"));
+                    let mut countdown = self.training_config.countdown_secs.round() as i32;
+                    if ui.add(egui::DragValue::new(&mut countdown).range(1..=10).speed(0.5).suffix("s")).changed() {
+                        self.training_config.countdown_secs = countdown as f32;
+                    }
 
                     ui.add_space(10.0);
                     ui.label("Capture:");
-                    ui.add(egui::DragValue::new(&mut self.training_config.duration_secs)
-                        .range(0.5..=10.0)
-                        .speed(0.1)
-                        .suffix("s"));
+                    let mut duration = self.training_config.duration_secs.round() as i32;
+                    if ui.add(egui::DragValue::new(&mut duration).range(1..=10).speed(0.5).suffix("s")).changed() {
+                        self.training_config.duration_secs = duration as f32;
+                    }
 
                     ui.add_space(10.0);
                     ui.label("Rest:");
-                    ui.add(egui::DragValue::new(&mut self.training_config.rest_secs)
-                        .range(0.5..=10.0)
-                        .speed(0.1)
-                        .suffix("s"));
+                    let mut rest = self.training_config.rest_secs.round() as i32;
+                    if ui.add(egui::DragValue::new(&mut rest).range(1..=10).speed(0.5).suffix("s")).changed() {
+                        self.training_config.rest_secs = rest as f32;
+                    }
                 });
             });
 
@@ -1102,7 +1135,9 @@ impl GestureStudioApp {
 
         ui.add_space(8.0);
 
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        egui::Frame::group(ui.style())
+            .fill(PANEL_BG_DARK)
+            .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
             ui.horizontal(|ui| {
@@ -1236,6 +1271,15 @@ impl GestureStudioApp {
                 });
 
             ui.add_space(8.0);
+
+            // Threshold direction hints
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::DARK_GRAY, egui::RichText::new("← Stricter").size(12.0));
+                ui.add_space(ui.available_width() - 80.0);
+                ui.colored_label(egui::Color32::DARK_GRAY, egui::RichText::new("Easier →").size(12.0));
+            });
+
+            ui.add_space(4.0);
 
             // Recognition timing controls
             ui.horizontal(|ui| {

@@ -1,7 +1,17 @@
 //! Recognition engine for gesture matching.
 //!
 //! This module contains the core algorithms for gesture recognition,
-//! including Dynamic Time Warping (DTW) for comparing gesture sequences.
+//! using a Wekinator-style DTW approach.
+//!
+//! ## Algorithm (Wekinator-Style)
+//!
+//! The recognizer is modeled after Wekinator's DtwModel.java:
+//! - Compare against all training examples (not prototypes)
+//! - Try multiple candidate window sizes based on example lengths
+//! - Simple threshold check: distance < threshold = match
+//! - Explicit "no match" state when nothing is close enough
+//!
+//! Reference: `fiebrink1/wekinator` - `src/wekimini/learning/dtw/DtwModel.java`
 
 pub mod dtw;
 pub mod buffer;
@@ -16,7 +26,7 @@ pub use training::{TrainingSession, TrainingConfig, SessionState};
 #[allow(unused_imports)]
 pub use buffer::RecordingSession;
 
-// Re-export for external consumers and future use
+// Re-export DTW primitives for external consumers
 #[allow(unused_imports)]
 pub use dtw::{
     Frame,
@@ -24,7 +34,15 @@ pub use dtw::{
     euclidean_distance,
     dtw_distance,
     dtw_distance_normalized,
+    // Constrained variants (available for future optimization)
+    dtw_distance_constrained,
+    dtw_distance_constrained_normalized,
     find_best_match,
+    // Motion analysis utilities
+    motion_energy,
+    average_motion_energy,
+    is_active,
+    compute_prototype,
 };
 
 #[allow(unused_imports)]

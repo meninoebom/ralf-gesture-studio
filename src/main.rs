@@ -19,8 +19,8 @@ fn main() -> eframe::Result<()> {
     // Configure the native window
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([800.0, 700.0])
-            .with_min_inner_size([600.0, 400.0]),
+            .with_inner_size([1400.0, 900.0])  // Larger default for visibility from distance
+            .with_min_inner_size([800.0, 600.0]),
         ..Default::default()
     };
 

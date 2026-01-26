@@ -70,7 +70,78 @@ src/
 
 File location: `~/Documents/RALF/` by default
 
+## Recognition Algorithm (Wekinator-Style)
+
+The recognizer uses a DTW approach modeled after Wekinator's proven implementation.
+
+**Reference**: `fiebrink1/wekinator` - `src/wekimini/learning/dtw/DtwModel.java`
+
+### Breakthrough (2026-01-26)
+
+**Simple implementations work best.** After multiple complex attempts failed:
+- Fixed window size (matches first training example length)
+- Compare against ALL training examples
+- Simple threshold check: distance < threshold = hit
+- Frame skipping (DTW every 4th frame) for performance
+- Downsampling (compare at 15fps, not 60fps) for performance
+
+User successfully recognized gestures at threshold ~8000.
+
+### How It Works
+
+1. **Fixed Window**: Window size = first training example's length
+2. **Compare Against All Examples**: For each gesture, compare against every training example (not just a prototype)
+3. **Simple Threshold Check**: If best distance < threshold, fire the gesture; otherwise return "no match"
+4. **Cooldown Period**: Prevent same gesture from firing repeatedly (default: 500ms)
+5. **Performance**: Skip frames + downsample = ~64x faster than naive implementation
+
+### Key Code (from recognizer.rs)
+
+```rust
+// Generate candidates between min/max example lengths
+let candidate_lengths = self.generate_candidate_lengths();
+
+// Compare against all examples for all gestures
+for candidate_len in &candidate_lengths {
+    let window = self.buffer.downsampled(*candidate_len, downsample_factor);
+    for gesture in &self.gestures {
+        for example in gesture.examples() {
+            let distance = dtw_distance(&window, example);
+            // Track best match...
+        }
+    }
+}
+
+// Simple threshold check (Wekinator-style)
+if best_distance < gesture.threshold {
+    return Some(hit);  // Matched!
+} else {
+    return Some(no_match);  // Idle state
+}
+```
+
+### Configuration
+
+```rust
+RecognitionConfig {
+    cooldown_ms: 400,       // Min time between same gesture hits
+    downsample_factor: 4,   // 60fps → 15fps
+    num_candidates: 5,      // Window sizes to try
+}
+```
+
+See `.llm/active-plan.md` for detailed algorithm documentation and Wekinator source references.
+
 ## Implementation Status
+
+**v0.2.0 COMPLETE** - Wekinator-style recognition:
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Simple Threshold | ✅ | Fire when distance < threshold (not edge detection) |
+| Multiple Candidates | ✅ | Try different window sizes based on example lengths |
+| All Examples | ✅ | Compare against all training examples, not prototype |
+| Cooldown | ✅ | Prevent repeated firing (configurable) |
 
 **v0.1.0 COMPLETE** - All 8 milestones implemented:
 

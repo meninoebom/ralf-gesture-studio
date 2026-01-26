@@ -415,11 +415,29 @@ impl eframe::App for GestureStudioApp {
                     self.show_train_panel(ui);
                 }
 
-                // Performance mode panels
+                // Performance mode panels - side by side layout
                 if self.mode == AppMode::Performance {
-                    self.show_monitor_panel(ui);
-                    ui.add_space(8.0);
-                    self.show_hit_log_panel(ui);
+                    ui.horizontal(|ui| {
+                        // Left side: Monitor panel (60% width)
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width() * 0.55, ui.available_height()),
+                            egui::Layout::top_down(egui::Align::LEFT),
+                            |ui| {
+                                self.show_monitor_panel(ui);
+                            }
+                        );
+
+                        ui.add_space(8.0);
+
+                        // Right side: Hit log (40% width) - larger and more visible
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), ui.available_height()),
+                            egui::Layout::top_down(egui::Align::LEFT),
+                            |ui| {
+                                self.show_hit_log_panel(ui);
+                            }
+                        );
+                    });
                 }
             });
         });
@@ -1059,23 +1077,24 @@ impl GestureStudioApp {
 
                 ui.centered_and_justified(|ui| {
                     if let Some((hit_name, ms)) = &recent_hit_info {
-                        if *ms < 800 {
+                        // Show hit for only 300ms so it's clear when hit ends
+                        if *ms < 300 {
                             ui.colored_label(
                                 BRIGHT_GREEN,
                                 egui::RichText::new(format!("● {}", hit_name))
-                                    .size(48.0)
+                                    .size(56.0)
                                     .strong()
                             );
                         } else {
                             ui.colored_label(
-                                egui::Color32::DARK_GRAY,
-                                egui::RichText::new("—").size(48.0)
+                                egui::Color32::from_rgb(40, 40, 40),
+                                egui::RichText::new("—").size(56.0)
                             );
                         }
                     } else {
                         ui.colored_label(
-                            egui::Color32::DARK_GRAY,
-                            egui::RichText::new("—").size(48.0)
+                            egui::Color32::from_rgb(40, 40, 40),
+                            egui::RichText::new("—").size(56.0)
                         );
                     }
                 });
@@ -1089,16 +1108,25 @@ impl GestureStudioApp {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("GESTURE MONITOR").strong().size(16.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Show buffer status
+                    // Show debug info
                     let buffer_len = self.recognizer.buffer.len();
-                    let buffer_needed = 90; // window_size / 2
-                    if buffer_len < buffer_needed {
-                        ui.colored_label(GOLD, egui::RichText::new(format!("Buffer: {}/{}", buffer_len, buffer_needed)).size(14.0));
+                    let window_size = self.recognizer.window_size();
+                    let total_examples = self.recognizer.total_example_count();
+
+                    // Buffer status - need window_size frames to start matching
+                    if window_size == 0 {
+                        ui.colored_label(BRIGHT_RED, egui::RichText::new("No examples").size(12.0));
+                    } else if buffer_len < window_size {
+                        ui.colored_label(GOLD, egui::RichText::new(format!("Filling: {}/{}", buffer_len, window_size)).size(12.0));
                     } else {
-                        ui.colored_label(BRIGHT_GREEN, egui::RichText::new(format!("Buffer: {}", buffer_len)).size(14.0));
+                        ui.colored_label(BRIGHT_GREEN, egui::RichText::new(format!("Ready: {}", buffer_len)).size(12.0));
                     }
 
-                    ui.add_space(20.0);
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new(format!("Win:{}", window_size)).size(12.0));
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new(format!("Ex:{}", total_examples)).size(12.0));
+                    ui.add_space(10.0);
 
                     // Show recognizer status
                     let status_text = if self.recognizer.is_active() { "ACTIVE" } else { "STOPPED" };
@@ -1132,9 +1160,9 @@ impl GestureStudioApp {
                         let example_count = self.recognizer.example_count(*id);
                         let has_examples = example_count > 0;
 
-                        // Check if THIS gesture had a recent hit (within 600ms)
+                        // Check if THIS gesture had a recent hit (within 300ms for quick feedback)
                         let had_recent_hit = recent_hit_info.as_ref()
-                            .map(|(hit_name, ms)| hit_name == name && *ms < 600)
+                            .map(|(hit_name, ms)| hit_name == name && *ms < 300)
                             .unwrap_or(false);
 
                         // Gesture name with example count (fixed width)
@@ -1211,7 +1239,7 @@ impl GestureStudioApp {
 
             // Recognition timing controls
             ui.horizontal(|ui| {
-                ui.colored_label(egui::Color32::GRAY, egui::RichText::new("HIT fires when Distance crosses below Threshold (edge detection)").size(13.0));
+                ui.colored_label(egui::Color32::GRAY, egui::RichText::new("HIT fires when Distance is below Threshold").size(13.0));
             });
 
             ui.horizontal(|ui| {
@@ -1241,45 +1269,65 @@ impl GestureStudioApp {
         });
     }
 
-    /// Render the hit log panel (Performance mode)
+    /// Render the hit log panel (Performance mode) - LARGE for visibility from far away
     fn show_hit_log_panel(&self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        egui::Frame::group(ui.style())
+            .fill(egui::Color32::from_rgb(15, 15, 15))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(400.0);
 
-            ui.horizontal(|ui| {
-                ui.strong("HIT LOG");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.colored_label(egui::Color32::GRAY, format!("{} total", self.hit_log.len()));
-                });
-            });
-            ui.separator();
-
-            let recent = self.hit_log.recent(8);
-            if recent.is_empty() {
-                ui.colored_label(egui::Color32::GRAY, "No hits yet - perform a trained gesture");
-            } else {
-                for (i, entry) in recent.iter().enumerate() {
-                    let ms_ago = entry.timestamp.elapsed().as_millis();
-                    let is_recent = ms_ago < 1000;
-
-                    ui.horizontal(|ui| {
-                        // Time indicator
-                        let time_text = if ms_ago < 1000 {
-                            "just now".to_string()
-                        } else {
-                            format!("{:.0}s ago", ms_ago as f32 / 1000.0)
-                        };
-                        ui.colored_label(egui::Color32::GRAY, format!("{:>8}", time_text));
-
-                        // Gesture name - brighter if recent
-                        let name_color = if is_recent && i == 0 { BRIGHT_GREEN } else { egui::Color32::LIGHT_GRAY };
-                        ui.colored_label(name_color, &entry.gesture_name);
-
-                        // OSC address sent
-                        ui.colored_label(egui::Color32::DARK_GRAY, format!("→ {}", entry.osc_address));
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("HIT LOG").strong().size(20.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("{} total", self.hit_log.len())).size(16.0));
                     });
+                });
+                ui.separator();
+
+                let recent = self.hit_log.recent(10);
+                if recent.is_empty() {
+                    ui.add_space(20.0);
+                    ui.colored_label(
+                        egui::Color32::GRAY,
+                        egui::RichText::new("No hits yet").size(18.0)
+                    );
+                    ui.colored_label(
+                        egui::Color32::DARK_GRAY,
+                        egui::RichText::new("Perform a trained gesture").size(14.0)
+                    );
+                } else {
+                    for (i, entry) in recent.iter().enumerate() {
+                        let ms_ago = entry.timestamp.elapsed().as_millis();
+                        let is_very_recent = ms_ago < 500;
+                        let is_recent = ms_ago < 2000;
+
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            // Time indicator - larger
+                            let time_text = if ms_ago < 1000 {
+                                "NOW".to_string()
+                            } else {
+                                format!("{}s", ms_ago / 1000)
+                            };
+                            let time_color = if is_very_recent { BRIGHT_GREEN } else { egui::Color32::GRAY };
+                            ui.colored_label(time_color, egui::RichText::new(format!("{:>4}", time_text)).size(18.0));
+
+                            ui.add_space(8.0);
+
+                            // Gesture name - LARGE and bright if recent
+                            let name_size = if i == 0 && is_very_recent { 28.0 } else { 22.0 };
+                            let name_color = if is_very_recent && i == 0 {
+                                BRIGHT_GREEN
+                            } else if is_recent {
+                                egui::Color32::LIGHT_GRAY
+                            } else {
+                                egui::Color32::DARK_GRAY
+                            };
+                            ui.colored_label(name_color, egui::RichText::new(&entry.gesture_name).size(name_size).strong());
+                        });
+                    }
                 }
-            }
-        });
+            });
     }
 }

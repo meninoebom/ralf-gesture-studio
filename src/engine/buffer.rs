@@ -75,6 +75,7 @@ impl FrameBuffer {
     /// Get the most recent N frames as a sequence (for DTW matching).
     ///
     /// Returns fewer frames if the buffer doesn't have enough.
+    #[allow(dead_code)]
     pub fn recent_frames(&self, count: usize) -> Vec<Frame> {
         let start = self.frames.len().saturating_sub(count);
         self.frames
@@ -88,6 +89,27 @@ impl FrameBuffer {
     #[allow(dead_code)]
     pub fn all_frames(&self) -> Vec<Frame> {
         self.frames.iter().map(|f| f.data.clone()).collect()
+    }
+
+    /// Get downsampled frames (every Nth frame) for efficient matching.
+    ///
+    /// For DTW matching, we don't need 60fps - 15fps is sufficient.
+    /// This reduces computation by 4x when using step=4.
+    ///
+    /// # Arguments
+    /// * `count` - Maximum number of frames to include
+    /// * `step` - Take every Nth frame (1 = all frames, 4 = every 4th frame)
+    pub fn downsampled(&self, count: usize, step: usize) -> Vec<Frame> {
+        let step = step.max(1); // Minimum step of 1
+        let start = self.frames.len().saturating_sub(count * step);
+
+        self.frames
+            .iter()
+            .skip(start)
+            .step_by(step)
+            .take(count)
+            .map(|f| f.data.clone())
+            .collect()
     }
 
     /// Get frames from the last N milliseconds.
@@ -278,6 +300,42 @@ mod tests {
 
         assert!(buffer.is_empty());
         assert_eq!(buffer.len(), 0);
+    }
+
+    #[test]
+    fn test_buffer_downsampled() {
+        let mut buffer = FrameBuffer::new(100);
+
+        // Add 60 frames (simulating 1 second at 60fps)
+        for i in 0..60 {
+            buffer.push(vec![i as f32]);
+        }
+
+        // Downsample to every 4th frame, get 15 frames (simulating 15fps)
+        let downsampled = buffer.downsampled(15, 4);
+        assert_eq!(downsampled.len(), 15);
+
+        // Check that we got every 4th frame from the end
+        // Frames 0..60, step by 4 from near the end
+        // The frames should represent indices that are 4 apart
+        for i in 0..downsampled.len() - 1 {
+            let diff = downsampled[i + 1][0] - downsampled[i][0];
+            assert_eq!(diff, 4.0, "Frames should be 4 apart");
+        }
+    }
+
+    #[test]
+    fn test_buffer_downsampled_not_enough_frames() {
+        let mut buffer = FrameBuffer::new(100);
+
+        // Add only 20 frames
+        for i in 0..20 {
+            buffer.push(vec![i as f32]);
+        }
+
+        // Request 15 frames at step 4 (would need 60 frames ideally)
+        let downsampled = buffer.downsampled(15, 4);
+        assert_eq!(downsampled.len(), 5); // 20 / 4 = 5 frames available
     }
 
     #[test]

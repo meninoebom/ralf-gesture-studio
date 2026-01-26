@@ -84,6 +84,91 @@ pub fn dtw_distance(seq1: &Sequence, seq2: &Sequence) -> f32 {
     cost[n][m]
 }
 
+/// Calculate DTW distance with Sakoe-Chiba band constraint.
+///
+/// Limits the warping path to stay within a diagonal band, reducing computation
+/// from O(N×M) to O(N×W) where W is the band width.
+///
+/// This is appropriate for gesture recognition where we expect the input
+/// to roughly follow the same timing as the template.
+///
+/// # Arguments
+/// * `seq1` - First sequence
+/// * `seq2` - Second sequence
+/// * `band_width` - Maximum allowed deviation from diagonal (in frames)
+///
+/// # Returns
+///
+/// The constrained DTW distance. Returns `f32::INFINITY` if sequences are empty
+/// or if no valid path exists within the band.
+#[allow(dead_code)]
+pub fn dtw_distance_constrained(seq1: &Sequence, seq2: &Sequence, band_width: usize) -> f32 {
+    if seq1.is_empty() || seq2.is_empty() {
+        return f32::INFINITY;
+    }
+
+    let n = seq1.len();
+    let m = seq2.len();
+
+    // Create cost matrix with infinity as initial values
+    let mut cost = vec![vec![f32::INFINITY; m + 1]; n + 1];
+
+    // Base case: starting point
+    cost[0][0] = 0.0;
+
+    // Fill in the cost matrix within the Sakoe-Chiba band
+    for i in 1..=n {
+        // Calculate the band bounds for this row
+        // The diagonal would be at j = i * m / n
+        // We allow band_width deviation on each side
+        let diagonal = (i * m) / n;
+        let j_min = diagonal.saturating_sub(band_width).max(1);
+        let j_max = (diagonal + band_width + 1).min(m);
+
+        for j in j_min..=j_max {
+            let dist = euclidean_distance(&seq1[i - 1], &seq2[j - 1]);
+
+            // Minimum of three possible moves (if within band):
+            let min_prev = cost[i - 1][j - 1]
+                .min(cost[i - 1][j])
+                .min(cost[i][j - 1]);
+
+            cost[i][j] = dist + min_prev;
+        }
+    }
+
+    cost[n][m]
+}
+
+/// Calculate normalized DTW distance with Sakoe-Chiba band constraint.
+///
+/// Combines normalization with band constraint for efficient, length-independent matching.
+///
+/// # Arguments
+/// * `seq1` - First sequence
+/// * `seq2` - Second sequence
+/// * `band_fraction` - Band width as fraction of sequence length (e.g., 0.2 = 20%)
+#[allow(dead_code)]
+pub fn dtw_distance_constrained_normalized(
+    seq1: &Sequence,
+    seq2: &Sequence,
+    band_fraction: f32,
+) -> f32 {
+    if seq1.is_empty() || seq2.is_empty() {
+        return f32::INFINITY;
+    }
+
+    // Calculate band width based on the longer sequence
+    let max_len = seq1.len().max(seq2.len());
+    let band_width = ((max_len as f32) * band_fraction).ceil() as usize;
+
+    let distance = dtw_distance_constrained(seq1, seq2, band_width);
+
+    // Normalize by average length
+    let avg_len = (seq1.len() + seq2.len()) as f32 / 2.0;
+    distance / avg_len
+}
+
 /// Calculate normalized DTW distance.
 ///
 /// Normalizes the DTW distance by the length of the warping path,
@@ -133,6 +218,162 @@ pub fn find_best_match(input: &Sequence, examples: &[Sequence]) -> Option<(usize
     }
 
     Some((best_idx, best_dist))
+}
+
+// =========================================================================
+// Prototype Computation
+// =========================================================================
+
+/// Resample a sequence to a target length using linear interpolation.
+///
+/// This allows averaging examples of different lengths.
+#[allow(dead_code)]
+fn resample_sequence(seq: &Sequence, target_len: usize) -> Sequence {
+    if seq.is_empty() || target_len == 0 {
+        return Vec::new();
+    }
+
+    if seq.len() == target_len {
+        return seq.clone();
+    }
+
+    let dim = seq[0].len();
+    let mut result = Vec::with_capacity(target_len);
+
+    for i in 0..target_len {
+        // Map target index to source position
+        let src_pos = (i as f32) * ((seq.len() - 1) as f32) / ((target_len - 1) as f32).max(1.0);
+        let src_idx = src_pos.floor() as usize;
+        let frac = src_pos - src_idx as f32;
+
+        // Interpolate between frames
+        let mut frame = vec![0.0; dim];
+        if src_idx + 1 < seq.len() {
+            for d in 0..dim {
+                frame[d] = seq[src_idx][d] * (1.0 - frac) + seq[src_idx + 1][d] * frac;
+            }
+        } else {
+            frame = seq[src_idx].clone();
+        }
+        result.push(frame);
+    }
+
+    result
+}
+
+/// Compute a prototype sequence from multiple examples.
+///
+/// The prototype is computed by:
+/// 1. Resampling all examples to the median length
+/// 2. Averaging corresponding frames
+///
+/// This creates a single "canonical" example that can be matched against,
+/// reducing N comparisons to 1 per gesture.
+///
+/// Note: Currently unused - Wekinator-style recognition compares against
+/// all examples instead of a prototype. Kept for future optimization.
+///
+/// # Returns
+/// The prototype sequence, or an empty sequence if examples is empty.
+#[allow(dead_code)]
+pub fn compute_prototype(examples: &[Sequence]) -> Sequence {
+    if examples.is_empty() {
+        return Vec::new();
+    }
+
+    if examples.len() == 1 {
+        return examples[0].clone();
+    }
+
+    // Find median length
+    let mut lengths: Vec<usize> = examples.iter().map(|e| e.len()).collect();
+    lengths.sort();
+    let target_len = lengths[lengths.len() / 2];
+
+    if target_len == 0 {
+        return Vec::new();
+    }
+
+    // Resample all examples to target length
+    let resampled: Vec<Sequence> = examples
+        .iter()
+        .map(|e| resample_sequence(e, target_len))
+        .collect();
+
+    // Average corresponding frames
+    let dim = resampled[0][0].len();
+    let n_examples = resampled.len() as f32;
+    let mut prototype = Vec::with_capacity(target_len);
+
+    for t in 0..target_len {
+        let mut avg_frame = vec![0.0; dim];
+        for example in &resampled {
+            for d in 0..dim {
+                avg_frame[d] += example[t][d];
+            }
+        }
+        for d in 0..dim {
+            avg_frame[d] /= n_examples;
+        }
+        prototype.push(avg_frame);
+    }
+
+    prototype
+}
+
+// =========================================================================
+// Motion Energy / Activity Detection
+// =========================================================================
+
+/// Compute motion energy between two consecutive frames.
+///
+/// Motion energy is the sum of squared differences between frames,
+/// representing how much movement occurred. Used for activity gating -
+/// skipping DTW computation when the user is standing still.
+///
+/// # Returns
+/// The motion energy (sum of squared velocities). Returns 0.0 if frames
+/// have different lengths.
+pub fn motion_energy(prev_frame: &Frame, curr_frame: &Frame) -> f32 {
+    if prev_frame.len() != curr_frame.len() {
+        return 0.0;
+    }
+
+    prev_frame
+        .iter()
+        .zip(curr_frame.iter())
+        .map(|(a, b)| (b - a).powi(2))
+        .sum()
+}
+
+/// Compute average motion energy over a sequence of frames.
+///
+/// Returns 0.0 if sequence has fewer than 2 frames.
+#[allow(dead_code)]
+pub fn average_motion_energy(frames: &Sequence) -> f32 {
+    if frames.len() < 2 {
+        return 0.0;
+    }
+
+    let total: f32 = frames
+        .windows(2)
+        .map(|w| motion_energy(&w[0], &w[1]))
+        .sum();
+
+    total / (frames.len() - 1) as f32
+}
+
+/// Check if a sequence of frames shows enough activity for gesture matching.
+///
+/// # Arguments
+/// * `frames` - Recent frames to check
+/// * `threshold` - Minimum average motion energy to consider "active"
+///
+/// # Returns
+/// `true` if the sequence shows enough movement for gesture matching.
+#[allow(dead_code)]
+pub fn is_active(frames: &Sequence, threshold: f32) -> bool {
+    average_motion_energy(frames) >= threshold
 }
 
 #[cfg(test)]
@@ -310,6 +551,64 @@ mod tests {
     }
 
     // =========================================================================
+    // Sakoe-Chiba Constrained DTW Tests
+    // =========================================================================
+
+    #[test]
+    fn test_dtw_constrained_identical() {
+        let seq = vec![vec![1.0], vec![2.0], vec![3.0], vec![4.0], vec![5.0]];
+        let distance = dtw_distance_constrained(&seq, &seq, 2);
+        assert_eq!(distance, 0.0);
+    }
+
+    #[test]
+    fn test_dtw_constrained_similar_to_unconstrained() {
+        let seq1: Vec<Vec<f32>> = (0..20).map(|i| vec![i as f32]).collect();
+        let seq2: Vec<Vec<f32>> = (0..20).map(|i| vec![(i as f32) + 0.5]).collect();
+
+        let unconstrained = dtw_distance(&seq1, &seq2);
+        let constrained = dtw_distance_constrained(&seq1, &seq2, 4); // 20% band
+
+        // For similar sequences, constrained should be close to unconstrained
+        // Allow 10% error for approximation
+        assert!(
+            (constrained - unconstrained).abs() / unconstrained < 0.1,
+            "Constrained {} should be close to unconstrained {}",
+            constrained,
+            unconstrained
+        );
+    }
+
+    #[test]
+    fn test_dtw_constrained_handles_warping() {
+        // Same pattern, different speeds
+        let fast = vec![vec![0.0], vec![1.0], vec![2.0]];
+        let slow = vec![vec![0.0], vec![0.0], vec![1.0], vec![1.0], vec![2.0], vec![2.0]];
+
+        // With sufficient band width, should still match well
+        let distance = dtw_distance_constrained(&fast, &slow, 3);
+        assert!(distance < 1.0, "Should handle time warping, got {}", distance);
+    }
+
+    #[test]
+    fn test_dtw_constrained_empty() {
+        let seq: Sequence = vec![];
+        let other = vec![vec![1.0]];
+        assert_eq!(dtw_distance_constrained(&seq, &other, 2), f32::INFINITY);
+    }
+
+    #[test]
+    fn test_dtw_constrained_normalized() {
+        let seq1: Vec<Vec<f32>> = (0..30).map(|i| vec![i as f32]).collect();
+        let seq2: Vec<Vec<f32>> = (0..30).map(|i| vec![(i as f32) + 1.0]).collect();
+
+        let normalized = dtw_distance_constrained_normalized(&seq1, &seq2, 0.2);
+
+        // Should be reasonably small for similar sequences
+        assert!(normalized < 2.0, "Normalized distance should be small, got {}", normalized);
+    }
+
+    // =========================================================================
     // Normalized DTW Tests
     // =========================================================================
 
@@ -392,6 +691,185 @@ mod tests {
         let input: Sequence = vec![];
 
         assert!(find_best_match(&input, &examples).is_none());
+    }
+
+    // =========================================================================
+    // Prototype Computation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_resample_same_length() {
+        let seq = vec![vec![0.0], vec![1.0], vec![2.0]];
+        let resampled = resample_sequence(&seq, 3);
+        assert_eq!(resampled, seq);
+    }
+
+    #[test]
+    fn test_resample_shorter() {
+        let seq = vec![vec![0.0], vec![1.0], vec![2.0], vec![3.0], vec![4.0]];
+        let resampled = resample_sequence(&seq, 3);
+        assert_eq!(resampled.len(), 3);
+        assert_eq!(resampled[0], vec![0.0]);
+        assert_eq!(resampled[2], vec![4.0]);
+    }
+
+    #[test]
+    fn test_resample_longer() {
+        let seq = vec![vec![0.0], vec![2.0]];
+        let resampled = resample_sequence(&seq, 3);
+        assert_eq!(resampled.len(), 3);
+        assert_eq!(resampled[0], vec![0.0]);
+        assert_eq!(resampled[1], vec![1.0]); // Interpolated
+        assert_eq!(resampled[2], vec![2.0]);
+    }
+
+    #[test]
+    fn test_resample_empty() {
+        let seq: Sequence = vec![];
+        let resampled = resample_sequence(&seq, 3);
+        assert!(resampled.is_empty());
+    }
+
+    #[test]
+    fn test_compute_prototype_single_example() {
+        let examples = vec![
+            vec![vec![1.0], vec![2.0], vec![3.0]],
+        ];
+        let prototype = compute_prototype(&examples);
+        assert_eq!(prototype, examples[0]);
+    }
+
+    #[test]
+    fn test_compute_prototype_identical_examples() {
+        let example = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
+        let examples = vec![example.clone(), example.clone(), example.clone()];
+        let prototype = compute_prototype(&examples);
+        assert_eq!(prototype, example);
+    }
+
+    #[test]
+    fn test_compute_prototype_averages_frames() {
+        let examples = vec![
+            vec![vec![0.0], vec![0.0]],
+            vec![vec![2.0], vec![2.0]],
+        ];
+        let prototype = compute_prototype(&examples);
+        assert_eq!(prototype.len(), 2);
+        assert_eq!(prototype[0], vec![1.0]); // Average of 0 and 2
+        assert_eq!(prototype[1], vec![1.0]);
+    }
+
+    #[test]
+    fn test_compute_prototype_different_lengths() {
+        // Examples of different lengths - should resample to median
+        let examples = vec![
+            vec![vec![0.0], vec![1.0]],           // 2 frames
+            vec![vec![0.0], vec![0.5], vec![1.0]], // 3 frames
+            vec![vec![0.0], vec![0.25], vec![0.5], vec![0.75], vec![1.0]], // 5 frames
+        ];
+        let prototype = compute_prototype(&examples);
+        // Median length is 3
+        assert_eq!(prototype.len(), 3);
+    }
+
+    #[test]
+    fn test_compute_prototype_empty() {
+        let examples: Vec<Sequence> = vec![];
+        let prototype = compute_prototype(&examples);
+        assert!(prototype.is_empty());
+    }
+
+    #[test]
+    fn test_prototype_matches_examples_well() {
+        // Create examples with slight variations
+        let examples = vec![
+            vec![vec![0.0], vec![1.0], vec![2.0], vec![3.0]],
+            vec![vec![0.1], vec![1.1], vec![2.1], vec![3.1]],
+            vec![vec![-0.1], vec![0.9], vec![1.9], vec![2.9]],
+        ];
+
+        let prototype = compute_prototype(&examples);
+
+        // Prototype should be close to all examples
+        for example in &examples {
+            let dist = dtw_distance(&prototype, example);
+            assert!(dist < 1.0, "Prototype should be close to example, got {}", dist);
+        }
+    }
+
+    // =========================================================================
+    // Motion Energy / Activity Detection Tests
+    // =========================================================================
+
+    #[test]
+    fn test_motion_energy_stationary() {
+        let frame1 = vec![1.0, 2.0, 3.0];
+        let frame2 = vec![1.0, 2.0, 3.0]; // Identical
+        assert_eq!(motion_energy(&frame1, &frame2), 0.0);
+    }
+
+    #[test]
+    fn test_motion_energy_moving() {
+        let frame1 = vec![0.0, 0.0];
+        let frame2 = vec![1.0, 1.0]; // Moved by 1 in each dimension
+        // Energy = 1^2 + 1^2 = 2.0
+        assert_eq!(motion_energy(&frame1, &frame2), 2.0);
+    }
+
+    #[test]
+    fn test_motion_energy_different_lengths() {
+        let frame1 = vec![1.0, 2.0];
+        let frame2 = vec![1.0, 2.0, 3.0];
+        assert_eq!(motion_energy(&frame1, &frame2), 0.0);
+    }
+
+    #[test]
+    fn test_average_motion_energy_stationary() {
+        let frames = vec![
+            vec![1.0, 2.0],
+            vec![1.0, 2.0],
+            vec![1.0, 2.0],
+        ];
+        assert_eq!(average_motion_energy(&frames), 0.0);
+    }
+
+    #[test]
+    fn test_average_motion_energy_moving() {
+        let frames = vec![
+            vec![0.0],
+            vec![1.0],
+            vec![2.0],
+        ];
+        // Energy between each pair: (1-0)^2 = 1, (2-1)^2 = 1
+        // Average = 2 / 2 = 1.0
+        assert_eq!(average_motion_energy(&frames), 1.0);
+    }
+
+    #[test]
+    fn test_average_motion_energy_single_frame() {
+        let frames = vec![vec![1.0]];
+        assert_eq!(average_motion_energy(&frames), 0.0);
+    }
+
+    #[test]
+    fn test_is_active_stationary() {
+        let frames = vec![
+            vec![1.0, 2.0],
+            vec![1.0, 2.0],
+            vec![1.0, 2.0],
+        ];
+        assert!(!is_active(&frames, 0.1));
+    }
+
+    #[test]
+    fn test_is_active_moving() {
+        let frames = vec![
+            vec![0.0],
+            vec![1.0],
+            vec![2.0],
+        ];
+        assert!(is_active(&frames, 0.5)); // Average energy is 1.0
+        assert!(!is_active(&frames, 2.0)); // Threshold too high
     }
 
     // =========================================================================

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Configuration for OSC input (receiving skeleton data)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputConfig {
-    /// Number of floats per input frame (e.g., 68 for 34 joints × XY)
+    /// Number of floats per input frame (e.g., 66 for 33 MediaPipe keypoints × XY)
     pub dimensions: usize,
     /// UDP port to listen on
     pub port: u16,
@@ -15,7 +15,7 @@ pub struct InputConfig {
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
-            dimensions: 68,
+            dimensions: 66,
             port: 6448,
             address: "/wek/inputs".to_string(),
         }

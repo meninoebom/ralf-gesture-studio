@@ -166,7 +166,7 @@ mod tests {
         let vocab = Vocabulary::new("Test");
         assert_eq!(vocab.input.port, 6448);
         assert_eq!(vocab.input.address, "/wek/inputs");
-        assert_eq!(vocab.input.dimensions, 68);
+        assert_eq!(vocab.input.dimensions, 66);
     }
 
     #[test]

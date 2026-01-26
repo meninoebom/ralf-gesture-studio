@@ -5,7 +5,7 @@
 //! at different speeds.
 
 /// A frame of data - a vector of floats representing one point in time
-/// (e.g., 68 floats for 34 joints × XY coordinates)
+/// (e.g., 66 floats for 33 MediaPipe keypoints × XY coordinates)
 pub type Frame = Vec<f32>;
 
 /// A sequence of frames representing a gesture
@@ -408,9 +408,9 @@ mod tests {
 
     #[test]
     fn test_euclidean_high_dimensional() {
-        // 68 dimensions (like skeleton data)
-        let a: Vec<f32> = (0..68).map(|i| i as f32).collect();
-        let b: Vec<f32> = (0..68).map(|i| i as f32).collect();
+        // 66 dimensions (like MediaPipe skeleton data)
+        let a: Vec<f32> = (0..66).map(|i| i as f32).collect();
+        let b: Vec<f32> = (0..66).map(|i| i as f32).collect();
         assert_eq!(euclidean_distance(&a, &b), 0.0);
     }
 

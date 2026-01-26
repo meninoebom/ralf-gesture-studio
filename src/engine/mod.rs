@@ -10,7 +10,7 @@ pub mod training;
 
 // Core types used by the app
 pub use recognizer::{Recognizer, HitLog, RecognitionConfig};
-pub use training::{TrainingSession, TrainingConfig, BaselineConfig, SessionState};
+pub use training::{TrainingSession, TrainingConfig, SessionState};
 
 // Re-export for future use
 #[allow(unused_imports)]

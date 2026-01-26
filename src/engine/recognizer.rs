@@ -3,17 +3,18 @@
 //! Performs continuous DTW matching against stored examples and fires hits
 //! when gestures are recognized.
 //!
-//! ## Hit Detection Logic
+//! ## Hit Detection Logic (Edge Detection)
 //!
-//! A hit fires when ALL conditions are met:
-//! 1. Distance < Threshold (gesture matches)
-//! 2. Distance has been below threshold for `confirm_ms` (debounce - filters noise)
-//! 3. Not in cooldown from previous hit (rate limiting)
+//! A hit fires when BOTH conditions are met:
+//! 1. Distance crosses below threshold (edge detection - the moment of recognition)
+//! 2. Not in cooldown from previous hit (rate limiting)
+//!
+//! This is "edge detection" - we fire at the moment distance dips below threshold,
+//! not when it stays below. This catches quick gestures that only briefly match.
 //!
 //! ## Configuration
 //!
-//! - `confirm_ms`: How long distance must stay below threshold before firing (debounce)
-//! - `refractory_ms`: Minimum time between hits for same gesture (cooldown/rate limit)
+//! - `cooldown_ms`: Minimum time between hits for same gesture (prevents rapid-fire)
 
 use std::time::{Duration, Instant};
 
@@ -23,22 +24,17 @@ use super::dtw::{dtw_distance_normalized, Frame, Sequence};
 /// Configuration for gesture recognition behavior
 #[derive(Debug, Clone)]
 pub struct RecognitionConfig {
-    /// Debounce: distance must stay below threshold for this long before hit fires (ms)
-    /// Higher = more stable, filters oscillation. Lower = more responsive.
-    /// Recommended: 50-150ms
-    pub confirm_ms: u64,
-
     /// Cooldown: minimum time between hits for same gesture (ms)
+    /// After a hit fires, ignore this gesture until cooldown expires.
     /// Prevents rapid-fire hits. Lower = faster repetition allowed.
-    /// Recommended: 300-800ms
-    pub refractory_ms: u64,
+    /// Recommended: 300-500ms for dance movements
+    pub cooldown_ms: u64,
 }
 
 impl Default for RecognitionConfig {
     fn default() -> Self {
         Self {
-            confirm_ms: 80,      // 80ms debounce - filters brief noise
-            refractory_ms: 500,  // 500ms cooldown - allows 2 hits/sec
+            cooldown_ms: 400,  // 400ms cooldown - allows ~2.5 hits/sec
         }
     }
 }
@@ -74,9 +70,9 @@ pub struct GestureState {
     pub current_distance: Option<f32>,
     /// Last time this gesture fired a hit (for cooldown)
     pub last_hit_time: Option<Instant>,
-    /// When distance first dropped below threshold (for debounce)
-    /// None = currently above threshold
-    below_threshold_since: Option<Instant>,
+    /// Whether distance was below threshold on previous frame (for edge detection)
+    /// We only fire on the transition from above to below
+    was_below_threshold: bool,
 }
 
 impl GestureState {
@@ -90,15 +86,7 @@ impl GestureState {
             examples: Vec::new(),
             current_distance: None,
             last_hit_time: None,
-            below_threshold_since: None,
-        }
-    }
-
-    /// Check if distance has been below threshold long enough (debounce check)
-    pub fn is_confirmed(&self, confirm_duration: Duration) -> bool {
-        match self.below_threshold_since {
-            Some(since) => since.elapsed() >= confirm_duration,
-            None => false,
+            was_below_threshold: false,
         }
     }
 
@@ -112,10 +100,10 @@ impl GestureState {
         !self.examples.is_empty()
     }
 
-    /// Check if this gesture is in refractory period
-    pub fn in_refractory(&self, refractory_duration: Duration) -> bool {
+    /// Check if this gesture is in cooldown period
+    pub fn in_cooldown(&self, cooldown_duration: Duration) -> bool {
         match self.last_hit_time {
-            Some(time) => time.elapsed() < refractory_duration,
+            Some(time) => time.elapsed() < cooldown_duration,
             None => false,
         }
     }
@@ -139,7 +127,7 @@ pub struct Recognizer {
     pub buffer: FrameBuffer,
     /// Gestures being tracked
     gestures: Vec<GestureState>,
-    /// Recognition configuration (debounce, cooldown)
+    /// Recognition configuration (cooldown timing)
     config: RecognitionConfig,
     /// Whether recognition is active
     active: bool,
@@ -181,14 +169,9 @@ impl Recognizer {
         self.config = config;
     }
 
-    /// Set debounce time (confirm_ms)
-    pub fn set_confirm_ms(&mut self, ms: u64) {
-        self.config.confirm_ms = ms;
-    }
-
-    /// Set cooldown time (refractory_ms)
-    pub fn set_refractory_ms(&mut self, ms: u64) {
-        self.config.refractory_ms = ms;
+    /// Set cooldown time
+    pub fn set_cooldown_ms(&mut self, ms: u64) {
+        self.config.cooldown_ms = ms;
     }
 
     /// Add a gesture to track
@@ -276,34 +259,23 @@ impl Recognizer {
 
             gesture.current_distance = Some(best_distance);
 
-            // Track debounce timing: when did we first go below threshold?
+            // Edge detection: fire when distance CROSSES below threshold
             let below_threshold = best_distance < gesture.threshold;
-
-            if below_threshold {
-                // Start tracking if we just dropped below threshold
-                if gesture.below_threshold_since.is_none() {
-                    gesture.below_threshold_since = Some(Instant::now());
-                }
-            } else {
-                // Reset tracking when we go above threshold
-                gesture.below_threshold_since = None;
-            }
+            let cooldown_duration = Duration::from_millis(self.config.cooldown_ms);
 
             // Hit fires when:
-            // 1. Below threshold
-            // 2. Has been below threshold for confirm_ms (debounce)
-            // 3. Not in cooldown (refractory period)
-            let confirm_duration = Duration::from_millis(self.config.confirm_ms);
-            let refractory_duration = Duration::from_millis(self.config.refractory_ms);
+            // 1. Distance is below threshold NOW
+            // 2. Distance was NOT below threshold on previous frame (edge detection)
+            // 3. Not in cooldown from previous hit
+            let is_crossing_down = below_threshold && !gesture.was_below_threshold;
+            let not_in_cooldown = !gesture.in_cooldown(cooldown_duration);
+            let is_hit = is_crossing_down && not_in_cooldown;
 
-            let is_confirmed = gesture.is_confirmed(confirm_duration);
-            let not_in_cooldown = !gesture.in_refractory(refractory_duration);
-            let is_hit = below_threshold && is_confirmed && not_in_cooldown;
+            // Update state for next frame's edge detection
+            gesture.was_below_threshold = below_threshold;
 
             if is_hit {
                 gesture.record_hit();
-                // Reset debounce tracking after hit (so we need to re-confirm for next hit)
-                gesture.below_threshold_since = None;
 
                 let result = RecognitionResult {
                     gesture_id: Some(gesture.id),
@@ -316,6 +288,21 @@ impl Recognizer {
                 if best_hit.is_none() || best_distance < best_hit.as_ref().unwrap().distance {
                     best_hit = Some(result);
                 }
+            }
+        }
+
+        // "Bounce back" pattern: After a hit, clear the buffer to reset to neutral state
+        // This prevents the gesture from lingering in the sliding window
+        // The system returns to "not enough data" state and must collect fresh frames
+        //
+        // IMPORTANT: We do NOT reset was_below_threshold here. Keeping it true means
+        // the user must move away (distance goes above threshold) before another hit
+        // can fire. This prevents infinite hit loops when the user stays in position.
+        if best_hit.is_some() {
+            self.buffer.clear();
+            // Clear display distances while buffer refills
+            for gesture in &mut self.gestures {
+                gesture.current_distance = None;
             }
         }
 
@@ -353,16 +340,10 @@ impl Recognizer {
             .unwrap_or(0)
     }
 
-    /// Get the current refractory period in milliseconds
+    /// Get the current cooldown period in milliseconds
     #[allow(dead_code)]
-    pub fn refractory_ms(&self) -> u64 {
-        self.config.refractory_ms
-    }
-
-    /// Get the current confirm (debounce) period in milliseconds
-    #[allow(dead_code)]
-    pub fn confirm_ms(&self) -> u64 {
-        self.config.confirm_ms
+    pub fn cooldown_ms(&self) -> u64 {
+        self.config.cooldown_ms
     }
 }
 
@@ -462,21 +443,21 @@ mod tests {
     }
 
     #[test]
-    fn test_gesture_refractory() {
+    fn test_gesture_cooldown() {
         let mut gesture = GestureState::new(1, "wave", "/gesture/1", 15.0);
 
-        // Not in refractory initially
-        assert!(!gesture.in_refractory(Duration::from_millis(500)));
+        // Not in cooldown initially
+        assert!(!gesture.in_cooldown(Duration::from_millis(500)));
 
         // Record a hit
         gesture.record_hit();
 
-        // Now in refractory
-        assert!(gesture.in_refractory(Duration::from_millis(500)));
+        // Now in cooldown
+        assert!(gesture.in_cooldown(Duration::from_millis(500)));
 
-        // After waiting, no longer in refractory
+        // After waiting, no longer in cooldown
         std::thread::sleep(Duration::from_millis(100));
-        assert!(!gesture.in_refractory(Duration::from_millis(50)));
+        assert!(!gesture.in_cooldown(Duration::from_millis(50)));
     }
 
     #[test]
@@ -525,11 +506,7 @@ mod tests {
 
     #[test]
     fn test_recognizer_detects_match() {
-        // Use zero confirm_ms for instant hit detection in tests
-        let config = RecognitionConfig {
-            confirm_ms: 0,
-            refractory_ms: 500,
-        };
+        let config = RecognitionConfig { cooldown_ms: 500 };
         let mut recognizer = Recognizer::with_config(1000, 5, config);
         recognizer.add_gesture(1, "wave", "/gesture/1", 5.0); // Low threshold (normalized scale)
 
@@ -539,24 +516,26 @@ mod tests {
 
         recognizer.start();
 
-        // Feed matching frames
+        // Feed matching frames and track if we got a hit
+        let mut hit_result = None;
         for i in 1..=5 {
-            recognizer.process_frame(vec![i as f32]);
+            if let Some(result) = recognizer.process_frame(vec![i as f32]) {
+                hit_result = Some(result);
+            }
         }
 
-        // Check the distance was computed
-        let gesture = recognizer.get_gesture(1).unwrap();
-        assert!(gesture.current_distance.is_some());
-        assert_eq!(gesture.current_distance.unwrap(), 0.0); // Exact match
+        // Should have detected a match (hit fired)
+        // Note: After a hit, buffer clears and current_distance becomes None
+        // So we verify the hit occurred, not the final distance state
+        assert!(hit_result.is_some(), "Should have detected a matching gesture");
+        let result = hit_result.unwrap();
+        assert_eq!(result.gesture_id, Some(1));
+        assert_eq!(result.gesture_name, Some("wave".to_string()));
     }
 
     #[test]
-    fn test_recognizer_refractory_prevents_double_trigger() {
-        // Use zero confirm_ms for instant hit, 1 second cooldown
-        let config = RecognitionConfig {
-            confirm_ms: 0,
-            refractory_ms: 1000,
-        };
+    fn test_recognizer_cooldown_prevents_double_trigger() {
+        let config = RecognitionConfig { cooldown_ms: 1000 };
         let mut recognizer = Recognizer::with_config(1000, 3, config);
         recognizer.add_gesture(1, "wave", "/gesture/1", 5.0); // Normalized scale
 
@@ -565,24 +544,20 @@ mod tests {
 
         recognizer.start();
 
-        // First match should hit
+        // First match should hit (edge detection fires on first crossing)
         for _ in 0..3 {
             recognizer.process_frame(vec![1.0]);
         }
         let gesture = recognizer.get_gesture(1).unwrap();
         assert!(gesture.last_hit_time.is_some());
 
-        // Immediately after, should be in refractory
-        assert!(gesture.in_refractory(Duration::from_millis(1000)));
+        // Immediately after, should be in cooldown
+        assert!(gesture.in_cooldown(Duration::from_millis(1000)));
     }
 
     #[test]
-    fn test_debounce_prevents_instant_hit() {
-        // Use 100ms debounce
-        let config = RecognitionConfig {
-            confirm_ms: 100,
-            refractory_ms: 500,
-        };
+    fn test_edge_detection_fires_on_crossing() {
+        let config = RecognitionConfig { cooldown_ms: 500 };
         let mut recognizer = Recognizer::with_config(1000, 3, config);
         recognizer.add_gesture(1, "wave", "/gesture/1", 5.0);
 
@@ -591,18 +566,45 @@ mod tests {
 
         recognizer.start();
 
-        // First frames should NOT trigger hit immediately due to debounce
-        let result = recognizer.process_frame(vec![1.0]);
-        assert!(result.is_none()); // No hit yet - need to wait for confirm_ms
+        // Fill buffer with non-matching frames first (high distance)
+        for _ in 0..3 {
+            recognizer.process_frame(vec![100.0]); // Far from example
+        }
 
+        // First matching frame should trigger hit immediately (edge detection)
         recognizer.process_frame(vec![1.0]);
-        let result = recognizer.process_frame(vec![1.0]);
-        assert!(result.is_none()); // Still no hit - confirm_ms not elapsed
+        // Note: May need 3 frames to get proper window for matching
+        recognizer.process_frame(vec![1.0]);
+        recognizer.process_frame(vec![1.0]);
 
-        // After waiting, the hit should fire
-        std::thread::sleep(Duration::from_millis(110));
+        // Should have fired by now since we crossed below threshold
+        let gesture = recognizer.get_gesture(1).unwrap();
+        assert!(gesture.last_hit_time.is_some(), "Edge detection should fire when crossing threshold");
+    }
+
+    #[test]
+    fn test_no_hit_while_staying_below_threshold() {
+        let config = RecognitionConfig { cooldown_ms: 100 };
+        let mut recognizer = Recognizer::with_config(1000, 3, config);
+        recognizer.add_gesture(1, "wave", "/gesture/1", 5.0);
+
+        let example = vec![vec![1.0], vec![1.0], vec![1.0]];
+        recognizer.add_example(1, example);
+
+        recognizer.start();
+
+        // Initial frames to get below threshold
+        for _ in 0..3 {
+            recognizer.process_frame(vec![1.0]);
+        }
+
+        // Wait for cooldown to expire
+        std::thread::sleep(Duration::from_millis(150));
+
+        // Continue with matching frames - should NOT fire again
+        // because we never went above threshold (no edge crossing)
         let result = recognizer.process_frame(vec![1.0]);
-        assert!(result.is_some()); // Now we get the hit
+        assert!(result.is_none(), "Should not fire without crossing above threshold first");
     }
 
     #[test]

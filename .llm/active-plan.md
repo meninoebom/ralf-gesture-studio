@@ -1,690 +1,896 @@
 # RALF Gesture Studio - Implementation Plan
 
-**Approach**: 8 small milestones, each with tests and visible progress
-**Target user**: Developer learning Rust while building
+**Current Version**: v0.1.0 (Complete)
+**Next Version**: v0.2.0 (Performance & Robustness)
 
 ---
 
-## Milestone 1: Project Setup + Data Model ✅
+## v0.1.0 Milestones (COMPLETE)
 
-**Goal**: Rust project that can create, save, and load vocabulary files.
+All 8 milestones from initial build are complete:
 
-### What to Build
+| Milestone | Status | Description |
+|-----------|--------|-------------|
+| 1 | ✅ | Data Model - Vocabulary/Gesture/Example structs, JSON persistence |
+| 2 | ✅ | GUI Shell - eframe/egui window with panel layout |
+| 3 | ✅ | OSC Receiver - Async UDP receiver with status tracking |
+| 4 | ✅ | OSC Sender - Hit message output with test button |
+| 5 | ✅ | DTW Algorithm - Dynamic Time Warping for gesture matching |
+| 6 | ✅ | Recording + Matching - Real-time recognition with refractory period |
+| 7 | ✅ | Training Session - State machine with audio cues (rodio) |
+| 8 | ✅ | Polish + Performance Mode - File dialogs, threshold sliders, auto-save |
 
-- [x] Cargo project with dependencies
-- [x] `Vocabulary` struct with nested `Gesture` and `Example`
-- [x] JSON serialization (save to .ralf file)
-- [x] JSON deserialization (load from .ralf file)
-- [x] Default file location (`~/Documents/RALF/`)
+See `gesture-recognition-design.md` for deep research on architecture improvements.
 
-### Tests to Write
+---
+
+# v0.2.0 Roadmap: Performance & Robustness
+
+**Goal**: Make gesture recognition as seamless as voice recognition.
+
+Based on deep research across voice recognition, gesture recognition, and time series analysis. See `.llm/gesture-recognition-design.md` for full rationale.
+
+---
+
+## Phase 1: Quick Wins (Performance Optimization)
+
+**Goal**: Real-time performance without frame skipping.
+
+**Estimated Effort**: 1-2 days
+
+### Tasks
+
+- [ ] **1.1 Frame Downsampling**
+  - Downsample incoming 60fps to 15fps
+  - Only process every 4th frame for DTW
+  - Keep full-rate buffer for recording (training needs all frames)
+
+- [ ] **1.2 Activity Gate**
+  - Compute motion energy per frame (sum of squared velocities)
+  - Skip DTW computation when motion energy < threshold
+  - Configurable activity threshold with sensible default
+
+- [ ] **1.3 Sakoe-Chiba Band Constraint**
+  - Limit DTW warping path to diagonal band
+  - Band width = 20% of sequence length
+  - Reduces O(N×M) to O(N×W) where W << M
+
+- [ ] **1.4 Prototype Averaging**
+  - Compute single prototype per gesture from all examples
+  - Align examples using DTW path, then average
+  - Reduces N comparisons to 1 per gesture
+
+### Verification
+
+#### Unit Tests
 
 ```rust
+// tests/phase1_performance.rs
+
 #[test]
-fn test_create_empty_vocabulary() {
-    let vocab = Vocabulary::new("Test Vocab");
-    assert_eq!(vocab.name, "Test Vocab");
-    assert!(vocab.gestures.is_empty());
+fn test_frame_downsampling() {
+    let buffer = FrameBuffer::new(600);
+    // Add 60 frames (1 second at 60fps)
+    for i in 0..60 {
+        buffer.push(vec![i as f32; 68]);
+    }
+
+    let downsampled = buffer.downsampled(4); // Every 4th frame
+    assert_eq!(downsampled.len(), 15); // 60/4 = 15
 }
 
 #[test]
-fn test_add_gesture() {
-    let mut vocab = Vocabulary::new("Test");
-    vocab.add_gesture("wave");
-    assert_eq!(vocab.gestures.len(), 1);
-    assert_eq!(vocab.gestures[0].name, "wave");
+fn test_activity_gate_filters_stillness() {
+    let still_frames = vec![
+        ProcessedFrame { motion_energy: 0.001, .. },
+        ProcessedFrame { motion_energy: 0.002, .. },
+    ];
+    assert!(!is_active(&still_frames, 0.01)); // Below threshold
+
+    let moving_frames = vec![
+        ProcessedFrame { motion_energy: 0.05, .. },
+        ProcessedFrame { motion_energy: 0.08, .. },
+    ];
+    assert!(is_active(&moving_frames, 0.01)); // Above threshold
 }
 
 #[test]
-fn test_save_and_load_roundtrip() {
-    let mut vocab = Vocabulary::new("Test");
-    vocab.add_gesture("wave");
+fn test_sakoe_chiba_constraint() {
+    let seq1 = generate_test_sequence(100);
+    let seq2 = generate_test_sequence(100);
 
-    let path = "/tmp/test_vocab.ralf";
-    vocab.save(path).unwrap();
+    // Constrained should be faster and produce similar result
+    let unconstrained = dtw_distance(&seq1, &seq2);
+    let constrained = dtw_constrained(&seq1, &seq2, 20);
 
-    let loaded = Vocabulary::load(path).unwrap();
-    assert_eq!(loaded.name, "Test");
-    assert_eq!(loaded.gestures.len(), 1);
+    // Allow 5% error for approximation
+    assert!((constrained - unconstrained).abs() / unconstrained < 0.05);
+}
+
+#[test]
+fn test_prototype_matches_examples() {
+    let examples = vec![
+        generate_gesture_example(100),
+        generate_gesture_example(105),
+        generate_gesture_example(98),
+    ];
+
+    let prototype = compute_prototype(&examples);
+
+    // Prototype should be close to all examples
+    for example in &examples {
+        let dist = dtw_distance(&prototype.frames, &example.frames);
+        assert!(dist < 50.0); // Should be very similar
+    }
 }
 ```
 
-### How to Verify
+#### Benchmark Tests
+
+```rust
+// benches/dtw_performance.rs
+
+#[bench]
+fn bench_dtw_unconstrained(b: &mut Bencher) {
+    let seq1 = generate_test_sequence(180);
+    let seq2 = generate_test_sequence(180);
+
+    b.iter(|| dtw_distance(&seq1, &seq2));
+}
+
+#[bench]
+fn bench_dtw_constrained(b: &mut Bencher) {
+    let seq1 = generate_test_sequence(180);
+    let seq2 = generate_test_sequence(180);
+
+    b.iter(|| dtw_constrained(&seq1, &seq2, 36)); // 20% band
+}
+
+// Target: constrained should be 3-5x faster
+```
+
+#### Manual Verification
 
 ```bash
+# 1. Run app with OSC input at 60fps
+cargo run --release
+
+# 2. Open Activity Monitor / htop
+# - CPU usage should stay under 30% (was spiking to 100%+)
+# - No "spinning beach ball" when switching to Performance mode
+
+# 3. Check frame processing
+# - In Performance mode, distances should update smoothly
+# - No visible lag between gesture and recognition
+
+# 4. Verify activity gate
+# - Stand still for 5 seconds
+# - Distance displays should show "--" or "inactive"
+# - Move, distances should appear
+```
+
+#### Acceptance Criteria
+
+| Metric | Before | Target |
+|--------|--------|--------|
+| CPU usage (Performance mode) | 80-100% | < 30% |
+| DTW computation time | ~50ms | < 10ms |
+| Frame processing lag | Visible | Imperceptible |
+| Activity filtering | None | Skip 50%+ of idle time |
+
+---
+
+## Phase 2: Feature Engineering
+
+**Goal**: More robust recognition across positions and speeds.
+
+**Estimated Effort**: 2-3 days
+
+### Tasks
+
+- [ ] **2.1 Hip-Centered Normalization**
+  - Translate all joint positions relative to hip joint
+  - Dancer can stand anywhere in frame
+  - Store normalized frames, not raw
+
+- [ ] **2.2 Scale Normalization**
+  - Normalize skeleton size based on shoulder width or height
+  - Works for dancers of different sizes
+  - Optional: configurable reference skeleton size
+
+- [ ] **2.3 Velocity Features**
+  - Compute first derivative (velocity) for each joint
+  - Add velocity dimensions to feature vector
+  - Motion energy = sum of squared velocities
+
+- [ ] **2.4 Per-Gesture Joint Weights**
+  - Auto-detect important joints from training variance
+  - Store weights per gesture
+  - Apply weights in DTW distance calculation
+
+### Data Structures
+
+```rust
+/// Enhanced frame with derived features
+struct ProcessedFrame {
+    /// Original timestamp
+    timestamp: Instant,
+
+    /// Hip-centered, scale-normalized positions [68 floats]
+    positions: Vec<f32>,
+
+    /// Velocity of each joint [68 floats]
+    velocities: Vec<f32>,
+
+    /// Total motion energy (scalar)
+    motion_energy: f32,
+}
+
+/// Per-gesture configuration
+struct GestureConfig {
+    /// Which joints matter for this gesture [34 weights, 0.0-1.0]
+    joint_weights: Vec<f32>,
+
+    /// Derived from training examples
+    min_duration_frames: usize,
+    max_duration_frames: usize,
+    typical_duration_frames: usize,
+}
+```
+
+### Verification
+
+#### Unit Tests
+
+```rust
+// tests/phase2_features.rs
+
+#[test]
+fn test_hip_centering() {
+    // Frame with hip at (100, 200)
+    let raw = vec![100.0, 200.0, 150.0, 180.0, /* ... */];
+    let centered = normalize_to_hip(&raw);
+
+    // Hip should now be at origin
+    assert_eq!(centered[0], 0.0);
+    assert_eq!(centered[1], 0.0);
+
+    // Other joints should be relative
+    assert_eq!(centered[2], 50.0);  // Was 150, hip was 100
+    assert_eq!(centered[3], -20.0); // Was 180, hip was 200
+}
+
+#[test]
+fn test_scale_normalization() {
+    // Same pose, different sizes
+    let small = vec![0.0, 0.0, 10.0, 0.0, /* ... */]; // Shoulder at 10
+    let large = vec![0.0, 0.0, 20.0, 0.0, /* ... */]; // Shoulder at 20
+
+    let norm_small = normalize_scale(&small, SHOULDER_LEFT);
+    let norm_large = normalize_scale(&large, SHOULDER_LEFT);
+
+    // After normalization, should be identical
+    assert!((norm_small[2] - norm_large[2]).abs() < 0.01);
+}
+
+#[test]
+fn test_velocity_computation() {
+    let prev = ProcessedFrame { positions: vec![0.0, 0.0], .. };
+    let curr = ProcessedFrame { positions: vec![10.0, 5.0], .. };
+
+    let velocities = compute_velocities(&prev, &curr, dt: 0.016);
+
+    // Velocity = (curr - prev) / dt
+    assert!((velocities[0] - 625.0).abs() < 1.0); // 10 / 0.016
+}
+
+#[test]
+fn test_joint_weight_auto_detection() {
+    // Create examples where only hands move
+    let examples = vec![
+        create_example_with_moving_hands(),
+        create_example_with_moving_hands(),
+    ];
+
+    let weights = auto_detect_joint_weights(&examples);
+
+    // Hand joints should have high weight
+    assert!(weights[HAND_LEFT] > 0.8);
+    assert!(weights[HAND_RIGHT] > 0.8);
+
+    // Feet should have low weight (didn't move)
+    assert!(weights[FOOT_LEFT] < 0.2);
+}
+
+#[test]
+fn test_weighted_distance() {
+    let a = vec![0.0, 0.0, 10.0, 10.0]; // Joints 0,1 at origin; 2,3 offset
+    let b = vec![5.0, 5.0, 10.0, 10.0]; // Joints 0,1 offset; 2,3 same
+
+    // Equal weights: both differences count
+    let equal_weights = vec![1.0, 1.0, 1.0, 1.0];
+    let dist_equal = weighted_distance(&a, &b, &equal_weights);
+
+    // Zero weight on joints 0,1: only 2,3 matter (same, so dist=0)
+    let focused_weights = vec![0.0, 0.0, 1.0, 1.0];
+    let dist_focused = weighted_distance(&a, &b, &focused_weights);
+
+    assert!(dist_equal > 0.0);
+    assert_eq!(dist_focused, 0.0);
+}
+```
+
+#### Integration Tests
+
+```rust
+#[test]
+fn test_position_invariance() {
+    // Train gesture at position A
+    let examples_a = record_gesture_at_position(100.0, 100.0);
+
+    // Create gesture with these examples
+    let mut gesture = Gesture::new("wave");
+    gesture.add_examples(examples_a);
+    gesture.compute_prototype();
+
+    // Perform same gesture at position B (different location in frame)
+    let test_at_b = record_gesture_at_position(300.0, 200.0);
+
+    // Should still match after normalization
+    let distance = gesture.match_against(&test_at_b);
+    assert!(distance < gesture.threshold);
+}
+
+#[test]
+fn test_speed_variation_handling() {
+    // Train with medium-speed gesture
+    let medium_examples = record_gesture_at_speed(1.0);
+
+    let mut gesture = Gesture::new("punch");
+    gesture.add_examples(medium_examples);
+
+    // Fast version should still match (DTW handles this)
+    let fast = record_gesture_at_speed(1.5);
+    let dist_fast = gesture.match_against(&fast);
+
+    // Slow version should still match
+    let slow = record_gesture_at_speed(0.7);
+    let dist_slow = gesture.match_against(&slow);
+
+    assert!(dist_fast < gesture.threshold);
+    assert!(dist_slow < gesture.threshold);
+}
+```
+
+#### Manual Verification
+
+```bash
+# 1. Position invariance test
+# - Train a gesture standing on the left side of camera view
+# - Move to right side of view
+# - Perform gesture, should still be recognized
+
+# 2. Scale invariance test
+# - Train gesture standing 6 feet from camera
+# - Move to 10 feet from camera (skeleton appears smaller)
+# - Gesture should still be recognized
+
+# 3. Speed variation test
+# - Train "wave" at normal speed
+# - Perform wave faster (1.5x speed)
+# - Perform wave slower (0.5x speed)
+# - Both should be recognized
+
+# 4. Joint weight verification
+# - Train a hand-only gesture (wave)
+# - Check gesture config shows high weight for hands, low for feet
+# - Moving feet during wave should not affect recognition
+```
+
+#### Acceptance Criteria
+
+| Scenario | Before | Target |
+|----------|--------|--------|
+| Position change (±200px) | May fail | Always matches |
+| Scale change (±30%) | May fail | Always matches |
+| Speed variation (0.5x - 2x) | May fail | Matches within range |
+| Unrelated joint movement | May cause false rejection | Ignored |
+
+---
+
+## Phase 3: Auto-Calibration
+
+**Goal**: Eliminate manual threshold tuning.
+
+**Estimated Effort**: 2-3 days
+
+### Tasks
+
+- [ ] **3.1 Baseline Recording UI**
+  - "Record Baseline" button in Training mode
+  - Record 3 seconds of neutral stance
+  - Store as special baseline example in vocabulary
+
+- [ ] **3.2 Automatic Threshold Computation**
+  - After training, compute threshold from:
+    - Intra-class variance (how different are examples of same gesture)
+    - Baseline distance (how far is neutral from this gesture)
+  - Formula: `threshold = (max_intra + 0.8 * baseline_dist) / 2 * 1.1`
+
+- [ ] **3.3 Inter-Gesture Separation Check**
+  - When training, check if new gesture is too similar to existing
+  - Warn user if gestures may be confused
+  - Suggest: different gesture, more examples, or adjust thresholds
+
+- [ ] **3.4 Threshold Recommendation UI**
+  - Show computed threshold with "recommended" indicator
+  - Allow manual override with slider
+  - Show warning if manual threshold is outside safe range
+
+### Data Structures
+
+```rust
+/// Calibration metadata per vocabulary
+struct CalibrationData {
+    /// Neutral stance recording
+    baseline: Option<Example>,
+
+    /// When baseline was recorded
+    baseline_recorded_at: Option<DateTime<Utc>>,
+}
+
+/// Per-gesture calibration info
+struct GestureCalibration {
+    /// Distance from baseline to this gesture
+    baseline_distance: f32,
+
+    /// Max distance between any two examples of this gesture
+    intra_class_max: f32,
+
+    /// Distance to nearest other gesture
+    nearest_other_gesture: Option<(String, f32)>,
+
+    /// Computed recommended threshold
+    recommended_threshold: f32,
+
+    /// Is current threshold in safe range?
+    threshold_status: ThresholdStatus,
+}
+
+enum ThresholdStatus {
+    /// Threshold is in recommended range
+    Good,
+
+    /// Threshold too high, may have false positives
+    TooLoose { recommended: f32 },
+
+    /// Threshold too low, may miss valid gestures
+    TooStrict { recommended: f32 },
+
+    /// Gesture overlaps with another, confusion likely
+    Ambiguous { conflicting_gesture: String },
+}
+```
+
+### Verification
+
+#### Unit Tests
+
+```rust
+// tests/phase3_calibration.rs
+
+#[test]
+fn test_baseline_distance_computation() {
+    let baseline = create_neutral_stance_example();
+    let wave_examples = vec![
+        create_wave_example(),
+        create_wave_example(),
+    ];
+
+    let baseline_dist = compute_baseline_distance(&baseline, &wave_examples);
+
+    // Wave should be far from neutral
+    assert!(baseline_dist > 100.0);
+}
+
+#[test]
+fn test_intra_class_variance() {
+    let examples = vec![
+        create_wave_example(),
+        create_wave_example_variant(),
+        create_wave_example(),
+    ];
+
+    let variance = compute_intra_class_max(&examples);
+
+    // Variants of same gesture should be close
+    assert!(variance < 50.0);
+}
+
+#[test]
+fn test_auto_threshold_computation() {
+    let baseline = create_neutral_stance_example();
+    let examples = vec![create_wave_example(); 3];
+
+    let threshold = auto_calibrate_threshold(&examples, &baseline);
+
+    // Threshold should be between intra-class max and baseline distance
+    let intra_max = compute_intra_class_max(&examples);
+    let baseline_dist = compute_baseline_distance(&baseline, &examples);
+
+    assert!(threshold > intra_max);
+    assert!(threshold < baseline_dist);
+}
+
+#[test]
+fn test_gesture_separation_warning() {
+    let wave = Gesture::with_examples("wave", create_wave_examples());
+    let similar_wave = Gesture::with_examples("wave2", create_similar_wave_examples());
+
+    let separation = check_gesture_separation(&wave, &similar_wave);
+
+    // Similar gestures should trigger warning
+    assert!(separation.is_ambiguous());
+    assert!(separation.overlap_distance < 50.0);
+}
+
+#[test]
+fn test_threshold_status_detection() {
+    let gesture = create_trained_gesture();
+
+    // Threshold in good range
+    gesture.threshold = gesture.recommended_threshold;
+    assert_eq!(gesture.threshold_status(), ThresholdStatus::Good);
+
+    // Threshold too high
+    gesture.threshold = gesture.recommended_threshold * 2.0;
+    assert!(matches!(gesture.threshold_status(), ThresholdStatus::TooLoose { .. }));
+
+    // Threshold too low
+    gesture.threshold = gesture.recommended_threshold * 0.5;
+    assert!(matches!(gesture.threshold_status(), ThresholdStatus::TooStrict { .. }));
+}
+```
+
+#### Integration Tests
+
+```rust
+#[test]
+fn test_auto_calibration_end_to_end() {
+    let mut vocab = Vocabulary::new("Test");
+
+    // Record baseline
+    vocab.record_baseline(create_neutral_frames());
+
+    // Train gesture
+    let mut gesture = vocab.add_gesture("wave");
+    for _ in 0..5 {
+        gesture.add_example(create_wave_frames());
+    }
+
+    // Auto-calibrate
+    gesture.auto_calibrate(&vocab.baseline);
+
+    // Test with actual gesture - should match
+    let test_wave = create_wave_frames();
+    let distance = gesture.match_against(&test_wave);
+    assert!(distance < gesture.threshold);
+
+    // Test with baseline - should NOT match
+    let test_neutral = create_neutral_frames();
+    let distance = gesture.match_against(&test_neutral);
+    assert!(distance > gesture.threshold);
+}
+```
+
+#### Manual Verification
+
+```bash
+# 1. Baseline recording flow
+# - Open app, create new vocabulary
+# - See prompt: "Record baseline (neutral stance)"
+# - Click "Record Baseline", stand still for 3 seconds
+# - See confirmation: "Baseline recorded"
+
+# 2. Auto-threshold verification
+# - Train a gesture (5 reps)
+# - See "Recommended threshold: 125" (or similar)
+# - Threshold slider should be at recommended value
+# - Perform gesture - should match
+# - Stand still - should NOT match
+
+# 3. Separation warning
+# - Train "wave" gesture
+# - Train "wave_fast" with very similar motion
+# - See warning: "wave_fast may be confused with wave"
+# - Suggestions shown: "Record more varied examples" or "Adjust thresholds"
+
+# 4. No-tuning workflow
+# - Create vocabulary, record baseline
+# - Train 3 gestures without touching any thresholds
+# - Switch to Performance mode
+# - All gestures should work correctly first try
+```
+
+#### Acceptance Criteria
+
+| Scenario | Before | Target |
+|----------|--------|--------|
+| New user threshold confusion | Common | Eliminated |
+| Gestures work first try | Sometimes | 90%+ of cases |
+| False positive rate | Variable | < 5% |
+| Ambiguous gesture warning | None | Clear warning + guidance |
+
+---
+
+## Phase 4: Advanced Matching (v1.0+ Stretch Goals)
+
+**Goal**: Handle complex scenarios, variable-length gestures.
+
+**Estimated Effort**: 1-2 weeks
+
+### Tasks
+
+- [ ] **4.1 LB_Keogh Lower Bound Pruning**
+  - Compute cheap lower bound before full DTW
+  - Skip DTW if lower bound > threshold
+  - Target: prune 80% of comparisons
+
+- [ ] **4.2 Subsequence DTW (SPRING Algorithm)**
+  - Detect gestures of variable length in continuous stream
+  - No fixed window size required
+  - O(M) per frame instead of O(N×M)
+
+- [ ] **4.3 Multi-Resolution Windows**
+  - Support gestures of very different durations in same vocabulary
+  - Short gesture (0.5s) and long gesture (5s) coexist
+  - Automatic window selection based on gesture config
+
+- [ ] **4.4 Gesture Chaining Detection**
+  - Detect sequences of gestures (A → B → C)
+  - Configurable timing constraints
+  - Output compound gesture events
+
+### Verification
+
+#### Unit Tests
+
+```rust
+// tests/phase4_advanced.rs
+
+#[test]
+fn test_lb_keogh_is_lower_bound() {
+    let query = generate_test_sequence(100);
+    let template = generate_test_sequence(100);
+
+    let lb = lb_keogh(&query, &template, 10);
+    let actual = dtw_distance(&query, &template);
+
+    // Lower bound must always be <= actual distance
+    assert!(lb <= actual);
+}
+
+#[test]
+fn test_lb_keogh_prunes_non_matches() {
+    let gesture = generate_gesture_sequence();
+    let unrelated = generate_completely_different_sequence();
+
+    let lb = lb_keogh(&unrelated, &gesture, 10);
+    let threshold = 100.0;
+
+    // Lower bound should exceed threshold, allowing pruning
+    assert!(lb > threshold);
+}
+
+#[test]
+fn test_subsequence_dtw_finds_gesture() {
+    // Long stream with gesture embedded in middle
+    let mut stream = generate_noise(100);
+    stream.extend(generate_gesture());
+    stream.extend(generate_noise(100));
+
+    let template = generate_gesture();
+
+    let matches = subsequence_dtw(&stream, &template, threshold: 50.0);
+
+    // Should find exactly one match
+    assert_eq!(matches.len(), 1);
+
+    // Match should be around frame 100-150 (where gesture was)
+    assert!(matches[0].end_frame > 100);
+    assert!(matches[0].end_frame < 200);
+}
+
+#[test]
+fn test_variable_length_gestures() {
+    let mut vocab = Vocabulary::new("Test");
+
+    // Short gesture: 0.5 seconds (30 frames at 60fps)
+    vocab.add_gesture_with_examples("snap", create_snap_examples());
+
+    // Long gesture: 3 seconds (180 frames)
+    vocab.add_gesture_with_examples("slow_wave", create_slow_wave_examples());
+
+    // Both should be recognized from same stream
+    let stream = /* stream containing both */;
+
+    let hits = vocab.recognize(&stream);
+    assert!(hits.contains("snap"));
+    assert!(hits.contains("slow_wave"));
+}
+
+#[test]
+fn test_gesture_chain_detection() {
+    let vocab = create_vocab_with_gestures(&["punch", "kick", "spin"]);
+
+    // Configure chain: punch -> kick within 1 second = "combo"
+    vocab.add_chain("combo", vec!["punch", "kick"], max_gap_ms: 1000);
+
+    // Stream with punch, then kick 500ms later
+    let stream = create_stream_with_sequence(&[
+        ("punch", 0),
+        ("kick", 500),
+    ]);
+
+    let hits = vocab.recognize(&stream);
+
+    // Should get individual hits AND combo
+    assert!(hits.contains("punch"));
+    assert!(hits.contains("kick"));
+    assert!(hits.contains("combo"));
+}
+```
+
+#### Benchmark Tests
+
+```rust
+#[bench]
+fn bench_lb_keogh_pruning(b: &mut Bencher) {
+    let gestures = create_gesture_vocabulary(20); // 20 gestures
+    let window = generate_test_window();
+
+    b.iter(|| {
+        let mut comparisons = 0;
+        for gesture in &gestures {
+            let lb = lb_keogh(&window, &gesture.prototype, 10);
+            if lb < gesture.threshold {
+                // Would compute full DTW here
+                comparisons += 1;
+            }
+        }
+        comparisons
+    });
+
+    // Target: < 5 comparisons out of 20 (75%+ pruning)
+}
+
+#[bench]
+fn bench_spring_per_frame(b: &mut Bencher) {
+    let matcher = SpringMatcher::new(generate_gesture_template());
+
+    b.iter(|| {
+        let frame = generate_random_frame();
+        matcher.process_frame(&frame)
+    });
+
+    // Target: < 0.5ms per frame for real-time
+}
+```
+
+#### Manual Verification
+
+```bash
+# 1. Variable-length gesture test
+# - Train "snap" (very short, < 0.5s)
+# - Train "slow_circle" (very long, 5s)
+# - Both should be recognized correctly
+# - Snap should fire quickly, not wait for slow_circle window
+
+# 2. Gesture chaining test
+# - Train "punch" and "kick" separately
+# - Configure combo: punch + kick within 1s
+# - Perform punch, then kick quickly
+# - See "combo" hit fire (in addition to individual hits)
+
+# 3. Performance with many gestures
+# - Create vocabulary with 20+ gestures
+# - CPU usage should remain under 50%
+# - Recognition latency should be imperceptible
+```
+
+#### Acceptance Criteria
+
+| Metric | Before | Target |
+|--------|--------|--------|
+| DTW comparisons pruned | 0% | 75%+ |
+| Variable-length support | Fixed 3s window | 0.5s - 10s |
+| Per-frame latency | ~10ms | < 2ms |
+| Gesture chains | Not supported | Working |
+
+---
+
+## Summary: Verification Commands
+
+| Phase | Test Command | Benchmark | Manual Check |
+|-------|--------------|-----------|--------------|
+| 1 | `cargo test phase1` | `cargo bench dtw` | CPU < 30%, no lag |
+| 2 | `cargo test phase2` | — | Position/speed invariance |
+| 3 | `cargo test phase3` | — | No-tuning workflow |
+| 4 | `cargo test phase4` | `cargo bench spring` | 20+ gestures smooth |
+
+### Running All Tests
+
+```bash
+# Unit tests for specific phase
+cargo test phase1_performance
+cargo test phase2_features
+cargo test phase3_calibration
+cargo test phase4_advanced
+
+# All tests
 cargo test
+
+# Benchmarks (requires nightly or criterion)
+cargo bench
+
+# Integration test with real OSC
+./scripts/test_with_osc.sh
 ```
 
-Expected output:
+### CI Integration
+
+```yaml
+# .github/workflows/test.yml
+name: Tests
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-features
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo bench --no-run  # Compile benchmarks
 ```
-running 3 tests
-test model::tests::test_create_empty_vocabulary ... ok
-test model::tests::test_add_gesture ... ok
-test model::tests::test_save_and_load_roundtrip ... ok
-```
-
-### Rust Concepts Introduced
-
-- `struct` and nested structs
-- `impl` blocks and methods
-- `serde` derive macros (`Serialize`, `Deserialize`)
-- `Result<T, E>` for error handling
-- File I/O with `std::fs`
-- `chrono` for timestamps
-
-### Checkpoint
-
-**What works**: You can create a vocabulary in code, add gestures, save it to a .ralf file, and load it back. The JSON file is human-readable.
-
-**What doesn't work yet**: No GUI, no OSC, no recognition.
 
 ---
 
-## Milestone 2: Minimal GUI Shell ✅
+## Implementation Order
 
-**Goal**: A window that displays vocabulary info and has the basic panel layout.
+1. **Phase 1** first - establishes performance baseline, unblocks other work
+2. **Phase 2** second - feature engineering needs Phase 1's frame processing
+3. **Phase 3** third - calibration needs Phase 2's normalized features
+4. **Phase 4** as stretch goals - independent optimizations
 
-### What to Build
-
-- [x] eframe app skeleton
-- [x] Main window with title bar
-- [x] Mode selector (Training/Performance) - visual only, no logic yet
-- [x] Vocabulary panel showing name and gesture count
-- [x] Placeholder panels for Connection, Gestures, Train
-- [x] Load a hardcoded or test vocabulary on startup
-
-### GUI Appearance
-
-```
-┌─────────────────────────────────────────────────┐
-│  RALF Gesture Studio          [Training ▼]     │
-├─────────────────────────────────────────────────┤
-│ ┌─ VOCABULARY ────────────────────────────────┐ │
-│ │  Name: Test Vocabulary                      │ │
-│ │  Gestures: 2                                │ │
-│ └─────────────────────────────────────────────┘ │
-│ ┌─ CONNECTION ────────────────────────────────┐ │
-│ │  (placeholder)                              │ │
-│ └─────────────────────────────────────────────┘ │
-│ ┌─ GESTURES ──────────────────────────────────┐ │
-│ │  (placeholder)                              │ │
-│ └─────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────┘
-```
-
-### How to Verify
-
-```bash
-cargo run
-```
-
-- Window opens
-- Title shows "RALF Gesture Studio"
-- Vocabulary name and gesture count are visible
-- Panels are laid out correctly
-
-### Rust Concepts Introduced
-
-- `eframe::App` trait implementation
-- `egui::CentralPanel`, `egui::TopBottomPanel`
-- `egui::Frame` for styled containers
-- Mutable app state (`&mut self`)
-- The immediate mode GUI paradigm
-
-### Checkpoint
-
-**What works**: GUI window opens, shows vocabulary data, has the panel structure.
-
-**What doesn't work yet**: No file operations in GUI, no OSC, buttons don't do anything.
+Each phase is independently valuable. Can ship after any phase.
 
 ---
 
-## Milestone 3: OSC Receiver ✅
+## Dependencies
 
-**Goal**: Receive skeleton data via OSC and show connection status in GUI.
+### New Crates for v0.2.0
 
-### What to Build
+| Crate | Purpose | Phase |
+|-------|---------|-------|
+| `criterion` | Benchmarking | 1 |
+| `ndarray` | Efficient array operations | 2 |
 
-- [x] UDP socket listener on configurable port (default 6448)
-- [x] OSC message parsing with `rosc`
-- [x] Filter for configured address (default `/wek/inputs`)
-- [x] Channel to send frames from receiver task to GUI
-- [x] Connection status indicator (LISTENING → RECEIVING)
-- [x] Frame counter in GUI
-- [x] "Time since last frame" display
+### Existing Crates (Already in Use)
 
-### GUI Appearance
-
-```
-┌─ CONNECTION ──────────────────────────────────┐
-│  INPUT                                        │
-│  Port: 6448  Address: /wek/inputs             │
-│  ● RECEIVING (12ms ago)                       │
-│  Frames: 1,247                                │
-└───────────────────────────────────────────────┘
-```
-
-### Tests to Write
-
-```rust
-#[test]
-fn test_parse_osc_message() {
-    // Create a mock OSC message with float array
-    let msg = create_test_osc_message("/wek/inputs", vec![0.1, 0.2, 0.3]);
-    let frame = parse_osc_frame(&msg).unwrap();
-    assert_eq!(frame.len(), 3);
-}
-
-#[test]
-fn test_reject_wrong_address() {
-    let msg = create_test_osc_message("/wrong/address", vec![0.1, 0.2]);
-    let result = parse_osc_frame(&msg);
-    assert!(result.is_none());
-}
-```
-
-### How to Verify
-
-1. Run the app: `cargo run`
-2. Send test OSC messages (use a tool like `oscsend` or a Python script)
-3. Watch the frame counter increment
-4. Status should show "RECEIVING" with recent timestamp
-
-Test sender script (Python):
-```python
-# test_osc_sender.py
-from pythonosc import udp_client
-import time
-
-client = udp_client.SimpleUDPClient("127.0.0.1", 6448)
-while True:
-    # Send 4 floats as test data
-    client.send_message("/wek/inputs", [0.1, 0.2, 0.3, 0.4])
-    time.sleep(0.016)  # ~60fps
-```
-
-### Rust Concepts Introduced
-
-- `tokio` async runtime
-- `tokio::spawn` for background tasks
-- `std::sync::mpsc` or `tokio::sync::mpsc` channels
-- `Arc<Mutex<T>>` for shared state (or channel-based approach)
-- UDP sockets with `tokio::net::UdpSocket`
-
-### Checkpoint
-
-**What works**: App receives OSC data and shows live connection status. You can see frames arriving.
-
-**What doesn't work yet**: Data isn't stored or used for anything. No sending, no recording.
+- `eframe` / `egui` - GUI
+- `rosc` - OSC
+- `tokio` - Async
+- `rodio` - Audio
+- `serde` - Serialization
 
 ---
 
-## Milestone 4: OSC Sender ✅
-
-**Goal**: Send OSC hit messages and verify with test button.
-
-### What to Build
-
-- [x] OSC sender task/function
-- [x] Configurable output host and port (default localhost:12000)
-- [x] "Send Test Hit" button in GUI
-- [x] Output status indicator (READY → SENT)
-- [x] "Time since last send" display
-
-### GUI Appearance
-
-```
-┌─ CONNECTION ──────────────────────────────────┐
-│  INPUT                      OUTPUT            │
-│  Port: 6448                 Host: localhost   │
-│  ● RECEIVING (3ms ago)      Port: 12000       │
-│                             ● SENT (1.2s ago) │
-│                             [Send Test Hit]   │
-└───────────────────────────────────────────────┘
-```
-
-### Tests to Write
-
-```rust
-#[test]
-fn test_create_hit_message() {
-    let msg = create_hit_message("/gesture/1");
-    assert_eq!(msg.addr, "/gesture/1");
-}
-
-// Integration test - requires port binding
-#[test]
-fn test_send_receive_hit() {
-    // Bind a receiver on port 12000
-    // Send a hit
-    // Verify message received
-}
-```
-
-### How to Verify
-
-1. Run a listener: `oscdump 12000` (or Python script below)
-2. Run the app: `cargo run`
-3. Click "Send Test Hit"
-4. See message arrive in listener
-
-Test receiver script (Python):
-```python
-# test_osc_receiver.py
-from pythonosc import dispatcher, osc_server
-
-def handle_hit(address, *args):
-    print(f"Received: {address} {args}")
-
-disp = dispatcher.Dispatcher()
-disp.set_default_handler(handle_hit)
-
-server = osc_server.ThreadingOSCUDPServer(("127.0.0.1", 12000), disp)
-print("Listening on port 12000...")
-server.serve_forever()
-```
-
-### Rust Concepts Introduced
-
-- Sending UDP packets
-- Building OSC messages with `rosc`
-- GUI button callbacks
-- Updating shared state from async task
-
-### Checkpoint
-
-**What works**: Full OSC round-trip. Can receive skeleton data and send hit messages. Connection status shows both directions.
-
-**What doesn't work yet**: No recognition logic, no recording, hits are manual only.
-
----
-
-## Milestone 5: DTW Algorithm ✅
-
-**Goal**: Implement Dynamic Time Warping and verify with tests.
-
-### What to Build
-
-- [x] DTW distance function for two sequences
-- [x] Support for multi-dimensional frames (e.g., 68 floats per frame)
-- [x] Euclidean distance for frame comparison
-- [x] Tests with known sequences and expected distances
-
-### Tests to Write
-
-```rust
-#[test]
-fn test_dtw_identical_sequences() {
-    let seq = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
-    let distance = dtw_distance(&seq, &seq);
-    assert_eq!(distance, 0.0);
-}
-
-#[test]
-fn test_dtw_different_sequences() {
-    let seq1 = vec![vec![0.0], vec![1.0], vec![2.0]];
-    let seq2 = vec![vec![0.0], vec![1.0], vec![2.0], vec![3.0]];
-    let distance = dtw_distance(&seq1, &seq2);
-    assert!(distance > 0.0);
-    assert!(distance < 2.0); // Should be relatively close
-}
-
-#[test]
-fn test_dtw_time_warping() {
-    // Same pattern, different speeds
-    let slow = vec![vec![0.0], vec![0.0], vec![1.0], vec![1.0]];
-    let fast = vec![vec![0.0], vec![1.0]];
-    let distance = dtw_distance(&slow, &fast);
-    // Should recognize as similar despite timing difference
-    assert!(distance < 1.0);
-}
-
-#[test]
-fn test_dtw_completely_different() {
-    let seq1 = vec![vec![0.0, 0.0]];
-    let seq2 = vec![vec![100.0, 100.0]];
-    let distance = dtw_distance(&seq1, &seq2);
-    assert!(distance > 100.0);
-}
-```
-
-### How to Verify
-
-```bash
-cargo test engine::dtw
-```
-
-All DTW tests should pass. This is a pure algorithm milestone - no GUI changes.
-
-### Rust Concepts Introduced
-
-- 2D vectors (`Vec<Vec<f32>>`)
-- Implementing algorithms from scratch
-- `f32::min()` and floating point operations
-- Optional: using a crate like `augurs-dtw` instead of rolling your own
-
-### Checkpoint
-
-**What works**: DTW algorithm correctly computes distance between two sequences. Tests prove it handles identical, similar, and different sequences correctly.
-
-**What doesn't work yet**: Not connected to anything. No recording, no real-time matching.
-
----
-
-## Milestone 6: Recording + Matching ✅
-
-**Goal**: Record examples and recognize gestures in real-time.
-
-### What to Build
-
-- [x] Frame buffer that stores incoming OSC data
-- [x] "Record" button that captures N seconds of frames
-- [x] Store recorded frames as Example in current Gesture
-- [x] Sliding window buffer for real-time matching
-- [x] Continuous DTW comparison against stored examples
-- [x] Hit detection when distance < threshold
-- [x] Fire OSC hit when gesture detected
-- [x] Refractory period (don't re-trigger same gesture immediately)
-
-### GUI Appearance
-
-```
-┌─ GESTURES ────────────────────────────────────┐
-│  ●  wave     3 examples    /gesture/1         │
-│  ○  jump     0 examples    /gesture/2         │
-│                                               │
-│  [+ Add Gesture]                              │
-└───────────────────────────────────────────────┘
-
-┌─ RECORD ──────────────────────────────────────┐
-│  Gesture: [wave ▼]    Duration: [3.0]s        │
-│                                               │
-│  [ ● RECORD ]                                 │
-│                                               │
-│  Status: Recorded! (174 frames)               │
-└───────────────────────────────────────────────┘
-
-┌─ RECOGNITION ─────────────────────────────────┐
-│  ● ACTIVE                                     │
-│                                               │
-│  wave: distance 89  (threshold: 150) ✓        │
-│  jump: distance --  (no examples)             │
-│                                               │
-│  Last hit: wave (0.8s ago)                    │
-└───────────────────────────────────────────────┘
-```
-
-### Tests to Write
-
-```rust
-#[test]
-fn test_buffer_stores_frames() {
-    let mut buffer = FrameBuffer::new(100);
-    buffer.push(vec![1.0, 2.0]);
-    buffer.push(vec![3.0, 4.0]);
-    assert_eq!(buffer.len(), 2);
-}
-
-#[test]
-fn test_buffer_slides() {
-    let mut buffer = FrameBuffer::new(3);
-    buffer.push(vec![1.0]);
-    buffer.push(vec![2.0]);
-    buffer.push(vec![3.0]);
-    buffer.push(vec![4.0]); // Should drop first frame
-    assert_eq!(buffer.len(), 3);
-    assert_eq!(buffer.frames()[0], vec![2.0]);
-}
-
-#[test]
-fn test_recognition_fires_hit() {
-    // Record an example
-    // Play back similar data
-    // Verify hit is detected
-}
-```
-
-### How to Verify
-
-1. Run app with OSC sender script providing input
-2. Select a gesture and click Record
-3. Move/generate distinct pattern during recording
-4. Stop recording, see example count increase
-5. Repeat the pattern
-6. See "Last hit" update and OSC message sent
-
-### Rust Concepts Introduced
-
-- Circular buffers / VecDeque
-- Combining multiple async streams
-- State management with multiple interacting components
-- Threshold comparison logic
-
-### Checkpoint
-
-**What works**: Full recognition loop! Can record examples and recognize them in real-time. OSC hits are sent automatically.
-
-**What doesn't work yet**: No structured training session (countdown/rest), no audio feedback, basic UI for recording.
-
----
-
-## Milestone 7: Training Session ✅
-
-**Goal**: Full training workflow with countdown, capture, rest, and audio cues.
-
-### What to Build
-
-- [x] Training session state machine (IDLE → COUNTDOWN → CAPTURING → RESTING → COMPLETE)
-- [x] Configurable parameters (reps, duration, rest time)
-- [x] Countdown timer with visual display
-- [x] Audio beeps using `rodio`:
-  - Countdown ticks (300 Hz, short)
-  - Capture start (800 Hz, long)
-  - Capture end (600 Hz, long)
-  - Session complete (1000 Hz, double ding)
-- [x] Spacebar to start, Escape to cancel
-- [x] Progress indicator ("Recording 3 of 5")
-
-### GUI Appearance (During Capture)
-
-```
-┌─ TRAIN ───────────────────────────────────────┐
-│  Gesture: [wave ▼]  Reps: [5]  Duration: [3]s │
-│                                               │
-│  ┌─────────────────────────────────────────┐  │
-│  │           ███ CAPTURING ███             │  │
-│  │                                         │  │
-│  │                2.1s                     │  │
-│  │         [████████████░░░░░░]            │  │
-│  │                                         │  │
-│  └─────────────────────────────────────────┘  │
-│                                               │
-│  Recording example 3 of 5 for "wave"          │
-│  Press [Esc] to cancel                        │
-└───────────────────────────────────────────────┘
-```
-
-### Tests to Write
-
-```rust
-#[test]
-fn test_session_state_transitions() {
-    let mut session = TrainingSession::new();
-    assert_eq!(session.state, SessionState::Idle);
-
-    session.start(gesture_id, reps: 3, duration: 2.0, rest: 1.0);
-    assert_eq!(session.state, SessionState::Countdown);
-
-    // Simulate countdown complete
-    session.on_countdown_complete();
-    assert_eq!(session.state, SessionState::Capturing);
-
-    // Simulate capture complete
-    session.on_capture_complete();
-    assert_eq!(session.state, SessionState::Resting);
-    assert_eq!(session.completed_reps, 1);
-}
-
-#[test]
-fn test_session_cancel() {
-    let mut session = TrainingSession::new();
-    session.start(...);
-    session.cancel();
-    assert_eq!(session.state, SessionState::Idle);
-}
-```
-
-### How to Verify
-
-1. Run app with OSC input active
-2. Select gesture, set reps to 3
-3. Press spacebar or click Start
-4. Hear countdown ticks: tick... tick... tick...
-5. Hear capture beep, see "CAPTURING" state
-6. Perform gesture
-7. Hear end beep, see "RESTING" state
-8. Repeat for each rep
-9. Hear double-ding on completion
-10. Check gesture now has 3 new examples
-
-### Rust Concepts Introduced
-
-- State machines with enums
-- `rodio` audio synthesis
-- Timer management with `tokio::time`
-- Keyboard input handling in egui
-
-### Checkpoint
-
-**What works**: Full training UX! Dancers can train gestures hands-free with audio cues. The flow-state-friendly design goal is achieved.
-
-**What doesn't work yet**: No performance mode view, no threshold adjustment, no hit log.
-
----
-
-## Milestone 8: Polish + Performance Mode ✅
-
-**Goal**: Complete the app with both modes, threshold tuning, and hit log.
-
-### What to Build
-
-- [x] Mode switching (Training ↔ Performance)
-- [x] Performance mode layout:
-  - Live distance display for each gesture
-  - Threshold sliders (adjustable in real-time)
-  - Hit detection indicator
-  - Hit log with timestamps
-- [x] File operations in GUI:
-  - New vocabulary
-  - Open vocabulary (file picker)
-  - Save As
-- [x] Gesture management:
-  - Add gesture
-  - Rename gesture (inline edit)
-  - Delete gesture
-  - Edit OSC address
-- [ ] Input/output port configuration (deferred to future)
-- [x] Auto-save after changes
-
-### GUI: Performance Mode
-
-```
-┌─────────────────────────────────────────────────┐
-│  RALF Gesture Studio          [Performance ▼]  │
-├─────────────────────────────────────────────────┤
-│ ┌─ VOCABULARY ────────────────────────────────┐ │
-│ │  House Foundations                  [Open]  │ │
-│ └─────────────────────────────────────────────┘ │
-│ ┌─ CONNECTION ────────────────────────────────┐ │
-│ │  INPUT: ● RECEIVING    OUTPUT: ● READY      │ │
-│ └─────────────────────────────────────────────┘ │
-│ ┌─ GESTURE MONITOR ───────────────────────────┐ │
-│ │  Gesture   Threshold      Distance   Status │ │
-│ │  ──────────────────────────────────────────│ │
-│ │  wave      [===●===] 150  ████░░ 89    ●   │ │
-│ │  jack      [==●====] 120  ██░░░░ 43   ███  │ │
-│ │                                             │ │
-│ │            ★ jack DETECTED ★                │ │
-│ └─────────────────────────────────────────────┘ │
-│ ┌─ HIT LOG ───────────────────────────────────┐ │
-│ │  14:32:01  jack  dist: 43  → /gesture/2     │ │
-│ │  14:31:58  wave  dist: 72  → /gesture/1     │ │
-│ └─────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────┘
-```
-
-### Tests to Write
-
-```rust
-#[test]
-fn test_threshold_adjustment_affects_recognition() {
-    // With threshold 100, gesture is recognized
-    // With threshold 50, same distance is rejected
-}
-
-#[test]
-fn test_hit_log_records_events() {
-    let mut log = HitLog::new(100); // Keep last 100
-    log.record(Hit { gesture: "wave", distance: 43.0, ... });
-    assert_eq!(log.len(), 1);
-}
-
-#[test]
-fn test_auto_save_on_change() {
-    // Modify vocabulary
-    // Verify file was updated
-}
-```
-
-### How to Verify
-
-1. Create vocabulary with 2-3 trained gestures
-2. Switch to Performance mode
-3. Generate OSC input with gestures
-4. See distances update in real-time
-5. Adjust threshold slider, see recognition behavior change
-6. Check hit log shows all recognized gestures
-7. Switch back to Training mode, add gesture
-8. Verify file was saved automatically
-
-### Rust Concepts Introduced
-
-- Complex UI state management
-- File dialogs with `rfd` crate
-- Real-time slider updates
-- Scrolling lists in egui
-
-### Checkpoint
-
-**What works**: Everything! Full application with training and performance modes. Ready for real-world use.
-
-**Future enhancements** (post-v1.0): MIDI input, example management, gesture visualization, threshold auto-calibration.
-
----
-
-## Summary: Test Commands at Each Milestone
-
-| Milestone | Test Command | What to See |
-|-----------|--------------|-------------|
-| 1 | `cargo test` | 3 data model tests pass |
-| 2 | `cargo run` | GUI window with panels |
-| 3 | `cargo run` + OSC sender | "RECEIVING" status, frame count |
-| 4 | `cargo run` + click button | OSC hit received externally |
-| 5 | `cargo test engine::dtw` | DTW algorithm tests pass |
-| 6 | `cargo run` + record + perform | Hit detected and sent |
-| 7 | `cargo run` + spacebar | Training session with beeps |
-| 8 | `cargo run` | Full app, both modes work |
-
----
-
-## Getting Started
-
-When ready to begin Milestone 1, we'll:
-
-1. Create the Cargo project with dependencies
-2. Set up the module structure
-3. Implement `Vocabulary`, `Gesture`, `Example` structs
-4. Add serde serialization
-5. Write and run the tests
-
-Each milestone builds on the previous. Take them one at a time.
+*Last updated: 2026-01-24*
+*Based on deep research in `.llm/gesture-recognition-design.md`*

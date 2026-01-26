@@ -4,7 +4,7 @@ use eframe::egui;
 
 use crate::model::{Vocabulary, Example, save_vocabulary, load_vocabulary, default_vocabulary_dir};
 use crate::osc::{OscReceiverHandle, ConnectionStatus, OscSender, SenderStatus};
-use crate::engine::{Recognizer, HitLog, TrainingSession, TrainingConfig, BaselineConfig, SessionState, RecognitionConfig};
+use crate::engine::{Recognizer, HitLog, TrainingSession, TrainingConfig, SessionState, RecognitionConfig};
 
 // Custom colors - gold instead of yellow for better readability
 const GOLD: egui::Color32 = egui::Color32::from_rgb(255, 185, 50);
@@ -26,23 +26,6 @@ impl AppMode {
             AppMode::Training => "Training",
             AppMode::Performance => "Performance",
         }
-    }
-}
-
-/// Simple baseline recording state
-#[derive(Debug, Clone)]
-pub enum BaselineState {
-    Idle,
-    Countdown { start_time: std::time::Instant },
-    Recording { frames: Vec<Vec<f32>>, start_time: std::time::Instant },
-}
-
-impl PartialEq for BaselineState {
-    fn eq(&self, other: &Self) -> bool {
-        matches!((self, other),
-            (BaselineState::Idle, BaselineState::Idle) |
-            (BaselineState::Countdown { .. }, BaselineState::Countdown { .. }) |
-            (BaselineState::Recording { .. }, BaselineState::Recording { .. }))
     }
 }
 
@@ -78,11 +61,7 @@ pub struct GestureStudioApp {
     delete_gesture_id: Option<u32>,
     /// Vocabulary name being edited
     renaming_vocabulary: Option<String>,
-    /// Baseline recording state
-    baseline_state: BaselineState,
-    /// Baseline recording configuration
-    baseline_config: BaselineConfig,
-    /// Recognition config (debounce + cooldown)
+    /// Recognition config (cooldown timing)
     recognition_config: RecognitionConfig,
 }
 
@@ -145,8 +124,6 @@ impl GestureStudioApp {
             renaming_gesture: None,
             delete_gesture_id: None,
             renaming_vocabulary: None,
-            baseline_state: BaselineState::Idle,
-            baseline_config: BaselineConfig::default(),
             recognition_config,
         }
     }
@@ -216,44 +193,6 @@ impl GestureStudioApp {
 
         self.dirty = true;
         self.auto_save();
-    }
-
-    /// Auto-calibrate gesture thresholds based on baseline
-    /// Sets each threshold to 80% of the distance between baseline and gesture examples
-    fn auto_calibrate_thresholds(&mut self) {
-        use crate::engine::dtw::dtw_distance_normalized;
-
-        let baseline = match &self.vocabulary.baseline {
-            Some(b) if !b.is_empty() => b.clone(),
-            _ => return, // No baseline, can't calibrate
-        };
-
-        for gesture in &mut self.vocabulary.gestures {
-            if gesture.examples.is_empty() {
-                continue;
-            }
-
-            // Compute average distance from baseline to each gesture example
-            let mut total_dist = 0.0;
-            let mut count = 0;
-            for example in &gesture.examples {
-                let dist = dtw_distance_normalized(&baseline, &example.frames);
-                if dist.is_finite() {
-                    total_dist += dist;
-                    count += 1;
-                }
-            }
-
-            if count > 0 {
-                let avg_dist = total_dist / count as f32;
-                // Set threshold to 80% of average distance (gesture should be closer than baseline)
-                gesture.threshold = (avg_dist * 0.8).max(100.0);
-            }
-        }
-
-        // Sync to recognizer
-        self.sync_recognizer();
-        self.mark_dirty();
     }
 
     /// Create a new empty vocabulary
@@ -383,28 +322,6 @@ impl eframe::App for GestureStudioApp {
 
         // Process frames
         for frame in frames {
-            // Handle baseline countdown -> recording transition
-            if let BaselineState::Countdown { start_time } = self.baseline_state {
-                if start_time.elapsed().as_secs_f32() >= self.baseline_config.countdown_secs {
-                    self.baseline_state = BaselineState::Recording {
-                        frames: Vec::new(),
-                        start_time: std::time::Instant::now(),
-                    };
-                }
-            }
-
-            // If recording baseline, add frames
-            if let BaselineState::Recording { ref mut frames, start_time } = self.baseline_state {
-                frames.push(frame.clone());
-                // Auto-complete after baseline_duration seconds
-                if start_time.elapsed().as_secs_f32() >= self.baseline_config.duration_secs {
-                    let baseline_frames = std::mem::take(frames);
-                    self.vocabulary.baseline = Some(baseline_frames);
-                    self.baseline_state = BaselineState::Idle;
-                    self.mark_dirty();
-                }
-            }
-
             // If training gesture, add frames to training session
             if self.training_session.state == SessionState::Capturing {
                 self.training_session.add_frame(frame.clone());
@@ -470,8 +387,6 @@ impl eframe::App for GestureStudioApp {
                     if old_mode != self.mode {
                         if self.mode == AppMode::Performance {
                             self.recognizer.start();
-                            // Auto-calibrate thresholds based on baseline
-                            self.auto_calibrate_thresholds();
                         } else {
                             self.recognizer.stop();
                         }
@@ -495,10 +410,8 @@ impl eframe::App for GestureStudioApp {
                 self.show_gestures_panel(ui);
                 ui.add_space(8.0);
 
-                // Baseline and Train panels (only in Training mode)
+                // Training panel (only in Training mode)
                 if self.mode == AppMode::Training {
-                    self.show_baseline_panel(ui);
-                    ui.add_space(8.0);
                     self.show_train_panel(ui);
                 }
 
@@ -873,112 +786,13 @@ impl GestureStudioApp {
         });
     }
 
-    /// Render the baseline training panel
-    fn show_baseline_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-
-            ui.horizontal(|ui| {
-                ui.strong("1. BASELINE");
-                ui.colored_label(egui::Color32::GRAY, "(your rest position)");
-            });
-            ui.separator();
-
-            let has_baseline = self.vocabulary.baseline.is_some();
-            let is_receiving = self.osc_receiver.state.status == ConnectionStatus::Receiving;
-
-            match &self.baseline_state {
-                BaselineState::Idle => {
-                    ui.horizontal(|ui| {
-                        if has_baseline {
-                            ui.colored_label(BRIGHT_GREEN, "✓ Baseline recorded");
-                            if let Some(ref baseline) = self.vocabulary.baseline {
-                                ui.colored_label(egui::Color32::GRAY, format!("({} frames)", baseline.len()));
-                            }
-                        } else {
-                            ui.colored_label(GOLD, "⚠ No baseline - record your rest position first");
-                        }
-                    });
-
-                    ui.add_space(8.0);
-
-                    ui.horizontal(|ui| {
-                        let button_text = if has_baseline { "Re-record Baseline" } else { "Record Baseline" };
-                        let can_record = is_receiving && !self.training_session.is_active();
-
-                        if ui.add_enabled(can_record, egui::Button::new(button_text)).clicked() {
-                            self.baseline_state = BaselineState::Countdown {
-                                start_time: std::time::Instant::now(),
-                            };
-                        }
-
-                        ui.add_space(15.0);
-                        ui.label("Count-in:");
-                        ui.add(egui::DragValue::new(&mut self.baseline_config.countdown_secs)
-                            .range(1.0..=10.0)
-                            .speed(0.1)
-                            .suffix("s"));
-
-                        ui.add_space(10.0);
-                        ui.label("Duration:");
-                        ui.add(egui::DragValue::new(&mut self.baseline_config.duration_secs)
-                            .range(1.0..=10.0)
-                            .speed(0.1)
-                            .suffix("s"));
-
-                        if !is_receiving {
-                            ui.add_space(10.0);
-                            ui.colored_label(egui::Color32::GRAY, "(waiting for OSC data)");
-                        }
-                    });
-                }
-                BaselineState::Countdown { start_time } => {
-                    let elapsed = start_time.elapsed().as_secs_f32();
-                    let remaining = (self.baseline_config.countdown_secs - elapsed).max(0.0);
-                    let countdown_value = remaining.ceil() as u32;
-
-                    ui.vertical_centered(|ui| {
-                        ui.colored_label(
-                            GOLD,
-                            egui::RichText::new("GET READY").size(20.0).strong()
-                        );
-                        ui.add_space(8.0);
-                        ui.colored_label(
-                            BRIGHT_BLUE,
-                            egui::RichText::new(format!("{}", countdown_value.max(1))).size(48.0).strong()
-                        );
-                        ui.add_space(4.0);
-                        ui.colored_label(egui::Color32::GRAY, "Stand in your rest position...");
-                    });
-                }
-                BaselineState::Recording { frames, start_time } => {
-                    let elapsed = start_time.elapsed().as_secs_f32();
-                    let remaining = (self.baseline_config.duration_secs - elapsed).max(0.0);
-                    let progress = (elapsed / self.baseline_config.duration_secs).min(1.0);
-
-                    ui.vertical_centered(|ui| {
-                        ui.colored_label(
-                            BRIGHT_BLUE,
-                            egui::RichText::new("STAND STILL").size(24.0).strong()
-                        );
-                        ui.add_space(8.0);
-                        ui.label(format!("{:.1}s remaining", remaining));
-                        ui.add(egui::ProgressBar::new(progress).desired_width(200.0));
-                        ui.add_space(4.0);
-                        ui.colored_label(egui::Color32::GRAY, format!("{} frames captured", frames.len()));
-                    });
-                }
-            }
-        });
-    }
-
     /// Render the training panel
     fn show_train_panel(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
 
             ui.horizontal(|ui| {
-                ui.strong("2. TRAIN GESTURES");
+                ui.strong("TRAIN GESTURES");
             });
             ui.separator();
 
@@ -1269,18 +1083,6 @@ impl GestureStudioApp {
 
         ui.add_space(8.0);
 
-        // Baseline info panel
-        if let Some(ref baseline) = self.vocabulary.baseline {
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::GRAY,
-                        egui::RichText::new(format!("Baseline: {} frames | Thresholds auto-calibrated", baseline.len())).size(14.0));
-                });
-            });
-            ui.add_space(4.0);
-        }
-
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
 
@@ -1409,35 +1211,20 @@ impl GestureStudioApp {
 
             // Recognition timing controls
             ui.horizontal(|ui| {
-                ui.colored_label(egui::Color32::GRAY, egui::RichText::new("HIT fires when Distance stays below Threshold").size(13.0));
+                ui.colored_label(egui::Color32::GRAY, egui::RichText::new("HIT fires when Distance crosses below Threshold (edge detection)").size(13.0));
             });
 
             ui.horizontal(|ui| {
-                // Debounce control
-                ui.label("Debounce:");
-                let mut confirm = self.recognition_config.confirm_ms as i32;
-                if ui.add(egui::DragValue::new(&mut confirm)
-                    .range(0..=500)
-                    .speed(5)
-                    .suffix("ms")).changed()
-                {
-                    self.recognition_config.confirm_ms = confirm as u64;
-                    self.recognizer.set_confirm_ms(self.recognition_config.confirm_ms);
-                }
-                ui.colored_label(egui::Color32::GRAY, "(filters noise)");
-
-                ui.add_space(20.0);
-
                 // Cooldown control
                 ui.label("Cooldown:");
-                let mut refractory = self.recognition_config.refractory_ms as i32;
-                if ui.add(egui::DragValue::new(&mut refractory)
+                let mut cooldown = self.recognition_config.cooldown_ms as i32;
+                if ui.add(egui::DragValue::new(&mut cooldown)
                     .range(100..=2000)
                     .speed(10)
                     .suffix("ms")).changed()
                 {
-                    self.recognition_config.refractory_ms = refractory as u64;
-                    self.recognizer.set_refractory_ms(self.recognition_config.refractory_ms);
+                    self.recognition_config.cooldown_ms = cooldown as u64;
+                    self.recognizer.set_cooldown_ms(self.recognition_config.cooldown_ms);
                 }
                 ui.colored_label(egui::Color32::GRAY, "(min time between hits)");
             });

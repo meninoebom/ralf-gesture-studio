@@ -130,8 +130,8 @@ pub struct Vocabulary {
     pub input: InputConfig,
     /// OSC output configuration
     pub output: OutputConfig,
-    /// Baseline frames (user standing still) - used for auto-calibration
-    #[serde(default)]
+    /// Baseline frames (deprecated - kept for file compatibility)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Vec<Vec<f32>>>,
     /// List of gestures in this vocabulary
     pub gestures: Vec<Gesture>,

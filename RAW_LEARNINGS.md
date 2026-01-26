@@ -23,6 +23,116 @@ A living document capturing insights, calibrations, bugs, and best practices dis
 
 ## Learnings Log
 
+### 2026-01-24 — Buffer Reset After Detection: The "Bounce Back" Pattern
+
+`[ALGORITHM]` `[RESEARCH]`
+
+**Problem:** After detecting a gesture, the distance stays low because the gesture frames remain in the sliding window. It takes ~3 seconds for them to naturally "slide out", during which the system can't reliably detect the next gesture.
+
+**Research finding:** Voice recognition and keyword spotting systems solve this with **buffer reset after detection**.
+
+**Evidence from academic literature:**
+
+1. **"Contrastive Learning with Audio Discrimination for Customizable Keyword Spotting" (2024)** - [arXiv:2401.06485](https://arxiv.org/html/2401.06485)
+   > "When a keyword score surpasses the detection threshold, the system **resets the model state** and introduces a **1-second cooldown period** to prevent recurrent wake-up on the same keyword."
+
+2. **"Streaming keyword spotting on mobile devices" (2020)** - [arXiv:2005.06720](https://arxiv.org/pdf/2005.06720)
+   > Documents up to **2x accuracy reduction** when RNN states aren't reset between sequences. Shows ring buffer implementation patterns.
+
+3. **"Attentive Decision-making and Dynamic Resetting of SRNNs" (2022)** - [ACM DL](https://dl.acm.org/doi/abs/10.1145/3546790.3546795)
+   > "Network dynamics become saturated... requiring network state resetting events."
+
+4. **"Gesture Recognition Using DTW and Kinect"** - [ResearchGate](https://www.researchgate.net/publication/324177668)
+   > Addresses buffer issues: "cannot identify when a movement has finished, causing partial fill of the test data buffer"
+
+**Why the 1-second cooldown is universal:**
+- Prevents overlapping sliding windows from generating duplicate detections
+- Addresses state saturation in continuous streams
+- Empirically validated across keyword spotting, wake word detection, and ASR systems
+
+**Solution for gesture recognition:**
+```rust
+// After hit fires:
+1. Clear the frame buffer
+2. System enters "collecting data" state (not enough frames to match)
+3. Natural gap while buffer refills (~1-1.5 seconds)
+4. Ready to detect next gesture
+```
+
+**Key insight:** The "bounce back" to neutral is achieved by clearing the buffer, which returns the system to "insufficient data" state. Distance effectively becomes undefined/infinity until enough new frames arrive.
+
+---
+
+### 2026-01-24 — Preserve Edge Detection State After Buffer Clear
+
+`[BUG]` `[ALGORITHM]`
+
+**Problem:** After implementing buffer clear, hits fired in an infinite loop. Once a gesture triggered, it would keep triggering every ~1.5 seconds (the time for the buffer to refill).
+
+**Root cause:** When clearing the buffer after a hit, we were also resetting `was_below_threshold = false`. This made the system "forget" that it was already below threshold.
+
+**The bug cycle:**
+1. Distance crosses below threshold → hit fires
+2. Buffer clears, `was_below_threshold = false` ← BUG
+3. ~1.5s later, buffer refills with 90 frames
+4. Distance computed, still below threshold (user hasn't moved)
+5. Edge detection sees: `below_threshold=true`, `was_below_threshold=false` → new crossing!
+6. Hit fires → buffer clears → repeat infinitely
+
+**Solution:** Do NOT reset `was_below_threshold` when clearing the buffer. Keep it `true` so the user must move away (distance goes above threshold) before another hit can fire.
+
+```rust
+// After hit fires:
+if best_hit.is_some() {
+    self.buffer.clear();
+    // Clear display distances while buffer refills
+    for gesture in &mut self.gestures {
+        gesture.current_distance = None;
+        // DO NOT reset was_below_threshold!
+        // User must move away before next hit can fire.
+    }
+}
+```
+
+**Key insight:** Buffer clear resets the *data*, but edge detection state must persist. The user must complete a full cycle (below → above → below) to trigger another hit. This prevents "camping" on a gesture position.
+
+---
+
+### 2026-01-24 — Edge Detection is Correct, Debounce is Wrong
+
+`[ALGORITHM]` `[UX]`
+
+**Problem:** Hit detection using "distance must stay below threshold for N ms" (debounce) missed quick gestures and felt unresponsive.
+
+**Research findings:** Surveyed Wekinator, librosa onset detection, signal processing literature. Consensus:
+- **Edge detection** (fire when crossing threshold) is correct for gesture recognition
+- **Debounce** is for filtering noise, but it blocks fast movements
+- **Refractory/cooldown period** is sufficient for preventing double-triggers
+
+**Solution:** Fire immediately when distance crosses below threshold, not when it stays below.
+
+```rust
+// Edge detection: fire on TRANSITION from above to below threshold
+let below_threshold = distance < gesture.threshold;
+let is_crossing_down = below_threshold && !gesture.was_below_threshold;
+let not_in_cooldown = !gesture.in_cooldown(cooldown_duration);
+
+if is_crossing_down && not_in_cooldown {
+    fire_hit();
+}
+
+// Update state for next frame
+gesture.was_below_threshold = below_threshold;
+```
+
+**Key insight:** Like phoneme detection in speech recognition — it's about detecting the moment you enter a recognized state, not how long you stay there. Quick gestures (claps, stomps) may only dip below threshold for 50-100ms.
+
+**Config simplification:**
+- Removed: `confirm_ms` (debounce)
+- Kept: `cooldown_ms` (400ms default, allows ~2.5 hits/sec)
+
+---
+
 ### 2026-01-24 — DTW Performance: Skip Frames to Prevent GUI Freeze
 
 `[ALGORITHM]` `[BUG]`

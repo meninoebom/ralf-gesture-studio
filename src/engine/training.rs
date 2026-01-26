@@ -23,24 +23,6 @@ pub enum SessionState {
     Complete,
 }
 
-/// Configuration for baseline recording session
-#[derive(Debug, Clone)]
-pub struct BaselineConfig {
-    /// Countdown time before recording starts (seconds)
-    pub countdown_secs: f32,
-    /// Duration of baseline recording (seconds)
-    pub duration_secs: f32,
-}
-
-impl Default for BaselineConfig {
-    fn default() -> Self {
-        Self {
-            countdown_secs: 3.0,
-            duration_secs: 3.0,
-        }
-    }
-}
-
 /// Configuration for a gesture training session
 #[derive(Debug, Clone)]
 pub struct TrainingConfig {

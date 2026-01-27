@@ -1,6 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Default coefficient for statistical threshold (μ + σ×coefficient)
+fn default_threshold_coefficient() -> f32 {
+    2.0
+}
+
 /// Configuration for OSC input (receiving skeleton data)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputConfig {
@@ -83,6 +88,20 @@ pub struct Gesture {
     pub created_at: DateTime<Utc>,
     /// Recorded examples of this gesture
     pub examples: Vec<Example>,
+
+    // --- Statistical Threshold Fields (GRT-style μ+σ approach) ---
+    /// Mean distance between training examples (computed after training)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance_mean: Option<f32>,
+    /// Standard deviation of distances between training examples
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance_std: Option<f32>,
+    /// If true, use manual threshold; if false, use statistical threshold (μ + σ×coefficient)
+    #[serde(default)]
+    pub threshold_manual_override: bool,
+    /// Coefficient for statistical threshold: threshold = μ + σ×coefficient (default 2.0)
+    #[serde(default = "default_threshold_coefficient")]
+    pub threshold_coefficient: f32,
 }
 
 impl Gesture {
@@ -92,10 +111,50 @@ impl Gesture {
             id,
             name: name.to_string(),
             osc_address: format!("/gesture/{}", id),
-            threshold: 5000.0, // Default threshold - higher value for smoother recognition
+            threshold: 100.0, // Default threshold for normalized 0-1 coordinate inputs
             created_at: Utc::now(),
             examples: Vec::new(),
+            // Statistical threshold fields (computed after training)
+            distance_mean: None,
+            distance_std: None,
+            threshold_manual_override: false,
+            threshold_coefficient: default_threshold_coefficient(),
         }
+    }
+
+    /// Compute and update the effective threshold based on statistical data.
+    /// If manual override is set or no statistics are available, uses the manual threshold.
+    /// Otherwise, computes threshold = μ + σ × coefficient.
+    pub fn effective_threshold(&self) -> f32 {
+        if self.threshold_manual_override {
+            return self.threshold;
+        }
+        match (self.distance_mean, self.distance_std) {
+            (Some(mean), Some(std)) => mean + std * self.threshold_coefficient,
+            _ => self.threshold, // Fall back to manual threshold if no statistics
+        }
+    }
+
+    /// Update the statistical threshold values and recalculate threshold.
+    /// This should be called after training when new examples are added.
+    pub fn update_statistics(&mut self, mean: f32, std: f32) {
+        self.distance_mean = Some(mean);
+        self.distance_std = Some(std);
+        // Update the threshold field if not in manual override mode
+        if !self.threshold_manual_override {
+            self.threshold = mean + std * self.threshold_coefficient;
+        }
+    }
+
+    /// Clear statistical data (e.g., when examples are removed)
+    pub fn clear_statistics(&mut self) {
+        self.distance_mean = None;
+        self.distance_std = None;
+    }
+
+    /// Check if this gesture has valid statistical threshold data
+    pub fn has_statistics(&self) -> bool {
+        self.distance_mean.is_some() && self.distance_std.is_some()
     }
 
     /// Add a recorded example to this gesture

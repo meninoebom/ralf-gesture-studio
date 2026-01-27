@@ -130,9 +130,47 @@ RecognitionConfig {
 }
 ```
 
+### Statistical Threshold (μ+σ Approach)
+
+**v0.3.0 Feature**: Automatic threshold calibration using the GRT-style statistical approach.
+
+Instead of manually tuning thresholds per gesture, the system computes statistics from training examples:
+1. After training, compute DTW distances between all pairs of examples
+2. Calculate mean (μ) and standard deviation (σ) of these distances
+3. Set threshold = μ + σ × coefficient (default coefficient = 2.0)
+
+**Key Benefits**:
+- **No manual tuning**: One global coefficient works for all gestures
+- **Adapts to complexity**: Simple gestures get tight thresholds; complex gestures get looser ones
+- **Automatic recalibration**: Threshold updates when examples are added
+
+**UI Features**:
+- **AUTO/MAN indicator**: Shows whether using computed or manual threshold
+- **μ±σ display**: Shows mean and std when in AUTO mode
+- **Click to toggle**: Switch between auto and manual modes
+
+**Data Model** (in `Gesture` struct):
+```rust
+distance_mean: Option<f32>,        // Computed after training
+distance_std: Option<f32>,         // Computed after training
+threshold_manual_override: bool,   // If true, use manual threshold
+threshold_coefficient: f32,        // Default 2.0 (μ + σ×coeff)
+```
+
+**Reference**: Gesture Recognition Toolkit (GRT) by Nick Gillian
+
 See `.llm/active-plan.md` for detailed algorithm documentation and Wekinator source references.
 
 ## Implementation Status
+
+**v0.3.0 COMPLETE** - Statistical threshold (μ+σ approach):
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Statistical Computation | ✅ | Compute μ and σ from training examples |
+| Auto Threshold | ✅ | threshold = μ + σ × coefficient |
+| UI Integration | ✅ | AUTO/MAN toggle, μ±σ display |
+| Persistence | ✅ | Statistics saved/loaded with vocabulary |
 
 **v0.2.0 COMPLETE** - Wekinator-style recognition:
 
@@ -233,6 +271,6 @@ oscsend localhost 6448 /wek/inputs f f f f ...
 
 - MIDI input for training triggers
 - Individual example management (view/delete)
-- Threshold auto-calibration
+- Threshold auto-calibration (see `.claude/commands/dtw-gesture-recognition.md` for μ+σ approach when ready to implement)
 - Gesture visualization/playback
 - Wekinator project import

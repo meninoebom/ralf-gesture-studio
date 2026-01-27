@@ -84,6 +84,87 @@ function dtw_distance(seq1, seq2):
     return dtw[m][n]
 ```
 
+### 2a. Z-Normalization (Scale/Offset Invariance)
+
+**What:** Normalize each sequence independently to mean=0, std=1 before DTW comparison.
+
+**Formula:** `z = (x - mean) / std`
+
+**Why it matters:**
+- Makes DTW **scale-invariant**: 0-1 normalized coords vs 0-640 pixel coords produce same distances
+- Makes DTW **offset-invariant**: Baseline shifts (person standing in different position) don't affect matching
+- Each sequence uses its OWN mean/std (not a global normalization across all sequences)
+
+**Rust implementation:**
+```rust
+fn z_normalize(sequence: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    let all_values: Vec<f32> = sequence.iter().flatten().copied().collect();
+    let n = all_values.len() as f32;
+    let mean = all_values.iter().sum::<f32>() / n;
+    let variance = all_values.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n;
+    let std = variance.sqrt();
+
+    // Edge case: constant sequence (avoid division by zero)
+    let std = if std < 1e-10 { 1.0 } else { std };
+
+    sequence.iter()
+        .map(|frame| frame.iter().map(|x| (x - mean) / std).collect())
+        .collect()
+}
+```
+
+**Edge case:** If std=0 (constant sequence, e.g., standing perfectly still), set std=1 to avoid NaN.
+
+**Reference implementations:** scipy.stats.zscore, tslearn.TimeSeriesScalerMeanVariance, dtaidistance.preprocessing.znormal
+
+### 2b. Path-Length Normalization (Duration Invariance)
+
+**What:** Divide the raw DTW distance by (n + m) where n and m are the sequence lengths.
+
+**Formula:** `normalized_distance = raw_distance / (n + m)`
+
+**Why it matters:**
+- Raw DTW distance scales with sequence length (longer gestures = higher distances)
+- Normalization makes distances **comparable across different gesture durations**
+- A 2-second wave and a 5-second wave can have the same normalized distance if equally well-matched
+
+**Important:** Most DTW libraries do NOT apply this automatically. You must do it yourself.
+
+**Rust implementation:**
+```rust
+fn dtw_distance_normalized(seq1: &[Vec<f32>], seq2: &[Vec<f32>]) -> f32 {
+    let raw_distance = dtw_distance(seq1, seq2);
+    let path_length = (seq1.len() + seq2.len()) as f32;
+    raw_distance / path_length
+}
+```
+
+**Note:** For asymmetric step patterns, divide by n only (query length). The (n + m) normalization is recommended by Sakoe-Chiba (1978) for symmetric2 step pattern.
+
+### 2c. Combined Preprocessing Pipeline
+
+For robust gesture matching, apply both normalizations:
+
+```rust
+fn compare_gestures(window: &[Vec<f32>], example: &[Vec<f32>]) -> f32 {
+    // 1. Z-normalize each sequence independently
+    let window_normalized = z_normalize(window);
+    let example_normalized = z_normalize(example);
+
+    // 2. Compute DTW distance
+    let raw_distance = dtw_distance(&window_normalized, &example_normalized);
+
+    // 3. Path-length normalize
+    let path_length = (window.len() + example.len()) as f32;
+    raw_distance / path_length
+}
+```
+
+**Combined effect:** Distances become comparable regardless of:
+- Input coordinate scale (pixels vs normalized 0-1)
+- Baseline offset (person standing left vs right)
+- Gesture duration (fast vs slow performance)
+
 ### 3. Performance Optimizations (ESSENTIAL)
 
 **Frame Skipping** - Only compute DTW every Nth frame:
@@ -193,9 +274,140 @@ Distance scale depends on:
 - Threshold ~8000 worked well
 - Default: user-adjustable slider
 
-**Future: Auto-Calibration**:
-- Compute intra-class distance (between examples of same gesture)
-- Set threshold slightly above max intra-class distance
+### Statistical Threshold: The μ+σ Approach (GRT Method)
+
+**Source**: [Gesture Recognition Toolkit (GRT)](https://github.com/nickgillian/grt) — battle-tested C++ library for real-time gesture recognition.
+
+**The key insight**: Each gesture automatically gets its own threshold based on its natural variability during training. Gestures with more variation get looser thresholds; precise gestures get tighter thresholds.
+
+**How it works**:
+
+1. **During training**, for each gesture class:
+   - Compute DTW distances between all training examples
+   - Find the "best template" (example with lowest average distance to others)
+   - Calculate mean (μ) and standard deviation (σ) of distances to best template
+
+2. **Set per-gesture threshold**:
+   ```
+   threshold = μ + (σ × null_rejection_coeff)
+   ```
+
+3. **Default null_rejection_coeff = 3.0** (allows matches within 3 sigma of training mean)
+
+**Implementation pattern**:
+
+```rust
+struct GestureTemplate {
+    examples: Vec<Sequence>,
+    best_template: Sequence,  // Example with lowest avg distance to others
+    training_mu: f32,         // Mean distance during training
+    training_sigma: f32,      // Std dev of distances during training
+    threshold: f32,           // mu + sigma * coefficient
+}
+
+fn compute_threshold(examples: &[Sequence], null_rejection_coeff: f32) -> ThresholdStats {
+    // 1. Compute all pairwise DTW distances
+    let mut all_distances: Vec<Vec<f32>> = Vec::new();
+    for (i, ex_i) in examples.iter().enumerate() {
+        let distances: Vec<f32> = examples.iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, ex_j)| dtw_distance(ex_i, ex_j))
+            .collect();
+        all_distances.push(distances);
+    }
+
+    // 2. Find best template (lowest average distance to others)
+    let avg_distances: Vec<f32> = all_distances.iter()
+        .map(|d| d.iter().sum::<f32>() / d.len() as f32)
+        .collect();
+    let best_idx = avg_distances.iter()
+        .enumerate()
+        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+
+    // 3. Compute mu and sigma from distances to best template
+    let distances_to_best: Vec<f32> = examples.iter()
+        .enumerate()
+        .filter(|(i, _)| *i != best_idx)
+        .map(|(_, ex)| dtw_distance(&examples[best_idx], ex))
+        .collect();
+
+    let mu = distances_to_best.iter().sum::<f32>() / distances_to_best.len() as f32;
+    let variance = distances_to_best.iter()
+        .map(|d| (d - mu).powi(2))
+        .sum::<f32>() / distances_to_best.len() as f32;
+    let sigma = variance.sqrt();
+
+    // 4. Compute threshold
+    let threshold = mu + sigma * null_rejection_coeff;
+
+    ThresholdStats { best_template: examples[best_idx].clone(), mu, sigma, threshold }
+}
+```
+
+**Parameters**:
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `null_rejection_coeff` | 3.0 | Higher = more permissive (fewer false negatives), Lower = stricter (fewer false positives) |
+
+**Why this is better than manual thresholds**:
+- **No per-gesture tuning**: One global `null_rejection_coeff` works for all gestures
+- **Adapts to complexity**: Simple gestures (clap) get tight thresholds; complex gestures (dance phrase) get looser thresholds
+- **Battle-tested**: Used in production systems for years
+- **Automatic recalibration**: Threshold updates when you add/remove training examples
+
+**Minimum examples required**: At least 3 examples per gesture to compute meaningful statistics.
+
+### Optional Enhancement: Winner-Take-All Hybrid
+
+For multi-gesture systems, add a secondary check using likelihood scores:
+
+```rust
+fn classify_with_likelihood(
+    window: &Sequence,
+    gestures: &[GestureTemplate],
+) -> Option<usize> {
+    // 1. Compute distances to all gestures
+    let distances: Vec<f32> = gestures.iter()
+        .map(|g| dtw_distance(window, &g.best_template))
+        .collect();
+
+    // 2. Find best match
+    let (best_idx, best_distance) = distances.iter()
+        .enumerate()
+        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap();
+
+    // 3. Check threshold (primary gate)
+    if *best_distance > gestures[best_idx].threshold {
+        return None;  // No match
+    }
+
+    // 4. Compute likelihood scores (1/distance, normalized)
+    let inv_distances: Vec<f32> = distances.iter()
+        .map(|d| 1.0 / (d + 1e-6))  // Avoid division by zero
+        .collect();
+    let sum: f32 = inv_distances.iter().sum();
+    let likelihoods: Vec<f32> = inv_distances.iter()
+        .map(|d| d / sum)
+        .collect();
+
+    // 5. Winner must have >50% likelihood
+    if likelihoods[best_idx] > 0.5 {
+        Some(best_idx)
+    } else {
+        None  // Ambiguous match
+    }
+}
+```
+
+**Why dual protection helps**:
+- Threshold alone might accept a gesture that's close to two different templates
+- Likelihood check ensures the best match is "clearly" the best, not just marginally better
+- Reduces false positives in multi-gesture vocabularies
 
 ## Data Structures
 

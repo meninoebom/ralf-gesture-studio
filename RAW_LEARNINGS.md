@@ -23,6 +23,103 @@ A living document capturing insights, calibrations, bugs, and best practices dis
 
 ## Learnings Log
 
+### 2026-01-26 — Statistical Threshold (μ+σ) for Auto-Calibration
+
+`[ALGORITHM]` `[RESEARCH]` `[CALIBRATION]`
+
+**Problem:** Manual threshold calibration is tedious and doesn't scale. Each gesture needs its own threshold, and there's no principled way to set it. Users see meaningless numbers (500? 2000? 10000?) and have to guess.
+
+**Discovery:** The Gesture Recognition Toolkit (GRT) uses a statistical approach that's been battle-tested in production systems.
+
+**Source:** [nickgillian/grt](https://github.com/nickgillian/grt) — C++ library for real-time gesture recognition
+
+**The μ+σ Method:**
+
+1. During training, compute DTW distances between all examples of a gesture
+2. Find the "best template" (example with lowest average distance to others)
+3. Compute mean (μ) and standard deviation (σ) of distances to best template
+4. Set threshold = μ + (σ × null_rejection_coeff)
+
+**Formula:**
+```
+threshold_gesture = mean_distance + (std_distance × null_rejection_coeff)
+```
+
+**Default null_rejection_coeff = 3.0** (allows matches within 3 sigma of training mean)
+
+**Why this works:**
+- **Adapts to gesture complexity**: A precise clap has low variance → tight threshold. A flowing dance phrase has high variance → looser threshold.
+- **One global parameter**: `null_rejection_coeff` works for all gestures. No per-gesture tuning.
+- **Auto-updates**: Threshold recalculates when training examples change.
+- **Minimum examples**: Need at least 3 examples for meaningful statistics.
+
+**Implementation pattern:**
+```rust
+struct GestureTemplate {
+    examples: Vec<Sequence>,
+    best_template: Sequence,  // Example with lowest avg distance to others
+    training_mu: f32,         // Mean distance during training
+    training_sigma: f32,      // Std dev of distances during training
+    threshold: f32,           // mu + sigma * coefficient
+}
+```
+
+**Optional enhancement — Winner-Take-All Hybrid:**
+Also compute likelihood scores (1/distance normalized across all gestures) and require best gesture to have >50% likelihood. Provides dual protection against ambiguous matches.
+
+**Full documentation:** See `.claude/commands/dtw-gesture-recognition.md` section "Statistical Threshold: The μ+σ Approach (GRT Method)"
+
+---
+
+### 2026-01-26 — Z-Normalization and Path-Length Normalization for DTW
+
+`[ALGORITHM]` `[RESEARCH]`
+
+**Problem:** Raw DTW distances are sensitive to:
+1. **Scale**: 0-1 normalized skeleton coords vs 0-640 pixel coords produce wildly different distances
+2. **Offset**: Person standing left vs right of frame shifts all coordinates
+3. **Duration**: Longer gestures accumulate more distance even if equally well-matched
+
+**Solution 1: Z-Normalization (per-sequence)**
+
+Normalize each sequence independently to mean=0, std=1 before comparison.
+
+Formula: `z = (x - mean) / std`
+
+```rust
+fn z_normalize(sequence: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    let all_values: Vec<f32> = sequence.iter().flatten().copied().collect();
+    let n = all_values.len() as f32;
+    let mean = all_values.iter().sum::<f32>() / n;
+    let variance = all_values.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n;
+    let std = if variance.sqrt() < 1e-10 { 1.0 } else { variance.sqrt() };
+
+    sequence.iter()
+        .map(|frame| frame.iter().map(|x| (x - mean) / std).collect())
+        .collect()
+}
+```
+
+**Key insight:** Each sequence uses its OWN mean/std. This is NOT global normalization across all training data.
+
+**Edge case:** If std=0 (constant sequence), set std=1 to avoid division by zero.
+
+**Solution 2: Path-Length Normalization**
+
+Divide raw DTW distance by (n + m) where n and m are sequence lengths.
+
+Formula: `normalized_distance = raw_distance / (n + m)`
+
+**Key insight:** Most DTW libraries do NOT apply this automatically. Recommended by Sakoe-Chiba (1978) for symmetric2 step pattern.
+
+**Combined effect:** Distances become comparable regardless of input scale, baseline offset, or gesture duration.
+
+**Reference implementations:** scipy.stats.zscore, tslearn.TimeSeriesScalerMeanVariance, dtaidistance.preprocessing.znormal
+
+**Full documentation:** See `.claude/commands/dtw-gesture-recognition.md` sections 2a, 2b, 2c.
+
+---
+
 ### 2026-01-24 — Buffer Reset After Detection: The "Bounce Back" Pattern
 
 `[ALGORITHM]` `[RESEARCH]`
@@ -431,4 +528,4 @@ if is_hit {
 
 ---
 
-*Last updated: 2026-01-24*
+*Last updated: 2026-01-26*

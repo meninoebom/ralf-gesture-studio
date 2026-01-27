@@ -17,10 +17,16 @@ pub mod dtw;
 pub mod buffer;
 pub mod recognizer;
 pub mod training;
+pub mod statistics;
 
 // Core types used by the app
 pub use recognizer::{Recognizer, HitLog, RecognitionConfig};
 pub use training::{TrainingSession, TrainingConfig, SessionState};
+pub use statistics::compute_threshold_stats;
+
+// Additional exports available for future use
+#[allow(unused_imports)]
+pub use statistics::{compute_threshold_stats_downsampled, ThresholdStats};
 
 // Re-export for future use
 #[allow(unused_imports)]

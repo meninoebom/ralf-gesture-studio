@@ -4,7 +4,7 @@ use eframe::egui;
 
 use crate::model::{Vocabulary, Example, save_vocabulary, load_vocabulary, default_vocabulary_dir};
 use crate::osc::{OscReceiverHandle, ConnectionStatus, OscSender, SenderStatus};
-use crate::engine::{Recognizer, HitLog, TrainingSession, TrainingConfig, SessionState, RecognitionConfig};
+use crate::engine::{Recognizer, HitLog, TrainingSession, TrainingConfig, SessionState, RecognitionConfig, compute_threshold_stats};
 
 // Custom colors - gold instead of yellow for better readability
 const GOLD: egui::Color32 = egui::Color32::from_rgb(255, 185, 50);
@@ -195,8 +195,43 @@ impl GestureStudioApp {
             self.recognizer.add_example(gesture_id, frames);
         }
 
+        // Compute statistical threshold after training (GRT-style μ+σ approach)
+        self.compute_gesture_statistics(gesture_id);
+
         self.dirty = true;
         self.auto_save();
+    }
+
+    /// Compute and update statistical threshold for a gesture based on its training examples.
+    /// Uses the GRT-style μ+σ approach: threshold = mean + std × coefficient
+    fn compute_gesture_statistics(&mut self, gesture_id: u32) {
+        // Get the examples from vocabulary
+        let examples: Vec<Vec<Vec<f32>>> = self.vocabulary
+            .get_gesture(gesture_id)
+            .map(|g| g.examples.iter().map(|e| e.frames.clone()).collect())
+            .unwrap_or_default();
+
+        // Need at least 2 examples to compute meaningful statistics
+        if examples.len() < 2 {
+            return;
+        }
+
+        // Get the coefficient from the gesture
+        let coefficient = self.vocabulary
+            .get_gesture(gesture_id)
+            .map(|g| g.threshold_coefficient)
+            .unwrap_or(2.0);
+
+        // Compute statistics
+        if let Some(stats) = compute_threshold_stats(&examples, coefficient) {
+            // Update vocabulary gesture
+            if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
+                gesture.update_statistics(stats.mean, stats.std);
+
+                // Also update the recognizer's threshold
+                self.recognizer.set_threshold(gesture_id, gesture.threshold);
+            }
+        }
     }
 
     /// Create a new empty vocabulary
@@ -1175,18 +1210,19 @@ impl GestureStudioApp {
             let distances = self.recognizer.current_distances();
 
             // Collect threshold changes to apply after
-            let mut threshold_changes: Vec<(u32, f32)> = Vec::new();
+            let mut threshold_changes: Vec<(u32, f32, bool)> = Vec::new(); // (id, value, is_manual)
 
             // Use Grid for clean layout - LARGER FONTS
             egui::Grid::new("gesture_monitor_grid")
-                .num_columns(4)
-                .spacing([16.0, 12.0])
+                .num_columns(5)
+                .spacing([12.0, 12.0])
                 .striped(true)
                 .show(ui, |ui| {
                     // Header row
                     ui.label(egui::RichText::new("Gesture").strong().size(16.0));
                     ui.label(egui::RichText::new("Distance").strong().size(16.0));
                     ui.label(egui::RichText::new("< Threshold").strong().size(16.0));
+                    ui.label(egui::RichText::new("Mode").strong().size(14.0));
                     ui.label(""); // Hit column
                     ui.end_row();
 
@@ -1195,6 +1231,10 @@ impl GestureStudioApp {
                         let example_count = self.recognizer.example_count(*id);
                         let has_examples = example_count > 0;
 
+                        // Get statistical info from vocabulary
+                        let gesture_stats = self.vocabulary.get_gesture(*id)
+                            .map(|g| (g.distance_mean, g.distance_std, g.threshold_manual_override, g.threshold_coefficient));
+
                         // Check if THIS gesture had a recent hit (within 300ms for quick feedback)
                         let had_recent_hit = recent_hit_info.as_ref()
                             .map(|(hit_name, ms)| hit_name == name && *ms < 300)
@@ -1202,24 +1242,24 @@ impl GestureStudioApp {
 
                         // Gesture name with example count (fixed width)
                         ui.allocate_ui_with_layout(
-                            egui::vec2(140.0, 28.0),
+                            egui::vec2(130.0, 28.0),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
                                 if has_examples {
-                                    ui.label(egui::RichText::new(format!("{} ({})", name, example_count)).size(18.0));
+                                    ui.label(egui::RichText::new(format!("{} ({})", name, example_count)).size(16.0));
                                 } else {
-                                    ui.colored_label(GOLD, egui::RichText::new(format!("{} (train)", name)).size(18.0));
+                                    ui.colored_label(GOLD, egui::RichText::new(format!("{} (train)", name)).size(16.0));
                                 }
                             }
                         );
 
                         // Current distance (fixed width) - LARGE, this is key info
                         ui.allocate_ui_with_layout(
-                            egui::vec2(90.0, 28.0),
+                            egui::vec2(80.0, 28.0),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
                                 if !has_examples {
-                                    ui.label(egui::RichText::new("--").size(22.0));
+                                    ui.label(egui::RichText::new("--").size(20.0));
                                 } else {
                                     match current_dist {
                                         Some(dist) => {
@@ -1229,10 +1269,10 @@ impl GestureStudioApp {
                                             } else {
                                                 egui::Color32::LIGHT_GRAY
                                             };
-                                            ui.colored_label(color, egui::RichText::new(format!("{:.0}", dist)).size(22.0).strong());
+                                            ui.colored_label(color, egui::RichText::new(format!("{:.0}", dist)).size(20.0).strong());
                                         }
                                         None => {
-                                            ui.colored_label(egui::Color32::GRAY, egui::RichText::new("...").size(22.0));
+                                            ui.colored_label(egui::Color32::GRAY, egui::RichText::new("...").size(20.0));
                                         }
                                     }
                                 }
@@ -1242,26 +1282,77 @@ impl GestureStudioApp {
                         // Threshold slider (higher = easier to hit)
                         let mut thresh = *threshold;
                         ui.horizontal(|ui| {
-                            let slider = egui::Slider::new(&mut thresh, 100.0..=10000.0)
+                            let slider = egui::Slider::new(&mut thresh, 10.0..=500.0)
                                 .logarithmic(true)
                                 .show_value(false)
                                 .clamping(egui::SliderClamping::Always);
 
                             if ui.add(slider).changed() {
-                                threshold_changes.push((*id, thresh));
+                                // Slider adjustment = manual override
+                                threshold_changes.push((*id, thresh, true));
                             }
 
-                            // Show numeric value - larger
-                            ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("{:.0}", thresh)).size(16.0));
+                            // Show numeric value with μ±σ info if available
+                            if let Some((Some(mean), Some(std), is_manual, _coeff)) = gesture_stats {
+                                if !is_manual {
+                                    // Show computed threshold with μ±σ annotation
+                                    ui.colored_label(BRIGHT_BLUE, egui::RichText::new(format!("{:.0}", thresh)).size(14.0));
+                                    ui.colored_label(egui::Color32::DARK_GRAY, egui::RichText::new(format!("(μ{:.0}±{:.0})", mean, std)).size(10.0));
+                                } else {
+                                    ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("{:.0}", thresh)).size(14.0));
+                                }
+                            } else {
+                                ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("{:.0}", thresh)).size(14.0));
+                            }
                         });
+
+                        // Mode indicator (Auto/Manual) - clickable to toggle
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(50.0, 28.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                if let Some((mean_opt, std_opt, is_manual, _)) = gesture_stats {
+                                    let has_stats = mean_opt.is_some() && std_opt.is_some();
+                                    if has_stats {
+                                        let (mode_text, mode_color) = if is_manual {
+                                            ("MAN", egui::Color32::GRAY)
+                                        } else {
+                                            ("AUTO", BRIGHT_BLUE)
+                                        };
+                                        let btn = egui::Button::new(egui::RichText::new(mode_text).size(11.0).color(mode_color))
+                                            .fill(egui::Color32::TRANSPARENT)
+                                            .frame(false);
+                                        if ui.add(btn).on_hover_text("Click to toggle auto/manual threshold").clicked() {
+                                            // Toggle mode - if currently manual, switch to auto
+                                            if is_manual {
+                                                // Recalculate threshold from stats
+                                                if let (Some(mean), Some(std)) = (mean_opt, std_opt) {
+                                                    let gesture = self.vocabulary.get_gesture(*id);
+                                                    let coeff = gesture.map(|g| g.threshold_coefficient).unwrap_or(2.0);
+                                                    let new_thresh = mean + std * coeff;
+                                                    threshold_changes.push((*id, new_thresh, false));
+                                                }
+                                            } else {
+                                                // Keep current threshold but mark as manual
+                                                threshold_changes.push((*id, *threshold, true));
+                                            }
+                                        }
+                                    } else {
+                                        ui.colored_label(egui::Color32::DARK_GRAY, egui::RichText::new("--").size(11.0));
+                                    }
+                                } else {
+                                    ui.colored_label(egui::Color32::DARK_GRAY, egui::RichText::new("--").size(11.0));
+                                }
+                            }
+                        );
 
                         // Hit indicator (fixed width)
                         ui.allocate_ui_with_layout(
-                            egui::vec2(70.0, 28.0),
+                            egui::vec2(60.0, 28.0),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
                                 if had_recent_hit {
-                                    ui.colored_label(BRIGHT_GREEN, egui::RichText::new("● HIT").size(18.0).strong());
+                                    ui.colored_label(BRIGHT_GREEN, egui::RichText::new("● HIT").size(16.0).strong());
                                 }
                             }
                         );
@@ -1302,10 +1393,11 @@ impl GestureStudioApp {
             });
 
             // Apply threshold changes
-            for (id, new_threshold) in threshold_changes {
+            for (id, new_threshold, is_manual) in threshold_changes {
                 self.recognizer.set_threshold(id, new_threshold);
                 if let Some(gesture) = self.vocabulary.get_gesture_mut(id) {
                     gesture.threshold = new_threshold;
+                    gesture.threshold_manual_override = is_manual;
                 }
                 self.mark_dirty();
             }

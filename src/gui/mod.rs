@@ -391,6 +391,11 @@ pub struct MonitorDto {
     total_examples: usize,
     gestures: Vec<GestureMonitorDto>,
     recent_hit: Option<String>,
+    // Motion gate state
+    motion_energy: f32,
+    motion_gate_active: bool,
+    motion_threshold: f32,
+    calibration_ready: bool,
 }
 
 #[derive(Serialize)]
@@ -461,11 +466,11 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
 
     let osc_status = OscStatusDto {
         input_status,
-        ms_since_last_frame: app.osc_receiver.ms_since_last_frame().unwrap_or(0) as u64,
+        ms_since_last_frame: app.osc_receiver.ms_since_last_frame().unwrap_or(0),
         input_error: app.osc_receiver.state.error_message.clone(),
         frame_count: app.osc_receiver.state.frame_count,
         output_status,
-        ms_since_last_send: app.osc_sender.ms_since_last_send().unwrap_or(0) as u64,
+        ms_since_last_send: app.osc_sender.ms_since_last_send().unwrap_or(0),
         output_error: app.osc_sender.state.error_message.clone(),
         send_count: app.osc_sender.state.send_count,
     };
@@ -500,6 +505,12 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
         .filter(|h| h.timestamp.elapsed().as_millis() < 300)
         .map(|h| h.gesture_name.clone());
 
+    // Calibration state
+    let calibration_ready = matches!(
+        app.recognizer.calibration_state(),
+        crate::engine::recognizer::CalibrationState::Calibrated { .. }
+    );
+
     let monitor = MonitorDto {
         active: app.recognizer.is_active(),
         buffer_len: app.recognizer.buffer.len(),
@@ -527,6 +538,10 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
             }
         }).collect(),
         recent_hit: recent_hit_name,
+        motion_energy: app.recognizer.current_motion_energy(),
+        motion_gate_active: app.recognizer.is_motion_gate_active(),
+        motion_threshold: app.recognizer.motion_threshold(),
+        calibration_ready,
     };
 
     let hit_entries: Vec<HitEntryDto> = app.hit_log.recent(10).iter().map(|e| {
@@ -634,7 +649,7 @@ pub fn save_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String>
     let mut dialog = rfd::FileDialog::new()
         .add_filter("RALF Vocabulary", &["ralf"])
         .set_title("Save Vocabulary")
-        .set_file_name(&format!("{}.ralf", vocab_name));
+        .set_file_name(format!("{}.ralf", vocab_name));
 
     if let Some(dir) = default_dir {
         dialog = dialog.set_directory(dir);
@@ -827,6 +842,20 @@ pub fn set_cooldown(state: State<Arc<Mutex<AppState>>>, ms: u64) -> Result<(), S
     let mut app = state.lock().map_err(|e| e.to_string())?;
     app.recognition_config.cooldown_ms = ms;
     app.recognizer.set_cooldown_ms(ms);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_motion_gate_enabled(state: State<Arc<Mutex<AppState>>>, enabled: bool) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.recognizer.set_motion_gate_enabled(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn recalibrate_motion(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.recognizer.recalibrate();
     Ok(())
 }
 

@@ -45,8 +45,8 @@ pub struct ThresholdStats {
 ///
 /// # Arguments
 /// * `examples` - Training examples (sequences of frames)
-/// * `coefficient` - Multiplier for standard deviation (default: 2.0)
-///                   Higher = more permissive, Lower = stricter
+/// * `coefficient` - Multiplier for standard deviation (default: 2.0).
+///   Higher = more permissive, Lower = stricter
 ///
 /// # Returns
 /// * `Some(ThresholdStats)` if at least 2 examples are provided

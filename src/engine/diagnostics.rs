@@ -47,6 +47,7 @@ pub enum DiagnosticEvent {
 
 /// Per-gesture diagnostic data
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct GestureDiag {
     pub name: String,
     pub distance: Option<f32>,
@@ -143,7 +144,7 @@ impl DiagnosticLogger {
             DiagnosticEvent::Recognition { frame_num, buffer_len, window_size, gestures } => {
                 self.frame_count += 1;
                 // Only log every Nth cycle
-                if self.frame_count % self.log_interval != 0 {
+                if !self.frame_count.is_multiple_of(self.log_interval) {
                     return;
                 }
 

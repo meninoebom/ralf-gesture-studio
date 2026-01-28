@@ -18,11 +18,16 @@ use super::dtw::{dtw_distance, Frame, Sequence};
 pub struct RecognitionConfig {
     /// Cooldown between hits for same gesture (ms)
     pub cooldown_ms: u64,
+    /// Hysteresis multiplier for re-arming (distance must exceed threshold × this value)
+    pub rearm_hysteresis: f32,
 }
 
 impl Default for RecognitionConfig {
     fn default() -> Self {
-        Self { cooldown_ms: 500 }
+        Self {
+            cooldown_ms: 500,
+            rearm_hysteresis: 2.0, // Re-arm when distance > threshold × 2.0
+        }
     }
 }
 
@@ -313,13 +318,15 @@ impl Recognizer {
         }
 
         // Find the best overall and update gesture states
-        // Also update armed state: arm when above threshold, stay disarmed when below
+        // Also update armed state: arm when above threshold × hysteresis (prevents rapid re-firing)
+        let rearm_hysteresis = self.config.rearm_hysteresis;
         for (idx, gesture) in self.gestures.iter_mut().enumerate() {
             let dist = gesture_best_distances[idx];
             gesture.current_distance = if dist < f32::MAX { Some(dist) } else { None };
 
-            // Update armed state: re-arm when distance goes above threshold
-            if dist >= gesture.threshold {
+            // Update armed state: re-arm when distance goes above threshold × hysteresis
+            // This prevents re-arming while still in the "gesture zone"
+            if dist >= gesture.threshold * rearm_hysteresis {
                 gesture.arm();
             }
 

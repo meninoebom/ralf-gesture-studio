@@ -831,11 +831,23 @@ pub fn set_cooldown(state: State<Arc<Mutex<AppState>>>, ms: u64) -> Result<(), S
 }
 
 #[tauri::command]
-pub fn enable_diagnostics(state: State<Arc<Mutex<AppState>>>, path: String) -> Result<(), String> {
+pub fn enable_diagnostics(state: State<Arc<Mutex<AppState>>>) -> Result<String, String> {
+    use chrono::Local;
+
     let mut app = state.lock().map_err(|e| e.to_string())?;
-    app.diagnostic_logger.enable(std::path::PathBuf::from(path))
+
+    // Generate path: ~/Documents/RALF/ralf-diagnostics-<timestamp>.log
+    let ralf_dir = default_vocabulary_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&ralf_dir).map_err(|e| format!("Failed to create directory: {}", e))?;
+
+    let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
+    let filename = format!("ralf-diagnostics-{}.log", timestamp);
+    let path = ralf_dir.join(filename);
+
+    app.diagnostic_logger.enable(path.clone())
         .map_err(|e| format!("Failed to enable diagnostics: {}", e))?;
-    Ok(())
+
+    Ok(path.display().to_string())
 }
 
 #[tauri::command]

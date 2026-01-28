@@ -598,20 +598,12 @@ async function toggleDiagnostics() {
         state.diagnosticsEnabled = false;
         elements.btnToggleDiagnostics.textContent = 'Start Recording';
         elements.btnToggleDiagnostics.classList.remove('recording');
-        elements.diagnosticsStatus.textContent = `Saved to: ${state.diagnosticsPath}`;
+        elements.diagnosticsStatus.textContent = `Saved: ${state.diagnosticsPath}`;
         elements.diagnosticsStatus.className = 'green';
     } else {
-        // Start recording - generate filename with timestamp
-        const now = new Date();
-        const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const filename = `ralf-diagnostics-${timestamp}.log`;
-
-        // Use Documents/RALF directory
-        const homeDir = await window.__TAURI__.path.homeDir();
-        const path = `${homeDir}Documents/RALF/${filename}`;
-
+        // Start recording - backend generates the path
         try {
-            await invoke('enable_diagnostics', { path });
+            const path = await invoke('enable_diagnostics');
             state.diagnosticsEnabled = true;
             state.diagnosticsPath = path;
             elements.btnToggleDiagnostics.textContent = 'Stop Recording';

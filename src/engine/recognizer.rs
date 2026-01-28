@@ -18,15 +18,18 @@ use super::dtw::{dtw_distance, Frame, Sequence};
 pub struct RecognitionConfig {
     /// Cooldown between hits for same gesture (ms)
     pub cooldown_ms: u64,
-    /// Hysteresis multiplier for re-arming (distance must exceed threshold × this value)
-    pub rearm_hysteresis: f32,
+    /// Number of frames to look back for peak detection
+    pub peak_history_size: usize,
+    /// Max frames to wait for a rise before firing anyway (sustained gesture support)
+    pub max_sustain_frames: usize,
 }
 
 impl Default for RecognitionConfig {
     fn default() -> Self {
         Self {
             cooldown_ms: 500,
-            rearm_hysteresis: 2.0, // Re-arm when distance > threshold × 2.0
+            peak_history_size: 3, // Look at last 3 distance readings to find minimum
+            max_sustain_frames: 8, // Fire after 8 frames (~2s) of sustained low distance
         }
     }
 }
@@ -103,6 +106,8 @@ impl GestureState {
     }
 
     /// Arm the gesture (called when distance goes above threshold)
+    /// Note: With peak detection, this is less critical but kept for API completeness
+    #[allow(dead_code)]
     pub fn arm(&mut self) {
         self.armed = true;
     }
@@ -162,6 +167,19 @@ pub struct Recognizer {
     dtw_skip: usize,
     /// Downsample factor for DTW (compare at 15fps instead of 60fps)
     downsample: usize,
+    /// History of best distances for peak detection
+    distance_history: VecDeque<(f32, usize)>, // (distance, gesture_idx)
+    /// Count of consecutive frames below threshold (for sustained gesture detection)
+    frames_below_threshold: usize,
+    /// Best distance seen during current sustained period
+    sustained_best_distance: f32,
+    /// Gesture index for sustained best
+    sustained_best_gesture: Option<usize>,
+    /// Whether recognition is armed (must return to ~resting state to re-arm)
+    /// This controls BOTH peak detection and sustained detection
+    recognition_armed: bool,
+    /// When we last fired (for time-based re-arming in continuous mode)
+    last_fire_time: Option<Instant>,
 }
 
 impl Recognizer {
@@ -175,6 +193,7 @@ impl Recognizer {
         window_size: usize,
         config: RecognitionConfig,
     ) -> Self {
+        let history_size = config.peak_history_size;
         Self {
             buffer: FrameBuffer::new(buffer_size),
             gestures: Vec::new(),
@@ -184,6 +203,12 @@ impl Recognizer {
             frame_count: 0,
             dtw_skip: 4, // Only compute DTW every 4th frame (15Hz instead of 60Hz)
             downsample: 4, // Compare at 15fps (every 4th frame)
+            distance_history: VecDeque::with_capacity(history_size + 1),
+            frames_below_threshold: 0,
+            sustained_best_distance: f32::MAX,
+            sustained_best_gesture: None,
+            recognition_armed: true, // Start armed
+            last_fire_time: None,
         }
     }
 
@@ -261,6 +286,13 @@ impl Recognizer {
     }
 
     /// Process a frame. Returns recognition result.
+    ///
+    /// Uses PEAK DETECTION instead of threshold crossing:
+    /// - Track distance history
+    /// - Fire when we detect a local minimum (distance starts rising)
+    /// - Only fire if that minimum was below threshold
+    ///
+    /// This solves the "stuck" problem where resting distance stays below threshold.
     pub fn process_frame(&mut self, frame: Frame) -> Option<RecognitionResult> {
         self.buffer.push(frame);
         self.frame_count += 1;
@@ -317,18 +349,10 @@ impl Recognizer {
             gesture_best_distances.push(best_for_gesture);
         }
 
-        // Find the best overall and update gesture states
-        // Also update armed state: arm when above threshold × hysteresis (prevents rapid re-firing)
-        let rearm_hysteresis = self.config.rearm_hysteresis;
+        // Update gesture states with current distances
         for (idx, gesture) in self.gestures.iter_mut().enumerate() {
             let dist = gesture_best_distances[idx];
             gesture.current_distance = if dist < f32::MAX { Some(dist) } else { None };
-
-            // Update armed state: re-arm when distance goes above threshold × hysteresis
-            // This prevents re-arming while still in the "gesture zone"
-            if dist >= gesture.threshold * rearm_hysteresis {
-                gesture.arm();
-            }
 
             if dist < best_distance {
                 best_distance = dist;
@@ -336,21 +360,131 @@ impl Recognizer {
             }
         }
 
-        // Check for hit - must be armed, below threshold, and not in cooldown
-        if let Some(idx) = best_gesture_idx {
-            let gesture = &mut self.gestures[idx];
+        // PEAK DETECTION: Fire at local minimum, not threshold crossing
+        // This naturally handles the "stuck" problem because resting state is flat, not a minimum
+        let history_size = self.config.peak_history_size;
 
-            if best_distance < gesture.threshold
-                && gesture.is_armed()
-                && !gesture.in_cooldown(cooldown)
-            {
-                gesture.record_hit(); // This also disarms
-                return Some(RecognitionResult {
-                    gesture_id: Some(gesture.id),
-                    gesture_name: Some(gesture.name.clone()),
-                    distance: best_distance,
-                    threshold: gesture.threshold,
-                });
+        // Add current reading to history
+        if let Some(idx) = best_gesture_idx {
+            self.distance_history.push_back((best_distance, idx));
+
+            // Keep history bounded
+            while self.distance_history.len() > history_size + 1 {
+                self.distance_history.pop_front();
+            }
+        }
+
+        // Check for local minimum: we need at least 3 readings
+        // Pattern: distances were going DOWN, now going UP = we passed the minimum
+        if self.distance_history.len() >= 3 {
+            let len = self.distance_history.len();
+
+            // Copy the values we need (to satisfy borrow checker)
+            let prev = self.distance_history[len - 2];
+            let curr = self.distance_history[len - 1];
+            let prev_dist = prev.0;
+            let prev_gesture_idx = prev.1;
+            let curr_dist = curr.0;
+
+            // Check if prev was a minimum: all earlier readings were higher, current is higher
+            let was_descending = self.distance_history.iter()
+                .take(len - 2)
+                .all(|(d, _)| *d >= prev_dist);
+            let now_ascending = curr_dist > prev_dist;
+
+            if was_descending && now_ascending && self.recognition_armed {
+                // We found a local minimum at prev_dist
+                let gesture = &mut self.gestures[prev_gesture_idx];
+
+                // Fire if: minimum is below threshold AND not in cooldown
+                if prev_dist < gesture.threshold && !gesture.in_cooldown(cooldown) {
+                    gesture.record_hit();
+
+                    // Clear history and reset tracking after firing
+                    self.distance_history.clear();
+                    self.frames_below_threshold = 0;
+                    self.sustained_best_distance = f32::MAX;
+                    self.sustained_best_gesture = None;
+                    self.recognition_armed = false; // Disarm until returning to ~resting
+                    self.last_fire_time = Some(Instant::now());
+
+                    return Some(RecognitionResult {
+                        gesture_id: Some(gesture.id),
+                        gesture_name: Some(gesture.name.clone()),
+                        distance: prev_dist,
+                        threshold: gesture.threshold,
+                    });
+                }
+            }
+        }
+
+        // SUSTAINED GESTURE DETECTION: Fire if below threshold for too long without a clear dip
+        // This handles continuous gesture performance where user doesn't return to resting state
+        if let Some(idx) = best_gesture_idx {
+            let gesture_threshold = self.gestures[idx].threshold;
+
+            if best_distance < gesture_threshold {
+                // We're below threshold - track this (only if armed)
+                if self.recognition_armed {
+                    self.frames_below_threshold += 1;
+
+                    // Track the best (lowest) distance during this sustained period
+                    if best_distance < self.sustained_best_distance {
+                        self.sustained_best_distance = best_distance;
+                        self.sustained_best_gesture = Some(idx);
+                    }
+
+                    // If we've been below threshold for too long, fire at the best distance we saw
+                    if self.frames_below_threshold >= self.config.max_sustain_frames {
+                        if let Some(gesture_idx) = self.sustained_best_gesture {
+                            let gesture = &mut self.gestures[gesture_idx];
+
+                            if !gesture.in_cooldown(cooldown) {
+                                let fire_distance = self.sustained_best_distance;
+                                gesture.record_hit();
+
+                                // Reset tracking and disarm
+                                self.distance_history.clear();
+                                self.frames_below_threshold = 0;
+                                self.sustained_best_distance = f32::MAX;
+                                self.sustained_best_gesture = None;
+                                self.recognition_armed = false; // Disarm until returning to ~resting
+                                self.last_fire_time = Some(Instant::now());
+
+                                return Some(RecognitionResult {
+                                    gesture_id: Some(gesture.id),
+                                    gesture_name: Some(gesture.name.clone()),
+                                    distance: fire_distance,
+                                    threshold: gesture.threshold,
+                                });
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Distance went above threshold - reset tracking and re-arm
+                self.frames_below_threshold = 0;
+                self.sustained_best_distance = f32::MAX;
+                self.sustained_best_gesture = None;
+                self.recognition_armed = true;
+            }
+
+            // RE-ARMING LOGIC: Multiple paths to re-arm
+            if !self.recognition_armed {
+                // Path 1: Distance rises to 75% of threshold (returning toward rest)
+                let rearm_threshold = gesture_threshold * 0.75;
+                if best_distance > rearm_threshold {
+                    self.recognition_armed = true;
+                }
+
+                // Path 2: Time-based re-arm for continuous gesture mode
+                // After 2x cooldown time, re-arm regardless (allows continuous gestures)
+                if let Some(fire_time) = self.last_fire_time {
+                    let rearm_delay = Duration::from_millis(self.config.cooldown_ms * 2);
+                    if fire_time.elapsed() > rearm_delay {
+                        self.recognition_armed = true;
+                    }
+                }
             }
         }
 
@@ -520,19 +654,31 @@ mod tests {
 
     #[test]
     fn test_recognizer_matches_similar_gesture() {
+        // Test that recognizer detects gestures via peak detection OR sustained detection
+        // Note: Recognizer skips every 4th frame for DTW, so we need enough frames
         let mut recognizer = Recognizer::new(100, 0);
+        // DTW distances: matching=~6, resting=~485. Threshold 50 means only matching is below.
         recognizer.add_gesture(1, "wave", "/gesture/1", 50.0);
 
-        // Add example
+        // Add example: frames 1,2,3,4,5
         let example = vec![vec![1.0], vec![2.0], vec![3.0], vec![4.0], vec![5.0]];
         recognizer.add_example(1, example);
 
         recognizer.start();
 
-        // Feed similar frames
+        // Phase 1: Fill buffer with "resting" frames (distance ~485, above threshold 50)
+        // Need enough frames so buffer is full and DTW actually runs
+        // dtw_skip=4 means we need 4 frames per distance reading
+        for _ in 0..40 {
+            recognizer.process_frame(vec![100.0]);
+        }
+
+        // Phase 2: Feed matching frames for a sustained period (distance ~6, below threshold 50)
+        // This will trigger sustained detection (8+ frames below threshold)
+        // dtw_skip=4, so we need 4*8=32+ raw frames for 8 DTW readings
         let mut hit = None;
-        for i in 1..=10 {
-            if let Some(result) = recognizer.process_frame(vec![i as f32]) {
+        for _ in 0..50 {
+            if let Some(result) = recognizer.process_frame(vec![3.0]) {
                 if result.gesture_id.is_some() {
                     hit = Some(result);
                     break;

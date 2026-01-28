@@ -471,4 +471,199 @@ GestureState (runtime)
 
 ---
 
-Use this approach as the baseline for any gesture recognition implementation. The simplicity is intentional - more complex approaches consistently failed while this simple Wekinator-style approach works reliably.
+## Advanced Recognition: Peak Detection + Sustained Detection (v0.4.0)
+
+The simple threshold approach works but has issues with **continuous gesture performance** where the user performs gestures without returning to a resting state. This section documents the more sophisticated approach developed for RALF Gesture Studio.
+
+### The Problem with Simple Threshold
+
+When a user performs gestures continuously:
+1. Distance drops below threshold → HIT fires
+2. Distance stays below threshold during gesture
+3. Cooldown expires while still below threshold
+4. Another HIT fires (echo)
+5. Repeat until user stops
+
+**Result**: 3-5 echo hits following each intentional gesture.
+
+### Solution: Dual Detection Strategy
+
+Instead of firing when `distance < threshold`, use two complementary detection methods:
+
+#### 1. Peak Detection (Primary)
+
+Fire when distance reaches a **local minimum** (the gesture's "best match" point).
+
+```rust
+// Track distance history
+let distance_history: VecDeque<(f32, usize)> = VecDeque::with_capacity(5);
+
+// Detect descending→ascending pattern (local minimum)
+let (prev_dist, _) = distance_history.get(history.len() - 2);
+let (curr_dist, _) = distance_history.back();
+
+let was_descending = prev_dist > prev_prev_dist;  // Going down
+let now_ascending = curr_dist > prev_dist;         // Now going up
+
+if was_descending && now_ascending && recognition_armed {
+    if prev_dist < threshold && !in_cooldown {
+        // Fire at the minimum point!
+        fire_hit(gesture, prev_dist);
+        recognition_armed = false;
+    }
+}
+```
+
+**Why this works**: Peak detection fires at the moment of best match, not just any time below threshold.
+
+#### 2. Sustained Detection (Backup)
+
+For continuous gestures that don't produce clear peaks, fire after N frames below threshold.
+
+```rust
+const MAX_SUSTAIN_FRAMES: usize = 8;
+
+if best_distance < threshold {
+    frames_below_threshold += 1;
+    if frames_below_threshold >= MAX_SUSTAIN_FRAMES && recognition_armed {
+        // Held below threshold long enough - fire!
+        fire_hit(gesture, best_distance);
+        recognition_armed = false;
+        frames_below_threshold = 0;
+    }
+} else {
+    frames_below_threshold = 0;  // Reset counter
+}
+```
+
+**Why this works**: If distance stays low without a clear peak, we eventually fire anyway.
+
+### Unified Armed State
+
+**Critical**: Both detection methods share ONE armed state to prevent echoes.
+
+```rust
+struct Recognizer {
+    recognition_armed: bool,       // Shared by peak and sustained detection
+    last_fire_time: Option<Instant>,
+    // ...
+}
+```
+
+After ANY hit (peak or sustained), set `recognition_armed = false`. This prevents:
+- Peak detection from firing, then sustained detection firing
+- Multiple peak detections from tiny fluctuations
+
+### Re-arming Logic (The Hard Part)
+
+**The challenge**: How does the system know the user is done with one gesture and ready for the next?
+
+Two re-arming paths:
+
+#### Path 1: Distance-Based Re-arming
+
+```rust
+// Re-arm when distance goes above 75% of threshold (hysteresis)
+let rearm_threshold = gesture_threshold * 0.75;
+if best_distance > rearm_threshold {
+    recognition_armed = true;
+}
+```
+
+**Why 75%**: Full threshold re-arm is too strict (user might never get there). 75% provides hysteresis to prevent oscillation.
+
+#### Path 2: Time-Based Re-arming (for continuous gestures)
+
+```rust
+// Re-arm after 2× cooldown time regardless of distance
+if let Some(fire_time) = last_fire_time {
+    let rearm_delay = Duration::from_millis(cooldown_ms * 2);
+    if fire_time.elapsed() > rearm_delay {
+        recognition_armed = true;
+    }
+}
+```
+
+**Why this helps**: For continuous performance where distance never rises, time-based re-arming allows repeated gesture recognition.
+
+**Known issue**: Time-based re-arming can cause echo hits at regular intervals (~1400ms with 700ms rearm delay).
+
+### Configuration Parameters
+
+```rust
+pub struct RecognitionConfig {
+    pub cooldown_ms: u64,           // Min time between hits (default: 400-500)
+    pub peak_history_size: usize,   // Frames for peak detection (default: 5)
+    pub max_sustain_frames: usize,  // Frames for sustained detection (default: 8)
+}
+```
+
+### Known Issues Being Tuned
+
+| Issue | Symptom | Cause | Potential Solutions |
+|-------|---------|-------|---------------------|
+| **Latency** | Hit fires slightly after gesture peak | Peak detection waits for ascending pattern | Reduce history size, or accept latency trade-off |
+| **Echoes** | Hits at ~1400ms intervals | Time-based re-arming too aggressive | Longer rearm delay, or smarter rearm logic |
+| **Missed hits** | Gesture performed but no hit | Re-arm threshold too strict | Lower rearm threshold, or use time-based |
+
+### Diagnostic Logging
+
+For tuning, log every recognition decision:
+
+```
+# Log format (tab-separated):
+TIMESTAMP	EVENT	DISTANCE	THRESHOLD	REASON
+
+# Events:
+REC  - Recognition check (every skip_factor frames)
+HIT  - Gesture fired (includes method: peak/sustained)
+NEAR - Almost hit but blocked (shows reason: not_armed, in_cooldown, etc.)
+
+# Example log:
+2026-01-28 02:03:51.123	REC	45.2	97.0	armed=true
+2026-01-28 02:03:51.189	HIT	38.1	97.0	peak_detection gesture=0
+2026-01-28 02:03:51.256	REC	42.8	97.0	armed=false (disarmed after hit)
+2026-01-28 02:03:52.590	NEAR	35.5	97.0	not_armed
+```
+
+### Implementation Checklist (Advanced)
+
+- [ ] Distance history buffer (VecDeque for peak detection)
+- [ ] Peak detection: descending→ascending pattern
+- [ ] Sustained detection: N frames below threshold
+- [ ] Unified `recognition_armed` state
+- [ ] Distance-based re-arming (hysteresis at 75%)
+- [ ] Time-based re-arming (2× cooldown fallback)
+- [ ] Diagnostic logging for tuning
+- [ ] Configurable parameters exposed in UI
+
+---
+
+## Tuning Workflow
+
+When recognition isn't working well:
+
+1. **Enable diagnostic logging** to a file
+2. **Perform gestures** while watching the log
+3. **Analyze patterns**:
+   - Are HITs at correct times? → Check peak detection
+   - Echo hits? → Check re-arming logic
+   - Missed hits? → Check armed state and threshold
+4. **Extract metrics** from logs:
+   - Latency: Time between gesture start and HIT
+   - Echo rate: % of HITs followed by echo within 2 seconds
+   - False positive rate: HITs with no corresponding gesture
+5. **Adjust one parameter at a time** and retest
+
+### Key Metrics
+
+| Metric | Target | How to Measure |
+|--------|--------|----------------|
+| Latency | <200ms | Time from distance dip to HIT |
+| Echo rate | <5% | HITs within 2s of previous HIT |
+| Accuracy | >90% | Correct HITs / total gestures |
+| False positive | <10% | Spurious HITs / total HITs |
+
+---
+
+Use this approach as the baseline for any gesture recognition implementation. The simplicity of the basic approach is intentional - more complex approaches consistently failed while this Wekinator-style approach works reliably. The advanced dual-detection approach builds on this foundation for continuous gesture performance scenarios.

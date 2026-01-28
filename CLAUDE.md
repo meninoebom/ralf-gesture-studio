@@ -124,11 +124,77 @@ if best_distance < gesture.threshold {
 
 ```rust
 RecognitionConfig {
-    cooldown_ms: 400,       // Min time between same gesture hits
-    downsample_factor: 4,   // 60fps → 15fps
-    num_candidates: 5,      // Window sizes to try
+    cooldown_ms: 500,           // Min time between same gesture hits
+    peak_history_size: 3,       // Frames to track for peak detection
+    max_sustain_frames: 8,      // Frames before sustained detection fires
 }
 ```
+
+### Advanced Recognition: Peak Detection + Sustained Detection (v0.4.0)
+
+**Problem Solved**: Simple threshold crossing causes "stuck" recognition (fires once, never re-arms) or "echo" hits (multiple fires per gesture).
+
+**Solution**: Two-layer detection with armed/disarmed state:
+
+#### 1. Peak Detection (Primary)
+Fire at **local minimum** of distance, not threshold crossing:
+```rust
+// Track distance history: [d1, d2, d3]
+// Fire when: d1 >= d2 AND d2 < d3 (valley detected)
+// AND d2 < threshold AND armed AND not in cooldown
+```
+This naturally handles gestures because:
+- Resting state has **flat** distance (no valley)
+- Gesture creates a **dip**: high → low → high
+
+#### 2. Sustained Detection (Fallback)
+For continuous gestures where user doesn't return to rest:
+```rust
+// If distance stays below threshold for 8 DTW frames (~1.6s), fire
+// This handles: perform → stay in gesture zone → perform again
+```
+
+#### 3. Re-Arming Logic (Prevents Echoes)
+After any hit, recognition is **disarmed**. Two paths to re-arm:
+```rust
+// Path 1: Distance-based (returning to rest)
+if distance > threshold * 0.75 { armed = true; }
+
+// Path 2: Time-based (continuous gesture mode)
+if time_since_fire > cooldown * 2 { armed = true; }
+```
+
+#### Key Learnings (2026-01-28)
+
+1. **Threshold crossing alone fails** - causes stuck or echo behavior
+2. **Peak detection works for discrete gestures** - fire at the "best match" moment
+3. **Sustained detection handles continuous performance** - user stays in gesture zone
+4. **Re-arming is critical** - must balance echo prevention vs. responsiveness
+5. **Distance patterns matter**:
+   - Resting distance: typically 70-90% of threshold
+   - Gesture distance: typically 20-40% of threshold
+   - Re-arm threshold at 75% works when resting > 75%
+   - Time-based re-arm needed when user doesn't return to rest
+
+#### Current Issues Being Tuned
+
+| Issue | Cause | Potential Fix |
+|-------|-------|---------------|
+| **Latency** | Peak detection waits for rise | Reduce peak_history_size |
+| **Echo hits** | Time-based re-arm at 2×cooldown | Increase multiplier or disable |
+| **Missed gestures** | Re-arm threshold too high | Lower to 0.5× or use time-based only |
+
+#### Diagnostic Logging
+
+Enable via UI button to write detailed logs:
+```
+# Format: timestamp,event_type,data...
+1234,REC,frame,buffer,window,gesture:dist:thresh:armed:cooldown,...
+1234,HIT,frame,gesture,distance,threshold,margin%
+1234,NEAR,frame,gesture,distance,threshold,margin%,reason
+```
+
+Reasons for NEAR misses: `not_armed`, `above_threshold`, `in_cooldown`
 
 ### Statistical Threshold (μ+σ Approach)
 

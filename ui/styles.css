@@ -495,8 +495,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .col-gesture { width: 140px; }
 .col-distance { width: 80px; }
-.col-threshold { flex: 1; min-width: 200px; }
-.col-mode { width: 50px; }
+.col-threshold { flex: 1; min-width: 250px; }
 .col-hit { width: 70px; }
 
 .monitor-row {
@@ -530,11 +529,6 @@ input[type="range"]::-webkit-slider-thumb {
     text-align: right;
 }
 
-.monitor-row .mode-toggle {
-    width: 50px;
-    font-size: var(--font-size-small);
-    cursor: pointer;
-}
 
 .monitor-row .hit-indicator {
     width: 70px;
@@ -551,6 +545,33 @@ input[type="range"]::-webkit-slider-thumb {
     font-size: var(--font-size-small);
     margin-left: 8px;
     white-space: nowrap;
+}
+
+/* Tune/Auto buttons in threshold control */
+.btn-tune, .btn-auto {
+    padding: 4px 10px;
+    font-size: var(--font-size-small);
+    margin-left: 8px;
+}
+
+.btn-tune {
+    background-color: var(--bg-light);
+    color: var(--text-dim);
+}
+
+.btn-tune:hover {
+    background-color: var(--bg-lighter);
+    color: var(--text-white);
+}
+
+.btn-auto {
+    background-color: var(--bg-light);
+    color: var(--green);
+}
+
+.btn-auto:hover {
+    background-color: var(--green);
+    color: #000;
 }
 
 /* Hit Log */

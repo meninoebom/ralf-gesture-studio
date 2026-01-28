@@ -374,42 +374,51 @@ function updateMonitor(monitor) {
         const distanceColor = g.distance !== null && g.distance < g.threshold ? 'green' : '';
         const distanceText = g.distance !== null ? Math.round(g.distance) : '...';
 
-        // Phase 1: Dynamic slider range based on threshold
+        // Dynamic slider range based on threshold (for MAN mode)
         const sliderMin = Math.max(100, Math.floor(g.threshold * 0.1));
         const sliderMax = Math.max(1000, Math.ceil(g.threshold * 3));
         const sliderStep = Math.max(1, Math.floor((sliderMax - sliderMin) / 100));
 
-        // Phase 2: Show μ±σ when in AUTO mode and stats are available
+        // Show stats when in AUTO mode
         const statsDisplay = g.auto_mode && g.distance_mean != null
             ? `<span class="stats-hint dim">μ=${Math.round(g.distance_mean)} σ=${Math.round(g.distance_std)}</span>`
             : '';
 
+        // AUTO mode: clean display with Tune button
+        // MAN mode: slider visible for manual adjustment
+        const thresholdControl = g.auto_mode
+            ? `<span class="threshold-value">${Math.round(g.threshold)}</span>
+               ${statsDisplay}
+               <button class="btn-tune small" data-id="${g.id}">Tune</button>`
+            : `<input type="range" min="${sliderMin}" max="${sliderMax}" step="${sliderStep}"
+                      value="${Math.round(g.threshold)}" data-id="${g.id}" class="threshold-slider">
+               <span class="threshold-value">${Math.round(g.threshold)}</span>
+               <button class="btn-auto small" data-id="${g.id}">Auto</button>`;
+
         row.innerHTML = `
             <span class="gesture-name col-gesture">${g.name} (${g.example_count})</span>
             <span class="distance col-distance ${distanceColor}">${distanceText}</span>
-            <span class="threshold-control col-threshold">
-                <input type="range" min="${sliderMin}" max="${sliderMax}" step="${sliderStep}"
-                       value="${Math.round(g.threshold)}" data-id="${g.id}" class="threshold-slider">
-                <span class="threshold-value">${Math.round(g.threshold)}</span>
-                ${statsDisplay}
-            </span>
-            <span class="mode-toggle col-mode ${g.auto_mode ? 'green' : 'dim'}" data-id="${g.id}">
-                ${g.auto_mode ? 'AUTO' : 'MAN'}
-            </span>
+            <span class="threshold-control col-threshold">${thresholdControl}</span>
             <span class="hit-indicator col-hit ${g.recent_hit ? 'green' : ''}">
                 ${g.recent_hit ? '● HIT' : ''}
             </span>
         `;
 
-        row.querySelector('.threshold-slider').addEventListener('input', async (e) => {
-            const value = parseFloat(e.target.value);
-            row.querySelector('.threshold-value').textContent = Math.round(value);
-            await invoke('set_threshold', { gestureId: g.id, threshold: value, manual: true });
-        });
-
-        row.querySelector('.mode-toggle').addEventListener('click', async () => {
-            await invoke('toggle_threshold_mode', { gestureId: g.id });
-        });
+        // Event listeners based on mode
+        if (g.auto_mode) {
+            row.querySelector('.btn-tune').addEventListener('click', async () => {
+                await invoke('toggle_threshold_mode', { gestureId: g.id });
+            });
+        } else {
+            row.querySelector('.threshold-slider').addEventListener('input', async (e) => {
+                const value = parseFloat(e.target.value);
+                row.querySelector('.threshold-value').textContent = Math.round(value);
+                await invoke('set_threshold', { gestureId: g.id, threshold: value, manual: true });
+            });
+            row.querySelector('.btn-auto').addEventListener('click', async () => {
+                await invoke('toggle_threshold_mode', { gestureId: g.id });
+            });
+        }
 
         elements.monitorList.appendChild(row);
     }

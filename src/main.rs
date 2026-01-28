@@ -3,11 +3,12 @@ mod gui;
 mod osc;
 mod engine;
 
-use gui::GestureStudioApp;
+use std::sync::{Arc, Mutex};
+use gui::AppState;
 use osc::OscReceiver;
 
-fn main() -> eframe::Result<()> {
-    // Create the OSC receiver and get the handle for the GUI
+fn main() {
+    // Create the OSC receiver and get the handle for the app
     let (receiver, receiver_handle) = OscReceiver::new(6448, "/wek/inputs");
 
     // Start the tokio runtime in a background thread for async OSC receiving
@@ -16,20 +17,31 @@ fn main() -> eframe::Result<()> {
         rt.block_on(receiver.run());
     });
 
-    // Configure the native window
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1400.0, 900.0])  // Larger default for visibility from distance
-            .with_min_inner_size([800.0, 600.0]),
-        ..Default::default()
-    };
+    // Create shared application state
+    let app_state = Arc::new(Mutex::new(AppState::new(receiver_handle)));
 
-    // Launch the GUI application
-    eframe::run_native(
-        "RALF Gesture Studio",
-        options,
-        Box::new(|cc| Ok(Box::new(GestureStudioApp::new(cc, receiver_handle)))),
-    )
+    // Run the Tauri application
+    tauri::Builder::default()
+        .manage(app_state)
+        .invoke_handler(tauri::generate_handler![
+            gui::get_state,
+            gui::set_mode,
+            gui::new_vocabulary,
+            gui::open_vocabulary,
+            gui::save_vocabulary,
+            gui::send_test_hit,
+            gui::add_gesture,
+            gui::select_gesture,
+            gui::rename_gesture,
+            gui::delete_gesture,
+            gui::start_training,
+            gui::cancel_training,
+            gui::set_threshold,
+            gui::toggle_threshold_mode,
+            gui::set_cooldown,
+        ])
+        .run(tauri::generate_context!())
+        .expect("Error running Tauri application");
 }
 
 // =============================================================================

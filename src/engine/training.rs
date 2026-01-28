@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use rodio::{OutputStream, OutputStreamHandle, Sink};
+use rodio::{OutputStream, Sink};
 use rodio::source::{SineWave, Source};
 
 /// Training session states
@@ -47,55 +47,58 @@ impl Default for TrainingConfig {
     }
 }
 
-/// Audio cue generator using rodio
-pub struct AudioCues {
-    _stream: OutputStream,
-    stream_handle: OutputStreamHandle,
+/// Play a one-shot audio tone (doesn't require storing audio state)
+/// This is Send-safe because it creates and drops the audio stream immediately.
+fn play_tone_oneshot(freq: f32, duration_secs: f32) {
+    std::thread::spawn(move || {
+        if let Ok((_stream, handle)) = OutputStream::try_default() {
+            if let Ok(sink) = Sink::try_new(&handle) {
+                let source = SineWave::new(freq)
+                    .take_duration(Duration::from_secs_f32(duration_secs))
+                    .amplify(0.3);
+                sink.append(source);
+                sink.sleep_until_end();
+            }
+        }
+    });
 }
 
-impl AudioCues {
-    /// Create a new audio cue generator
-    pub fn new() -> Option<Self> {
-        match OutputStream::try_default() {
-            Ok((stream, handle)) => Some(Self {
-                _stream: stream,
-                stream_handle: handle,
-            }),
-            Err(_) => None,
+/// Play a countdown tick (short, low pitch)
+pub fn play_tick() {
+    play_tone_oneshot(300.0, 0.08);
+}
+
+/// Play capture start beep (long, high pitch)
+pub fn play_capture_start() {
+    play_tone_oneshot(800.0, 0.3);
+}
+
+/// Play capture end beep (long, medium pitch)
+pub fn play_capture_end() {
+    play_tone_oneshot(600.0, 0.3);
+}
+
+/// Play session complete (double ding)
+pub fn play_complete() {
+    std::thread::spawn(|| {
+        if let Ok((_stream, handle)) = OutputStream::try_default() {
+            if let Ok(sink) = Sink::try_new(&handle) {
+                let source = SineWave::new(1000.0)
+                    .take_duration(Duration::from_secs_f32(0.15))
+                    .amplify(0.3);
+                sink.append(source);
+                sink.sleep_until_end();
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            if let Ok(sink) = Sink::try_new(&handle) {
+                let source = SineWave::new(1000.0)
+                    .take_duration(Duration::from_secs_f32(0.15))
+                    .amplify(0.3);
+                sink.append(source);
+                sink.sleep_until_end();
+            }
         }
-    }
-
-    /// Play a countdown tick (short, low pitch)
-    pub fn tick(&self) {
-        self.play_tone(300.0, 0.08);
-    }
-
-    /// Play capture start beep (long, high pitch)
-    pub fn capture_start(&self) {
-        self.play_tone(800.0, 0.3);
-    }
-
-    /// Play capture end beep (long, medium pitch)
-    pub fn capture_end(&self) {
-        self.play_tone(600.0, 0.3);
-    }
-
-    /// Play session complete (double ding)
-    pub fn complete(&self) {
-        self.play_tone(1000.0, 0.15);
-        std::thread::sleep(Duration::from_millis(200));
-        self.play_tone(1000.0, 0.15);
-    }
-
-    fn play_tone(&self, freq: f32, duration_secs: f32) {
-        if let Ok(sink) = Sink::try_new(&self.stream_handle) {
-            let source = SineWave::new(freq)
-                .take_duration(Duration::from_secs_f32(duration_secs))
-                .amplify(0.3);
-            sink.append(source);
-            sink.detach();
-        }
-    }
+    });
 }
 
 /// Training session state machine
@@ -118,8 +121,8 @@ pub struct TrainingSession {
     pub completed_examples: Vec<Vec<Vec<f32>>>,
     /// Last countdown tick played (for tracking)
     last_tick: Option<u32>,
-    /// Audio cue generator
-    audio: Option<AudioCues>,
+    /// Whether to play audio cues
+    audio_enabled: bool,
 }
 
 impl TrainingSession {
@@ -140,7 +143,7 @@ impl TrainingSession {
             current_frames: Vec::new(),
             completed_examples: Vec::new(),
             last_tick: None,
-            audio: if enable_audio { AudioCues::new() } else { None },
+            audio_enabled: enable_audio,
         }
     }
 
@@ -206,8 +209,8 @@ impl TrainingSession {
                 // Play tick sounds
                 let current_tick = self.countdown_value();
                 if self.last_tick != Some(current_tick) && current_tick > 0 {
-                    if let Some(ref audio) = self.audio {
-                        audio.tick();
+                    if self.audio_enabled {
+                        play_tick();
                     }
                     self.last_tick = Some(current_tick);
                 }
@@ -215,8 +218,8 @@ impl TrainingSession {
                 // Check if countdown complete
                 if self.elapsed().as_secs_f32() >= self.config.countdown_secs {
                     self.transition_to(SessionState::Capturing);
-                    if let Some(ref audio) = self.audio {
-                        audio.capture_start();
+                    if self.audio_enabled {
+                        play_capture_start();
                     }
                     return true;
                 }
@@ -256,8 +259,8 @@ impl TrainingSession {
     /// Called when capture is complete
     fn on_capture_complete(&mut self) {
         // Play end sound
-        if let Some(ref audio) = self.audio {
-            audio.capture_end();
+        if self.audio_enabled {
+            play_capture_end();
         }
 
         // Save the captured frames
@@ -270,8 +273,8 @@ impl TrainingSession {
         if self.completed_reps >= self.config.reps {
             self.transition_to(SessionState::Complete);
             // Play completion sound (slight delay built into the double-ding)
-            if let Some(ref audio) = self.audio {
-                audio.complete();
+            if self.audio_enabled {
+                play_complete();
             }
         } else {
             self.transition_to(SessionState::Resting);

@@ -1,6 +1,6 @@
 [package]
 name = "ralf-gesture-studio"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Desktop application for training and recognizing movement gestures using DTW"
 license = "MIT"
@@ -19,8 +19,8 @@ directories = "5.0"
 # Error handling
 thiserror = "1.0"
 
-# GUI framework
-eframe = "0.29"
+# Tauri for GUI
+tauri = { version = "2", features = [] }
 
 # OSC protocol
 rosc = "0.10"
@@ -35,7 +35,10 @@ crossbeam-channel = "0.5"
 rodio = "0.19"
 
 # Native file dialogs
-rfd = "0.15"
+rfd = "0.14"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
 tempfile = "3.10"

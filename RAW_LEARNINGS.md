@@ -23,6 +23,38 @@ A living document capturing insights, calibrations, bugs, and best practices dis
 
 ## Learnings Log
 
+### 2026-01-27 — Clean Architecture Separation Enables UI Framework Swaps
+
+`[CODE QUALITY]` `[ARCHITECTURE]`
+
+**Problem:** The egui-based UI had persistent styling issues (gray text on dark backgrounds, limited font control). Fixing required fighting the framework rather than working with it.
+
+**Discovery:** Because the codebase maintained clean separation between business logic and UI, swapping the entire UI framework was straightforward:
+
+- `model/` — Data structures (Vocabulary, Gesture, Example), persistence (JSON save/load)
+- `engine/` — DTW algorithm, frame buffer, recognizer, training session state machine
+- `osc/` — OSC receiver and sender (async, runs in background thread)
+- `gui/` — **Only this module touches the UI framework**
+
+**Solution:** Rewrite `gui/` using Tauri (HTML/CSS/JS frontend, Rust backend). The model, engine, and osc modules required **zero changes**.
+
+**Key architectural principles that enabled this:**
+
+1. **UI is just a view**: All state lives in Rust structs, not UI widgets
+2. **No framework types leak**: `Vocabulary`, `Gesture`, `Recognizer` don't import egui/tauri
+3. **Communication via channels**: OSC receiver sends frames through channels, not callbacks tied to UI
+4. **Business logic is pure Rust**: DTW, thresholds, training state machine — all framework-agnostic
+
+**Effort:** ~1500 lines of egui code → equivalent Tauri code. Model/engine/osc (~2000 lines) untouched.
+
+**Recommendation for future projects:**
+- Keep UI in a single module that can be swapped
+- Never let UI framework types appear in business logic
+- Use channels/messages for communication between UI and background tasks
+- State should be serializable (enables both persistence AND UI framework flexibility)
+
+---
+
 ### 2026-01-26 — Statistical Threshold (μ+σ) for Auto-Calibration
 
 `[ALGORITHM]` `[RESEARCH]` `[CALIBRATION]`

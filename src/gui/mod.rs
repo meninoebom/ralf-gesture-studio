@@ -1,40 +1,23 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use serde::{Deserialize, Serialize};
+use tauri::State;
 
-use eframe::egui;
-
-use crate::model::{Vocabulary, Example, save_vocabulary, load_vocabulary, default_vocabulary_dir};
+use crate::model::{Vocabulary, Example};
+use crate::model::{save_vocabulary as model_save_vocabulary, load_vocabulary as model_load_vocabulary, default_vocabulary_dir};
 use crate::osc::{OscReceiverHandle, ConnectionStatus, OscSender, SenderStatus};
 use crate::engine::{Recognizer, HitLog, TrainingSession, TrainingConfig, SessionState, RecognitionConfig, compute_threshold_stats};
 
-// Custom colors - gold instead of yellow for better readability
-const GOLD: egui::Color32 = egui::Color32::from_rgb(255, 185, 50);
-const BRIGHT_GREEN: egui::Color32 = egui::Color32::from_rgb(100, 220, 100);
-const BRIGHT_RED: egui::Color32 = egui::Color32::from_rgb(255, 100, 100);
-const BRIGHT_BLUE: egui::Color32 = egui::Color32::from_rgb(100, 150, 255);
-const BRIGHT_ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 165, 50);
-
-// Panel background colors for improved contrast
-const PANEL_BG_DARK: egui::Color32 = egui::Color32::from_rgb(28, 28, 32);
-const PANEL_BG_MEDIUM: egui::Color32 = egui::Color32::from_rgb(35, 35, 40);
-
 /// The two modes of the application
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AppMode {
     Training,
     Performance,
 }
 
-impl AppMode {
-    fn as_str(&self) -> &'static str {
-        match self {
-            AppMode::Training => "Training",
-            AppMode::Performance => "Performance",
-        }
-    }
-}
-
-/// Main application state
-pub struct GestureStudioApp {
+/// Application state shared between Tauri commands
+pub struct AppState {
     /// The currently loaded vocabulary
     vocabulary: Vocabulary,
     /// Current file path (None if unsaved)
@@ -53,50 +36,26 @@ pub struct GestureStudioApp {
     hit_log: HitLog,
     /// Currently selected gesture ID for training
     selected_gesture_id: Option<u32>,
-    /// Training session (replaces simple recording)
+    /// Training session
     training_session: TrainingSession,
     /// Training configuration
     training_config: TrainingConfig,
-    /// Last detected gesture name (for display)
-    last_detected: Option<String>,
-    /// Gesture being renamed (ID, current text)
-    renaming_gesture: Option<(u32, String)>,
-    /// Gesture ID to delete (confirmation pending)
-    delete_gesture_id: Option<u32>,
-    /// Vocabulary name being edited
-    renaming_vocabulary: Option<String>,
     /// Recognition config (cooldown timing)
     recognition_config: RecognitionConfig,
 }
 
-impl GestureStudioApp {
-    /// Create a new application with a demo vocabulary
-    pub fn new(cc: &eframe::CreationContext<'_>, osc_receiver: OscReceiverHandle) -> Self {
-        // Configure larger fonts for better readability
-        let mut style = (*cc.egui_ctx.style()).clone();
-
-        // Increase all font sizes
-        for (_text_style, font_id) in style.text_styles.iter_mut() {
-            font_id.size *= 1.3; // 30% larger
-        }
-
-        // Increase spacing
-        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
-        style.spacing.button_padding = egui::vec2(12.0, 6.0);
-
-        cc.egui_ctx.set_style(style);
-
-        // Create a demo vocabulary to show the UI working
+impl AppState {
+    pub fn new(osc_receiver: OscReceiverHandle) -> Self {
+        // Create a demo vocabulary
         let mut vocabulary = Vocabulary::new("Demo Vocabulary");
         vocabulary.add_gesture("wave");
         vocabulary.add_gesture("jump");
         vocabulary.add_gesture("spin");
 
-        // Create OSC sender with default output settings
+        // Create OSC sender
         let osc_sender = OscSender::new(&vocabulary.output.host, vocabulary.output.port);
 
-        // Create recognizer - buffer 10 seconds at 60fps, match window of 3 seconds
-        // Default recognition config: 80ms debounce, 500ms cooldown
+        // Create recognizer
         let recognition_config = RecognitionConfig::default();
         let mut recognizer = Recognizer::with_config(600, 180, recognition_config.clone());
 
@@ -122,22 +81,17 @@ impl GestureStudioApp {
             recognizer,
             hit_log: HitLog::new(100),
             selected_gesture_id,
-            training_session: TrainingSession::new(),
+            // Use with_audio(false) to avoid Send/Sync issues with Tauri state
+            training_session: TrainingSession::with_audio(false),
             training_config: TrainingConfig::default(),
-            last_detected: None,
-            renaming_gesture: None,
-            delete_gesture_id: None,
-            renaming_vocabulary: None,
             recognition_config,
         }
     }
 
     /// Sync recognizer with vocabulary
     fn sync_recognizer(&mut self) {
-        // Remember if recognizer was active (for Performance mode)
         let was_active = self.recognizer.is_active();
 
-        // Rebuild recognizer with current vocabulary
         self.recognizer = Recognizer::with_config(600, 180, self.recognition_config.clone());
 
         for gesture in &self.vocabulary.gestures {
@@ -148,32 +102,17 @@ impl GestureStudioApp {
                 gesture.threshold,
             );
 
-            // Add examples
             for example in &gesture.examples {
                 self.recognizer.add_example(gesture.id, example.frames.clone());
             }
         }
 
-        // Restore active state if we were in Performance mode
         if was_active {
             self.recognizer.start();
         }
     }
 
-    /// Start a training session for the selected gesture
-    fn start_training(&mut self) {
-        if let Some(gesture_id) = self.selected_gesture_id {
-            if let Some(gesture) = self.vocabulary.get_gesture(gesture_id) {
-                self.training_session.start(
-                    gesture_id,
-                    &gesture.name,
-                    self.training_config.clone(),
-                );
-            }
-        }
-    }
-
-    /// Save completed training examples to vocabulary and recognizer
+    /// Save completed training examples
     fn save_training_examples(&mut self) {
         let gesture_id = self.training_session.gesture_id;
         let examples = self.training_session.take_examples();
@@ -186,119 +125,40 @@ impl GestureStudioApp {
             let frame_count = frames.len();
             let example = Example::new(frames.clone(), frame_count as u64);
 
-            // Add to vocabulary
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
                 gesture.add_example(example);
             }
 
-            // Add to recognizer
             self.recognizer.add_example(gesture_id, frames);
         }
 
-        // Compute statistical threshold after training (GRT-style μ+σ approach)
+        // Compute statistical threshold
         self.compute_gesture_statistics(gesture_id);
 
         self.dirty = true;
         self.auto_save();
     }
 
-    /// Compute and update statistical threshold for a gesture based on its training examples.
-    /// Uses the GRT-style μ+σ approach: threshold = mean + std × coefficient
+    /// Compute threshold statistics for a gesture
     fn compute_gesture_statistics(&mut self, gesture_id: u32) {
-        // Get the examples from vocabulary
         let examples: Vec<Vec<Vec<f32>>> = self.vocabulary
             .get_gesture(gesture_id)
             .map(|g| g.examples.iter().map(|e| e.frames.clone()).collect())
             .unwrap_or_default();
 
-        // Need at least 2 examples to compute meaningful statistics
         if examples.len() < 2 {
             return;
         }
 
-        // Get the coefficient from the gesture
         let coefficient = self.vocabulary
             .get_gesture(gesture_id)
             .map(|g| g.threshold_coefficient)
             .unwrap_or(2.0);
 
-        // Compute statistics
         if let Some(stats) = compute_threshold_stats(&examples, coefficient) {
-            // Update vocabulary gesture
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
                 gesture.update_statistics(stats.mean, stats.std);
-
-                // Also update the recognizer's threshold
                 self.recognizer.set_threshold(gesture_id, gesture.threshold);
-            }
-        }
-    }
-
-    /// Create a new empty vocabulary
-    fn new_vocabulary(&mut self) {
-        self.vocabulary = Vocabulary::new("New Vocabulary");
-        self.file_path = None;
-        self.dirty = false;
-        self.selected_gesture_id = None;
-        self.sync_recognizer();
-    }
-
-    /// Open a vocabulary file
-    fn open_vocabulary(&mut self) {
-        let default_dir = default_vocabulary_dir().ok();
-
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter("RALF Vocabulary", &["ralf"])
-            .set_title("Open Vocabulary");
-
-        if let Some(dir) = default_dir {
-            dialog = dialog.set_directory(dir);
-        }
-
-        if let Some(path) = dialog.pick_file() {
-            match load_vocabulary(&path) {
-                Ok(vocab) => {
-                    self.vocabulary = vocab;
-                    self.file_path = Some(path);
-                    self.dirty = false;
-                    self.selected_gesture_id = self.vocabulary.gestures.first().map(|g| g.id);
-                    self.sync_recognizer();
-
-                    // Update OSC sender with loaded config
-                    self.osc_sender = OscSender::new(
-                        &self.vocabulary.output.host,
-                        self.vocabulary.output.port,
-                    );
-                }
-                Err(e) => {
-                    eprintln!("Failed to open vocabulary: {}", e);
-                }
-            }
-        }
-    }
-
-    /// Save vocabulary to current file or prompt for new file
-    fn save_vocabulary_as(&mut self) {
-        let default_dir = default_vocabulary_dir().ok();
-
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter("RALF Vocabulary", &["ralf"])
-            .set_title("Save Vocabulary")
-            .set_file_name(&format!("{}.ralf", self.vocabulary.name));
-
-        if let Some(dir) = default_dir {
-            dialog = dialog.set_directory(dir);
-        }
-
-        if let Some(path) = dialog.save_file() {
-            match save_vocabulary(&self.vocabulary, &path) {
-                Ok(()) => {
-                    self.file_path = Some(path);
-                    self.dirty = false;
-                }
-                Err(e) => {
-                    eprintln!("Failed to save vocabulary: {}", e);
-                }
             }
         }
     }
@@ -306,7 +166,7 @@ impl GestureStudioApp {
     /// Auto-save if we have a file path
     fn auto_save(&mut self) {
         if let Some(ref path) = self.file_path {
-            if let Err(e) = save_vocabulary(&self.vocabulary, path) {
+            if let Err(e) = model_save_vocabulary(&self.vocabulary, path) {
                 eprintln!("Auto-save failed: {}", e);
             } else {
                 self.dirty = false;
@@ -314,74 +174,38 @@ impl GestureStudioApp {
         }
     }
 
-    /// Mark vocabulary as dirty (has unsaved changes)
+    /// Mark as dirty and auto-save
     fn mark_dirty(&mut self) {
         self.dirty = true;
         self.auto_save();
     }
-}
 
-impl eframe::App for GestureStudioApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Handle keyboard input
-        ctx.input(|i| {
-            // Spacebar to start training (when idle and can start)
-            if i.key_pressed(egui::Key::Space) && !self.training_session.is_active() {
-                if self.selected_gesture_id.is_some()
-                    && self.osc_receiver.state.status == ConnectionStatus::Receiving
-                    && self.mode == AppMode::Training
-                    && self.renaming_gesture.is_none()
-                {
-                    self.start_training();
-                }
-            }
-
-            // Escape to cancel training or editing
-            if i.key_pressed(egui::Key::Escape) {
-                if self.training_session.is_active() {
-                    self.training_session.cancel();
-                }
-                self.renaming_gesture = None;
-                self.renaming_vocabulary = None;
-                self.delete_gesture_id = None;
-            }
-        });
-
-        // Poll the OSC receiver for new frames
+    /// Process incoming OSC frames and update state
+    fn process_frames(&mut self) {
         let mut frames = self.osc_receiver.poll();
 
-        // In Performance mode, only process the most recent frame to avoid backlog
-        // (DTW is expensive, we can't keep up with 60fps of full processing)
+        // In Performance mode, only process the most recent frame
         if self.mode == AppMode::Performance && frames.len() > 1 {
-            // Keep only the last frame, discard older ones
             let last_frame = frames.pop().unwrap();
             frames.clear();
             frames.push(last_frame);
         }
 
-        // Process frames
         for frame in frames {
-            // If training gesture, add frames to training session
+            // If training, add frames to session
             if self.training_session.state == SessionState::Capturing {
                 self.training_session.add_frame(frame.clone());
             }
 
-            // Always feed to recognizer for buffer/matching
+            // Feed to recognizer
             if let Some(result) = self.recognizer.process_frame(frame.clone()) {
-                // Hit detected!
                 if let (Some(id), Some(name)) = (result.gesture_id, result.gesture_name.clone()) {
-                    self.last_detected = Some(name.clone());
-
-                    // Get OSC address
                     let osc_address = self.recognizer
                         .get_gesture(id)
                         .map(|g| g.osc_address.clone())
                         .unwrap_or_else(|| format!("/gesture/{}", id));
 
-                    // Log the hit
                     self.hit_log.record(id, &name, result.distance, &osc_address);
-
-                    // Send OSC hit
                     let _ = self.osc_sender.send_hit(&osc_address);
                 }
             }
@@ -390,1080 +214,503 @@ impl eframe::App for GestureStudioApp {
         // Update training session
         self.training_session.update();
 
-        // Check if training just completed
+        // Check if training completed
         if self.training_session.state == SessionState::Complete {
             self.save_training_examples();
-            // Reset to idle after saving
             self.training_session = TrainingSession::new();
         }
-
-        // Request continuous repaints to keep the UI responsive
-        ctx.request_repaint_after(std::time::Duration::from_millis(16)); // ~60fps for smooth updates
-
-        // Top panel with title and mode selector
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("RALF Gesture Studio");
-
-                // Show dirty indicator
-                if self.dirty {
-                    ui.colored_label(GOLD, "●");
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Mode selector toggle buttons (disabled during training)
-                    let old_mode = self.mode;
-                    ui.add_enabled_ui(!self.training_session.is_active(), |ui| {
-                        // Performance button (right side in RTL layout)
-                        let perf_selected = self.mode == AppMode::Performance;
-                        let perf_btn = egui::Button::new(
-                            egui::RichText::new("PERFORMANCE")
-                                .size(16.0)
-                                .color(if perf_selected { egui::Color32::WHITE } else { egui::Color32::GRAY })
-                        )
-                        .fill(if perf_selected { BRIGHT_GREEN } else { egui::Color32::from_rgb(50, 50, 50) })
-                        .min_size(egui::vec2(130.0, 32.0));
-
-                        if ui.add(perf_btn).clicked() && !perf_selected {
-                            self.mode = AppMode::Performance;
-                        }
-
-                        // Training button
-                        let train_selected = self.mode == AppMode::Training;
-                        let train_btn = egui::Button::new(
-                            egui::RichText::new("TRAINING")
-                                .size(16.0)
-                                .color(if train_selected { egui::Color32::WHITE } else { egui::Color32::GRAY })
-                        )
-                        .fill(if train_selected { BRIGHT_BLUE } else { egui::Color32::from_rgb(50, 50, 50) })
-                        .min_size(egui::vec2(110.0, 32.0));
-
-                        if ui.add(train_btn).clicked() && !train_selected {
-                            self.mode = AppMode::Training;
-                        }
-                    });
-
-                    // Start/stop recognizer when switching modes
-                    if old_mode != self.mode {
-                        if self.mode == AppMode::Performance {
-                            self.recognizer.start();
-                        } else {
-                            self.recognizer.stop();
-                        }
-                    }
-                });
-            });
-        });
-
-        // Main content area
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                // Vocabulary panel
-                self.show_vocabulary_panel(ui);
-                ui.add_space(8.0);
-
-                // Connection panel
-                self.show_connection_panel(ui);
-                ui.add_space(8.0);
-
-                // Gestures panel
-                self.show_gestures_panel(ui);
-                ui.add_space(8.0);
-
-                // Training panel (only in Training mode)
-                if self.mode == AppMode::Training {
-                    self.show_train_panel(ui);
-                }
-
-                // Performance mode panels - side by side layout
-                if self.mode == AppMode::Performance {
-                    ui.horizontal(|ui| {
-                        // Left side: Monitor panel (60% width)
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width() * 0.55, ui.available_height()),
-                            egui::Layout::top_down(egui::Align::LEFT),
-                            |ui| {
-                                self.show_monitor_panel(ui);
-                            }
-                        );
-
-                        ui.add_space(8.0);
-
-                        // Right side: Hit log (40% width) - larger and more visible
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), ui.available_height()),
-                            egui::Layout::top_down(egui::Align::LEFT),
-                            |ui| {
-                                self.show_hit_log_panel(ui);
-                            }
-                        );
-                    });
-                }
-            });
-        });
     }
 }
 
-impl GestureStudioApp {
-    /// Render the vocabulary panel
-    fn show_vocabulary_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style())
-            .fill(PANEL_BG_DARK)
-            .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+// =============================================================================
+// State DTOs for frontend
+// =============================================================================
 
-            ui.horizontal(|ui| {
-                ui.strong("VOCABULARY");
-            });
-            ui.separator();
+#[derive(Serialize)]
+pub struct StateResponse {
+    vocabulary: VocabularyDto,
+    file_path: Option<String>,
+    dirty: bool,
+    mode: AppMode,
+    selected_gesture_id: Option<u32>,
+    osc_status: OscStatusDto,
+    training: TrainingDto,
+    monitor: MonitorDto,
+    hit_log: HitLogDto,
+}
 
-            ui.horizontal(|ui| {
-                ui.label("Name:");
+#[derive(Serialize)]
+pub struct VocabularyDto {
+    name: String,
+    gestures: Vec<GestureDto>,
+}
 
-                // Check if we're renaming the vocabulary
-                if let Some(ref mut new_name) = self.renaming_vocabulary {
-                    let response = ui.add(
-                        egui::TextEdit::singleline(new_name)
-                            .desired_width(150.0)
-                    );
+#[derive(Serialize)]
+pub struct GestureDto {
+    id: u32,
+    name: String,
+    osc_address: String,
+    threshold: f32,
+    examples: Vec<ExampleDto>,
+}
 
-                    // Auto-focus
-                    response.request_focus();
+#[derive(Serialize)]
+pub struct ExampleDto {
+    frame_count: usize,
+}
 
-                    // Commit on focus loss (Enter or click elsewhere)
-                    if response.lost_focus() {
-                        self.vocabulary.name = new_name.clone();
-                        self.mark_dirty();
-                        self.renaming_vocabulary = None;
-                    }
-                } else {
-                    // Show name - clickable to edit
-                    let name_response = ui.add(
-                        egui::Label::new(egui::RichText::new(&self.vocabulary.name).strong())
-                            .selectable(false)
-                            .sense(egui::Sense::click())
-                    );
+#[derive(Serialize)]
+pub struct OscStatusDto {
+    input_status: String,
+    ms_since_last_frame: u64,
+    input_error: Option<String>,
+    frame_count: u64,
+    output_status: String,
+    ms_since_last_send: u64,
+    output_error: Option<String>,
+    send_count: u64,
+}
 
-                    // Show underline on hover to indicate editable
-                    if name_response.hovered() {
-                        let rect = name_response.rect;
-                        let underline_y = rect.bottom() - 1.0;
-                        ui.painter().line_segment(
-                            [egui::pos2(rect.left(), underline_y), egui::pos2(rect.right(), underline_y)],
-                            egui::Stroke::new(1.0, egui::Color32::GRAY),
-                        );
-                    }
+#[derive(Serialize)]
+pub struct TrainingDto {
+    state: String,
+    countdown: u32,
+    current_rep: u32,
+    total_reps: u32,
+    completed_reps: u32,
+    remaining: f32,
+    progress: f32,
+    frame_count: usize,
+}
 
-                    if name_response.clicked() {
-                        self.renaming_vocabulary = Some(self.vocabulary.name.clone());
-                    }
-                }
+#[derive(Serialize)]
+pub struct MonitorDto {
+    active: bool,
+    buffer_len: usize,
+    window_size: usize,
+    total_examples: usize,
+    gestures: Vec<GestureMonitorDto>,
+    recent_hit: Option<String>,
+}
 
-                // Show file path if saved
-                if let Some(ref path) = self.file_path {
-                    ui.colored_label(egui::Color32::GRAY, format!("({})", path.display()));
-                }
+#[derive(Serialize)]
+pub struct GestureMonitorDto {
+    id: u32,
+    name: String,
+    example_count: usize,
+    distance: Option<f32>,
+    threshold: f32,
+    auto_mode: bool,
+    recent_hit: bool,
+}
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new("Save As").min_size(egui::vec2(80.0, 28.0))).clicked() {
-                        self.save_vocabulary_as();
-                    }
-                    if ui.add(egui::Button::new("Open").min_size(egui::vec2(70.0, 28.0))).clicked() {
-                        self.open_vocabulary();
-                    }
-                    if ui.add(egui::Button::new("New").min_size(egui::vec2(60.0, 28.0))).clicked() {
-                        self.new_vocabulary();
-                    }
-                });
-            });
+#[derive(Serialize)]
+pub struct HitLogDto {
+    total: usize,
+    entries: Vec<HitEntryDto>,
+}
 
-            ui.horizontal(|ui| {
-                ui.label(format!("Gestures: {}", self.vocabulary.gestures.len()));
-            });
-        });
+#[derive(Serialize)]
+pub struct HitEntryDto {
+    name: String,
+    ms_ago: u64,
+    recent: bool,
+}
+
+// =============================================================================
+// Tauri Commands
+// =============================================================================
+
+#[tauri::command]
+pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+
+    // Process any pending OSC frames
+    app.process_frames();
+
+    // Build response
+    let vocabulary = VocabularyDto {
+        name: app.vocabulary.name.clone(),
+        gestures: app.vocabulary.gestures.iter().map(|g| GestureDto {
+            id: g.id,
+            name: g.name.clone(),
+            osc_address: g.osc_address.clone(),
+            threshold: g.threshold,
+            examples: g.examples.iter().map(|e| ExampleDto {
+                frame_count: e.frames.len(),
+            }).collect(),
+        }).collect(),
+    };
+
+    let input_status = match app.osc_receiver.state.status {
+        ConnectionStatus::Stopped => "Stopped".to_string(),
+        ConnectionStatus::Listening => "Listening".to_string(),
+        ConnectionStatus::Receiving => "Receiving".to_string(),
+        ConnectionStatus::Error => "Error".to_string(),
+    };
+
+    let output_status = match app.osc_sender.state.status {
+        SenderStatus::Ready => "Ready".to_string(),
+        SenderStatus::Sent => "Sent".to_string(),
+        SenderStatus::Error => "Error".to_string(),
+    };
+
+    let osc_status = OscStatusDto {
+        input_status,
+        ms_since_last_frame: app.osc_receiver.ms_since_last_frame().unwrap_or(0) as u64,
+        input_error: app.osc_receiver.state.error_message.clone(),
+        frame_count: app.osc_receiver.state.frame_count,
+        output_status,
+        ms_since_last_send: app.osc_sender.ms_since_last_send().unwrap_or(0) as u64,
+        output_error: app.osc_sender.state.error_message.clone(),
+        send_count: app.osc_sender.state.send_count,
+    };
+
+    let training_state = match app.training_session.state {
+        SessionState::Idle => "idle",
+        SessionState::Countdown => "countdown",
+        SessionState::Capturing => "capturing",
+        SessionState::Resting => "resting",
+        SessionState::Complete => "complete",
+    };
+
+    let training = TrainingDto {
+        state: training_state.to_string(),
+        countdown: app.training_session.countdown_value(),
+        current_rep: app.training_session.completed_reps + 1,
+        total_reps: app.training_session.config.reps,
+        completed_reps: app.training_session.completed_reps,
+        remaining: app.training_session.remaining_secs(),
+        progress: app.training_session.progress(),
+        frame_count: app.training_session.current_frame_count(),
+    };
+
+    let distances = app.recognizer.current_distances();
+    let recent_hits = app.hit_log.recent(1);
+    let recent_hit_name = recent_hits.first()
+        .filter(|h| h.timestamp.elapsed().as_millis() < 300)
+        .map(|h| h.gesture_name.clone());
+
+    let monitor = MonitorDto {
+        active: app.recognizer.is_active(),
+        buffer_len: app.recognizer.buffer.len(),
+        window_size: app.recognizer.window_size(),
+        total_examples: app.recognizer.total_example_count(),
+        gestures: distances.iter().map(|(id, name, dist, thresh)| {
+            let gesture = app.vocabulary.get_gesture(*id);
+            let auto_mode = gesture.map(|g| !g.threshold_manual_override).unwrap_or(false);
+            let recent_hit = recent_hit_name.as_ref().map(|n| n == name).unwrap_or(false);
+
+            GestureMonitorDto {
+                id: *id,
+                name: name.clone(),
+                example_count: app.recognizer.example_count(*id),
+                distance: *dist,
+                threshold: *thresh,
+                auto_mode,
+                recent_hit,
+            }
+        }).collect(),
+        recent_hit: recent_hit_name,
+    };
+
+    let hit_entries: Vec<HitEntryDto> = app.hit_log.recent(10).iter().map(|e| {
+        let ms_ago = e.timestamp.elapsed().as_millis() as u64;
+        HitEntryDto {
+            name: e.gesture_name.clone(),
+            ms_ago,
+            recent: ms_ago < 2000,
+        }
+    }).collect();
+
+    let hit_log = HitLogDto {
+        total: app.hit_log.len(),
+        entries: hit_entries,
+    };
+
+    Ok(StateResponse {
+        vocabulary,
+        file_path: app.file_path.as_ref().map(|p| p.display().to_string()),
+        dirty: app.dirty,
+        mode: app.mode,
+        selected_gesture_id: app.selected_gesture_id,
+        osc_status,
+        training,
+        monitor,
+        hit_log,
+    })
+}
+
+#[tauri::command]
+pub fn set_mode(state: State<Arc<Mutex<AppState>>>, mode: AppMode) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+
+    if app.mode != mode {
+        app.mode = mode;
+        if mode == AppMode::Performance {
+            app.recognizer.start();
+        } else {
+            app.recognizer.stop();
+        }
     }
 
-    /// Render the connection panel
-    fn show_connection_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style())
-            .fill(PANEL_BG_MEDIUM)
-            .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+    Ok(())
+}
 
-            ui.horizontal(|ui| {
-                ui.strong("CONNECTION");
-            });
-            ui.separator();
+#[tauri::command]
+pub fn new_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
 
-            ui.horizontal(|ui| {
-                // Input section
-                ui.vertical(|ui| {
-                    ui.label("INPUT");
-                    ui.horizontal(|ui| {
-                        ui.label("Port:");
-                        ui.label(format!("{}", self.vocabulary.input.port));
-                        ui.label("Address:");
-                        ui.label(&self.vocabulary.input.address);
-                    });
+    app.vocabulary = Vocabulary::new("New Vocabulary");
+    app.file_path = None;
+    app.dirty = false;
+    app.selected_gesture_id = None;
+    app.sync_recognizer();
 
-                    // Show live connection status
-                    ui.horizontal(|ui| {
-                        let (color, status_text, detail) = match self.osc_receiver.state.status {
-                            ConnectionStatus::Stopped => {
-                                (egui::Color32::GRAY, "STOPPED", String::new())
-                            }
-                            ConnectionStatus::Listening => {
-                                (GOLD, "LISTENING", "(waiting for data)".to_string())
-                            }
-                            ConnectionStatus::Receiving => {
-                                let ms = self.osc_receiver.ms_since_last_frame().unwrap_or(0);
-                                let secs = ms as f32 / 1000.0;
-                                (BRIGHT_GREEN, "RECEIVING", format!("({:.1}s ago)", secs))
-                            }
-                            ConnectionStatus::Error => {
-                                let msg = self.osc_receiver.state.error_message
-                                    .as_deref()
-                                    .unwrap_or("Unknown error");
-                                (BRIGHT_RED, "ERROR", format!("({})", msg))
-                            }
-                        };
-                        ui.colored_label(color, "●");
-                        ui.colored_label(color, status_text);
-                        if !detail.is_empty() {
-                            ui.label(detail);
-                        }
-                    });
+    Ok(())
+}
 
-                    // Show frame count
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Frames: {}", self.osc_receiver.state.frame_count));
-                    });
-                });
+#[tauri::command]
+pub fn open_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> {
+    let default_dir = default_vocabulary_dir().ok();
 
-                ui.add_space(40.0);
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("RALF Vocabulary", &["ralf"])
+        .set_title("Open Vocabulary");
 
-                // Output section
-                ui.vertical(|ui| {
-                    ui.label("OUTPUT");
-                    ui.horizontal(|ui| {
-                        ui.label("Host:");
-                        ui.label(&self.vocabulary.output.host);
-                        ui.label("Port:");
-                        ui.label(format!("{}", self.vocabulary.output.port));
-                    });
-
-                    // Show sender status
-                    ui.horizontal(|ui| {
-                        let (color, status_text, detail) = match self.osc_sender.state.status {
-                            SenderStatus::Ready => {
-                                (BRIGHT_GREEN, "READY", String::new())
-                            }
-                            SenderStatus::Sent => {
-                                let ms = self.osc_sender.ms_since_last_send().unwrap_or(0);
-                                let secs = ms as f32 / 1000.0;
-                                (BRIGHT_GREEN, "SENT", format!("({:.1}s ago)", secs))
-                            }
-                            SenderStatus::Error => {
-                                let msg = self.osc_sender.state.error_message
-                                    .as_deref()
-                                    .unwrap_or("Unknown error");
-                                (BRIGHT_RED, "ERROR", format!("({})", msg))
-                            }
-                        };
-                        ui.colored_label(color, "●");
-                        ui.colored_label(color, status_text);
-                        if !detail.is_empty() {
-                            ui.label(detail);
-                        }
-                    });
-
-                    // Show send count
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Sent: {}", self.osc_sender.state.send_count));
-                    });
-
-                    // Send Test Hit button
-                    ui.add_space(4.0);
-                    if ui.add(egui::Button::new("Send Test Hit").min_size(egui::vec2(120.0, 28.0))).clicked() {
-                        let _ = self.osc_sender.send_hit("/test/hit");
-                    }
-                });
-            });
-        });
+    if let Some(dir) = default_dir {
+        dialog = dialog.set_directory(dir);
     }
 
-    /// Render the gestures panel
-    fn show_gestures_panel(&mut self, ui: &mut egui::Ui) {
-        // Disable during active training
-        let enabled = !self.training_session.is_active();
+    if let Some(path) = dialog.pick_file() {
+        let mut app = state.lock().map_err(|e| e.to_string())?;
 
-        egui::Frame::group(ui.style())
-            .fill(PANEL_BG_DARK)
-            .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        match model_load_vocabulary(&path) {
+            Ok(vocab) => {
+                app.vocabulary = vocab;
+                app.file_path = Some(path);
+                app.dirty = false;
+                app.selected_gesture_id = app.vocabulary.gestures.first().map(|g| g.id);
+                app.sync_recognizer();
 
-            ui.horizontal(|ui| {
-                ui.strong("GESTURES");
-            });
-            ui.separator();
-
-            // Header row
-            ui.horizontal(|ui| {
-                ui.label("     "); // Status indicator space
-                ui.label("Name");
-                ui.add_space(80.0);
-                ui.label("Examples");
-                ui.add_space(20.0);
-                ui.label("Output Address");
-            });
-            ui.separator();
-
-            // Gesture rows - collect data first to avoid borrow issues
-            let gesture_data: Vec<_> = self.vocabulary.gestures.iter()
-                .map(|g| (g.id, g.name.clone(), g.example_count(), g.osc_address.clone(), g.has_examples()))
-                .collect();
-
-            let mut gesture_to_select = None;
-            let mut gesture_to_delete = None;
-            let mut start_rename = None;
-
-            for (id, name, example_count, osc_address, has_examples) in gesture_data {
-                ui.horizontal(|ui| {
-                    // Status indicator (filled if has examples, empty if not)
-                    if has_examples {
-                        ui.colored_label(BRIGHT_GREEN, "●");
-                    } else {
-                        ui.colored_label(egui::Color32::GRAY, "○");
-                    }
-
-                    // Check if this gesture is being renamed
-                    let is_renaming = self.renaming_gesture.as_ref().map(|(rid, _)| *rid == id).unwrap_or(false);
-                    let is_selected = self.selected_gesture_id == Some(id);
-
-                    if is_renaming {
-                        // Show text edit for renaming
-                        if let Some((_, ref mut new_name)) = self.renaming_gesture {
-                            let response = ui.add(
-                                egui::TextEdit::singleline(new_name)
-                                    .desired_width(100.0)
-                            );
-
-                            // Auto-focus
-                            response.request_focus();
-
-                            // Commit on focus loss (Enter or click elsewhere)
-                            // Escape is handled separately and clears renaming_gesture
-                            if response.lost_focus() {
-                                if let Some(gesture) = self.vocabulary.get_gesture_mut(id) {
-                                    gesture.name = new_name.clone();
-                                    self.mark_dirty();
-                                }
-                                self.renaming_gesture = None;
-                            }
-                        }
-                    } else {
-                        // Show name - clickable to rename (with visual hint)
-                        let name_text = egui::RichText::new(&name);
-                        let name_text = if is_selected {
-                            name_text.color(BRIGHT_BLUE)
-                        } else {
-                            name_text
-                        };
-
-                        let name_response = ui.add(
-                            egui::Label::new(name_text)
-                                .selectable(false)
-                                .sense(egui::Sense::click())
-                        );
-
-                        // Show underline on hover to indicate editable
-                        if name_response.hovered() && enabled {
-                            let rect = name_response.rect;
-                            let underline_y = rect.bottom() - 1.0;
-                            ui.painter().line_segment(
-                                [egui::pos2(rect.left(), underline_y), egui::pos2(rect.right(), underline_y)],
-                                egui::Stroke::new(1.0, egui::Color32::GRAY),
-                            );
-                        }
-
-                        if name_response.clicked() && enabled {
-                            start_rename = Some((id, name.clone()));
-                        }
-                    }
-
-                    ui.add_space((80.0 - name.len() as f32 * 7.0).max(10.0));
-                    ui.label(format!("{}", example_count));
-                    ui.add_space(45.0);
-                    ui.label(&osc_address);
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_enabled_ui(enabled, |ui| {
-                            // Delete button
-                            if ui.add(egui::Button::new("×").min_size(egui::vec2(32.0, 28.0))).clicked() {
-                                gesture_to_delete = Some(id);
-                            }
-
-                            // Select button
-                            let select_text = if is_selected { "Selected" } else { "Select" };
-                            if ui.add(egui::Button::new(select_text).min_size(egui::vec2(70.0, 28.0))).clicked() {
-                                gesture_to_select = Some(id);
-                            }
-                        });
-                    });
-                });
+                app.osc_sender = OscSender::new(
+                    &app.vocabulary.output.host,
+                    app.vocabulary.output.port,
+                );
             }
-
-            // Apply actions after iteration
-            if let Some(id) = gesture_to_select {
-                self.selected_gesture_id = Some(id);
+            Err(e) => {
+                return Err(format!("Failed to open vocabulary: {}", e));
             }
-
-            if let Some((id, name)) = start_rename {
-                self.renaming_gesture = Some((id, name));
-            }
-
-            if let Some(id) = gesture_to_delete {
-                self.delete_gesture_id = Some(id);
-            }
-
-            // Delete confirmation dialog
-            if let Some(delete_id) = self.delete_gesture_id {
-                let gesture_name = self.vocabulary.get_gesture(delete_id)
-                    .map(|g| g.name.clone())
-                    .unwrap_or_default();
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.colored_label(BRIGHT_RED, format!("Delete \"{}\"?", gesture_name));
-                    if ui.button("Yes").clicked() {
-                        self.vocabulary.remove_gesture(delete_id);
-                        if self.selected_gesture_id == Some(delete_id) {
-                            self.selected_gesture_id = self.vocabulary.gestures.first().map(|g| g.id);
-                        }
-                        self.sync_recognizer();
-                        self.mark_dirty();
-                        self.delete_gesture_id = None;
-                    }
-                    if ui.button("No").clicked() {
-                        self.delete_gesture_id = None;
-                    }
-                });
-            }
-
-            ui.add_space(12.0);
-            ui.add_enabled_ui(enabled, |ui| {
-                if ui.add(egui::Button::new("+ Add Gesture").min_size(egui::vec2(140.0, 32.0))).clicked() {
-                    // Add a new gesture
-                    let new_id = self.vocabulary.add_gesture(&format!("gesture{}", self.vocabulary.gestures.len() + 1));
-                    if let Some(gesture) = self.vocabulary.get_gesture(new_id) {
-                        self.recognizer.add_gesture(
-                            gesture.id,
-                            &gesture.name,
-                            &gesture.osc_address,
-                            gesture.threshold,
-                        );
-                    }
-                    self.selected_gesture_id = Some(new_id);
-                    self.mark_dirty();
-                }
-            });
-        });
+        }
     }
 
-    /// Render the training panel
-    fn show_train_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style())
-            .fill(PANEL_BG_MEDIUM)
-            .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+    Ok(())
+}
 
-            ui.horizontal(|ui| {
-                ui.strong("TRAIN GESTURES");
-            });
-            ui.separator();
+#[tauri::command]
+pub fn save_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> {
+    let default_dir = default_vocabulary_dir().ok();
 
-            // Get selected gesture name
-            let selected_name = self.selected_gesture_id
-                .and_then(|id| self.vocabulary.get_gesture(id))
-                .map(|g| g.name.clone())
-                .unwrap_or_else(|| "(none)".to_string());
+    let vocab_name = {
+        let app = state.lock().map_err(|e| e.to_string())?;
+        app.vocabulary.name.clone()
+    };
 
-            // Training parameters (only editable when idle)
-            let is_idle = self.training_session.state == SessionState::Idle;
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("RALF Vocabulary", &["ralf"])
+        .set_title("Save Vocabulary")
+        .set_file_name(&format!("{}.ralf", vocab_name));
 
-            ui.horizontal(|ui| {
-                ui.label("Gesture:");
-                ui.colored_label(BRIGHT_BLUE, &selected_name);
-
-                ui.add_space(20.0);
-
-                ui.add_enabled_ui(is_idle, |ui| {
-                    ui.label("Reps:");
-                    let mut reps = self.training_config.reps as i32;
-                    if ui.add(egui::DragValue::new(&mut reps).range(1..=20).speed(0.5)).changed() {
-                        self.training_config.reps = reps as u32;
-                    }
-
-                    ui.add_space(10.0);
-                    ui.label("Count-in:");
-                    let mut countdown = self.training_config.countdown_secs.round() as i32;
-                    if ui.add(egui::DragValue::new(&mut countdown).range(1..=10).speed(0.5).suffix("s")).changed() {
-                        self.training_config.countdown_secs = countdown as f32;
-                    }
-
-                    ui.add_space(10.0);
-                    ui.label("Capture:");
-                    let mut duration = self.training_config.duration_secs.round() as i32;
-                    if ui.add(egui::DragValue::new(&mut duration).range(1..=10).speed(0.5).suffix("s")).changed() {
-                        self.training_config.duration_secs = duration as f32;
-                    }
-
-                    ui.add_space(10.0);
-                    ui.label("Rest:");
-                    let mut rest = self.training_config.rest_secs.round() as i32;
-                    if ui.add(egui::DragValue::new(&mut rest).range(1..=10).speed(0.5).suffix("s")).changed() {
-                        self.training_config.rest_secs = rest as f32;
-                    }
-                });
-            });
-
-            ui.add_space(16.0);
-
-            // Training state display
-            match self.training_session.state {
-                SessionState::Idle => {
-                    self.show_train_idle(ui, &selected_name);
-                }
-                SessionState::Countdown => {
-                    self.show_train_countdown(ui);
-                }
-                SessionState::Capturing => {
-                    self.show_train_capturing(ui);
-                }
-                SessionState::Resting => {
-                    self.show_train_resting(ui);
-                }
-                SessionState::Complete => {
-                    // This should be brief as we immediately save and reset
-                    ui.vertical_centered(|ui| {
-                        ui.colored_label(BRIGHT_GREEN, egui::RichText::new("COMPLETE!").size(28.0).strong());
-                    });
-                }
-            }
-        });
+    if let Some(dir) = default_dir {
+        dialog = dialog.set_directory(dir);
     }
 
-    /// Show idle training state
-    fn show_train_idle(&mut self, ui: &mut egui::Ui, selected_name: &str) {
-        ui.vertical_centered(|ui| {
-            let can_start = self.selected_gesture_id.is_some()
-                && self.osc_receiver.state.status == ConnectionStatus::Receiving;
+    if let Some(path) = dialog.save_file() {
+        let mut app = state.lock().map_err(|e| e.to_string())?;
 
-            let button = egui::Button::new(
-                egui::RichText::new("▶ START TRAINING")
-                    .size(24.0)
-                    .strong()
-            )
-            .min_size(egui::vec2(250.0, 60.0));
-
-            let response = ui.add_enabled(can_start, button);
-            if response.clicked() {
-                self.start_training();
+        match model_save_vocabulary(&app.vocabulary, &path) {
+            Ok(()) => {
+                app.file_path = Some(path);
+                app.dirty = false;
             }
+            Err(e) => {
+                return Err(format!("Failed to save vocabulary: {}", e));
+            }
+        }
+    }
 
-            ui.add_space(8.0);
+    Ok(())
+}
 
-            if !can_start {
-                if self.selected_gesture_id.is_none() {
-                    ui.label("Select a gesture above to train");
-                } else {
-                    ui.label("Waiting for OSC data...");
-                }
+#[tauri::command]
+pub fn send_test_hit(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.osc_sender.send_hit("/test/hit").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn add_gesture(state: State<Arc<Mutex<AppState>>>) -> Result<u32, String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+
+    let name = format!("gesture{}", app.vocabulary.gestures.len() + 1);
+    let new_id = app.vocabulary.add_gesture(&name);
+
+    // Get gesture data before mutable borrow of recognizer
+    let gesture_data = app.vocabulary.get_gesture(new_id).map(|g| {
+        (g.id, g.name.clone(), g.osc_address.clone(), g.threshold)
+    });
+
+    if let Some((id, name, osc_address, threshold)) = gesture_data {
+        app.recognizer.add_gesture(id, &name, &osc_address, threshold);
+    }
+
+    app.selected_gesture_id = Some(new_id);
+    app.mark_dirty();
+
+    Ok(new_id)
+}
+
+#[tauri::command]
+pub fn select_gesture(state: State<Arc<Mutex<AppState>>>, gesture_id: u32) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.selected_gesture_id = Some(gesture_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn rename_gesture(state: State<Arc<Mutex<AppState>>>, gesture_id: u32, name: String) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+
+    if let Some(gesture) = app.vocabulary.get_gesture_mut(gesture_id) {
+        gesture.name = name;
+        app.mark_dirty();
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_gesture(state: State<Arc<Mutex<AppState>>>, gesture_id: u32) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+
+    app.vocabulary.remove_gesture(gesture_id);
+
+    if app.selected_gesture_id == Some(gesture_id) {
+        app.selected_gesture_id = app.vocabulary.gestures.first().map(|g| g.id);
+    }
+
+    app.sync_recognizer();
+    app.mark_dirty();
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn start_training(
+    state: State<Arc<Mutex<AppState>>>,
+    gesture_id: u32,
+    reps: u32,
+    countdown_secs: u32,
+    duration_secs: u32,
+    rest_secs: u32,
+) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+
+    // Get gesture name before mutable operations
+    let gesture_name = app.vocabulary.get_gesture(gesture_id).map(|g| g.name.clone());
+
+    if let Some(name) = gesture_name {
+        let config = TrainingConfig {
+            reps,
+            countdown_secs: countdown_secs as f32,
+            duration_secs: duration_secs as f32,
+            rest_secs: rest_secs as f32,
+        };
+
+        app.training_config = config.clone();
+        app.training_session.start(gesture_id, &name, config);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cancel_training(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.training_session.cancel();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_threshold(
+    state: State<Arc<Mutex<AppState>>>,
+    gesture_id: u32,
+    threshold: f32,
+    manual: bool,
+) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+
+    app.recognizer.set_threshold(gesture_id, threshold);
+
+    if let Some(gesture) = app.vocabulary.get_gesture_mut(gesture_id) {
+        gesture.threshold = threshold;
+        gesture.threshold_manual_override = manual;
+    }
+
+    app.mark_dirty();
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn toggle_threshold_mode(state: State<Arc<Mutex<AppState>>>, gesture_id: u32) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+
+    // Calculate new threshold if switching to auto mode
+    let new_threshold = if let Some(gesture) = app.vocabulary.get_gesture(gesture_id) {
+        if gesture.threshold_manual_override {
+            // Switching to auto mode - calculate threshold
+            if let (Some(mean), Some(std)) = (gesture.distance_mean, gesture.distance_std) {
+                Some(mean + std * gesture.threshold_coefficient)
             } else {
-                ui.label(format!("Press [Space] or click to train \"{}\"", selected_name));
-                ui.label(format!(
-                    "Will record {} reps × {:.1}s with {:.1}s rest",
-                    self.training_config.reps,
-                    self.training_config.duration_secs,
-                    self.training_config.rest_secs
-                ));
+                None
             }
-        });
+        } else {
+            None // Just switching to manual, no threshold change
+        }
+    } else {
+        None
+    };
 
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label("Status:");
-            ui.colored_label(egui::Color32::GRAY, "IDLE");
-        });
-    }
-
-    /// Show countdown state
-    fn show_train_countdown(&self, ui: &mut egui::Ui) {
-        let countdown = self.training_session.countdown_value();
-        let rep_num = self.training_session.completed_reps + 1;
-        let total_reps = self.training_session.config.reps;
-
-        ui.vertical_centered(|ui| {
-            // Large countdown number
-            ui.colored_label(
-                GOLD,
-                egui::RichText::new(format!("{}", countdown))
-                    .size(72.0)
-                    .strong()
-            );
-
-            ui.add_space(8.0);
-            ui.label(format!(
-                "Get ready for rep {} of {} for \"{}\"",
-                rep_num,
-                total_reps,
-                self.training_session.gesture_name
-            ));
-
-            ui.add_space(16.0);
-            ui.colored_label(egui::Color32::GRAY, "Press [Esc] to cancel");
-        });
-
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label("Status:");
-            ui.colored_label(GOLD, "COUNTDOWN");
-        });
-    }
-
-    /// Show capturing state
-    fn show_train_capturing(&self, ui: &mut egui::Ui) {
-        let progress = self.training_session.progress();
-        let remaining = self.training_session.remaining_secs();
-        let frame_count = self.training_session.current_frame_count();
-        let rep_num = self.training_session.completed_reps + 1;
-        let total_reps = self.training_session.config.reps;
-
-        ui.vertical_centered(|ui| {
-            // CAPTURING header with pulsing effect
-            ui.colored_label(
-                BRIGHT_RED,
-                egui::RichText::new("███ CAPTURING ███")
-                    .size(28.0)
-                    .strong()
-            );
-
-            ui.add_space(16.0);
-
-            // Time remaining
-            ui.colored_label(
-                BRIGHT_RED,
-                egui::RichText::new(format!("{:.1}s", remaining))
-                    .size(48.0)
-                    .strong()
-            );
-
-            ui.add_space(8.0);
-
-            // Progress bar
-            let progress_bar = egui::ProgressBar::new(progress)
-                .animate(true);
-            ui.add(progress_bar);
-
-            ui.add_space(8.0);
-            ui.label(format!("{} frames captured", frame_count));
-
-            ui.add_space(8.0);
-            ui.label(format!(
-                "Recording example {} of {} for \"{}\"",
-                rep_num,
-                total_reps,
-                self.training_session.gesture_name
-            ));
-
-            ui.add_space(8.0);
-            ui.colored_label(egui::Color32::GRAY, "Press [Esc] to cancel");
-        });
-
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label("Status:");
-            ui.colored_label(BRIGHT_RED, "CAPTURING");
-        });
-    }
-
-    /// Show resting state
-    fn show_train_resting(&self, ui: &mut egui::Ui) {
-        let remaining = self.training_session.remaining_secs();
-        let completed = self.training_session.completed_reps;
-        let total_reps = self.training_session.config.reps;
-
-        ui.vertical_centered(|ui| {
-            ui.colored_label(
-                BRIGHT_ORANGE,
-                egui::RichText::new("REST")
-                    .size(36.0)
-                    .strong()
-            );
-
-            ui.add_space(16.0);
-
-            // Time remaining
-            ui.label(egui::RichText::new(format!("{:.1}s", remaining)).size(32.0));
-
-            ui.add_space(16.0);
-
-            // Progress summary
-            ui.colored_label(
-                BRIGHT_GREEN,
-                format!("Completed {} of {} reps", completed, total_reps)
-            );
-
-            ui.add_space(8.0);
-            ui.label("Relax... next rep starting soon");
-
-            ui.add_space(8.0);
-            ui.colored_label(egui::Color32::GRAY, "Press [Esc] to cancel");
-        });
-
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label("Status:");
-            ui.colored_label(BRIGHT_ORANGE, "RESTING");
-        });
-    }
-
-    /// Render the gesture monitor panel (Performance mode)
-    fn show_monitor_panel(&mut self, ui: &mut egui::Ui) {
-        // Check for recent hits (for flash indicators)
-        let recent_hits = self.hit_log.recent(1);
-        let recent_hit_info: Option<(String, u128)> = recent_hits.first().map(|h| {
-            (h.gesture_name.clone(), h.timestamp.elapsed().as_millis())
-        });
-
-        // LARGE HIT INDICATOR - visible from far away
-        egui::Frame::group(ui.style())
-            .fill(egui::Color32::from_rgb(20, 20, 20))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.set_height(80.0);
-
-                ui.centered_and_justified(|ui| {
-                    if let Some((hit_name, ms)) = &recent_hit_info {
-                        // Show hit for only 300ms so it's clear when hit ends
-                        if *ms < 300 {
-                            ui.colored_label(
-                                BRIGHT_GREEN,
-                                egui::RichText::new(format!("● {}", hit_name))
-                                    .size(56.0)
-                                    .strong()
-                            );
-                        } else {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(40, 40, 40),
-                                egui::RichText::new("—").size(56.0)
-                            );
-                        }
-                    } else {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(40, 40, 40),
-                            egui::RichText::new("—").size(56.0)
-                        );
-                    }
-                });
-            });
-
-        ui.add_space(8.0);
-
-        egui::Frame::group(ui.style())
-            .fill(PANEL_BG_DARK)
-            .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("GESTURE MONITOR").strong().size(16.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Show debug info
-                    let buffer_len = self.recognizer.buffer.len();
-                    let window_size = self.recognizer.window_size();
-                    let total_examples = self.recognizer.total_example_count();
-
-                    // Buffer status - need window_size frames to start matching
-                    if window_size == 0 {
-                        ui.colored_label(BRIGHT_RED, egui::RichText::new("No examples").size(12.0));
-                    } else if buffer_len < window_size {
-                        ui.colored_label(GOLD, egui::RichText::new(format!("Filling: {}/{}", buffer_len, window_size)).size(12.0));
-                    } else {
-                        ui.colored_label(BRIGHT_GREEN, egui::RichText::new(format!("Ready: {}", buffer_len)).size(12.0));
-                    }
-
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new(format!("Win:{}", window_size)).size(12.0));
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new(format!("Ex:{}", total_examples)).size(12.0));
-                    ui.add_space(10.0);
-
-                    // Show recognizer status
-                    let status_text = if self.recognizer.is_active() { "ACTIVE" } else { "STOPPED" };
-                    let status_color = if self.recognizer.is_active() { BRIGHT_GREEN } else { BRIGHT_RED };
-                    ui.colored_label(status_color, egui::RichText::new(status_text).size(14.0));
-                });
-            });
-            ui.separator();
-
-            // Get current distances from recognizer
-            let distances = self.recognizer.current_distances();
-
-            // Collect threshold changes to apply after
-            let mut threshold_changes: Vec<(u32, f32, bool)> = Vec::new(); // (id, value, is_manual)
-
-            // Use Grid for clean layout - LARGER FONTS
-            egui::Grid::new("gesture_monitor_grid")
-                .num_columns(5)
-                .spacing([12.0, 12.0])
-                .striped(true)
-                .show(ui, |ui| {
-                    // Header row
-                    ui.label(egui::RichText::new("Gesture").strong().size(16.0));
-                    ui.label(egui::RichText::new("Distance").strong().size(16.0));
-                    ui.label(egui::RichText::new("< Threshold").strong().size(16.0));
-                    ui.label(egui::RichText::new("Mode").strong().size(14.0));
-                    ui.label(""); // Hit column
-                    ui.end_row();
-
-                    // Gesture rows
-                    for (id, name, current_dist, threshold) in &distances {
-                        let example_count = self.recognizer.example_count(*id);
-                        let has_examples = example_count > 0;
-
-                        // Get statistical info from vocabulary
-                        let gesture_stats = self.vocabulary.get_gesture(*id)
-                            .map(|g| (g.distance_mean, g.distance_std, g.threshold_manual_override, g.threshold_coefficient));
-
-                        // Check if THIS gesture had a recent hit (within 300ms for quick feedback)
-                        let had_recent_hit = recent_hit_info.as_ref()
-                            .map(|(hit_name, ms)| hit_name == name && *ms < 300)
-                            .unwrap_or(false);
-
-                        // Gesture name with example count (fixed width)
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(130.0, 28.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                if has_examples {
-                                    ui.label(egui::RichText::new(format!("{} ({})", name, example_count)).size(16.0));
-                                } else {
-                                    ui.colored_label(GOLD, egui::RichText::new(format!("{} (train)", name)).size(16.0));
-                                }
-                            }
-                        );
-
-                        // Current distance (fixed width) - LARGE, this is key info
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(80.0, 28.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                if !has_examples {
-                                    ui.label(egui::RichText::new("--").size(20.0));
-                                } else {
-                                    match current_dist {
-                                        Some(dist) => {
-                                            // Color based on whether below threshold
-                                            let color = if *dist < *threshold {
-                                                BRIGHT_GREEN
-                                            } else {
-                                                egui::Color32::LIGHT_GRAY
-                                            };
-                                            ui.colored_label(color, egui::RichText::new(format!("{:.0}", dist)).size(20.0).strong());
-                                        }
-                                        None => {
-                                            ui.colored_label(egui::Color32::GRAY, egui::RichText::new("...").size(20.0));
-                                        }
-                                    }
-                                }
-                            }
-                        );
-
-                        // Threshold slider (higher = easier to hit)
-                        let mut thresh = *threshold;
-                        ui.horizontal(|ui| {
-                            let slider = egui::Slider::new(&mut thresh, 10.0..=500.0)
-                                .logarithmic(true)
-                                .show_value(false)
-                                .clamping(egui::SliderClamping::Always);
-
-                            if ui.add(slider).changed() {
-                                // Slider adjustment = manual override
-                                threshold_changes.push((*id, thresh, true));
-                            }
-
-                            // Show numeric value with μ±σ info if available
-                            if let Some((Some(mean), Some(std), is_manual, _coeff)) = gesture_stats {
-                                if !is_manual {
-                                    // Show computed threshold with μ±σ annotation
-                                    ui.colored_label(BRIGHT_BLUE, egui::RichText::new(format!("{:.0}", thresh)).size(14.0));
-                                    ui.colored_label(egui::Color32::DARK_GRAY, egui::RichText::new(format!("(μ{:.0}±{:.0})", mean, std)).size(10.0));
-                                } else {
-                                    ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("{:.0}", thresh)).size(14.0));
-                                }
-                            } else {
-                                ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("{:.0}", thresh)).size(14.0));
-                            }
-                        });
-
-                        // Mode indicator (Auto/Manual) - clickable to toggle
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(50.0, 28.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                if let Some((mean_opt, std_opt, is_manual, _)) = gesture_stats {
-                                    let has_stats = mean_opt.is_some() && std_opt.is_some();
-                                    if has_stats {
-                                        let (mode_text, mode_color) = if is_manual {
-                                            ("MAN", egui::Color32::GRAY)
-                                        } else {
-                                            ("AUTO", BRIGHT_BLUE)
-                                        };
-                                        let btn = egui::Button::new(egui::RichText::new(mode_text).size(11.0).color(mode_color))
-                                            .fill(egui::Color32::TRANSPARENT)
-                                            .frame(false);
-                                        if ui.add(btn).on_hover_text("Click to toggle auto/manual threshold").clicked() {
-                                            // Toggle mode - if currently manual, switch to auto
-                                            if is_manual {
-                                                // Recalculate threshold from stats
-                                                if let (Some(mean), Some(std)) = (mean_opt, std_opt) {
-                                                    let gesture = self.vocabulary.get_gesture(*id);
-                                                    let coeff = gesture.map(|g| g.threshold_coefficient).unwrap_or(2.0);
-                                                    let new_thresh = mean + std * coeff;
-                                                    threshold_changes.push((*id, new_thresh, false));
-                                                }
-                                            } else {
-                                                // Keep current threshold but mark as manual
-                                                threshold_changes.push((*id, *threshold, true));
-                                            }
-                                        }
-                                    } else {
-                                        ui.colored_label(egui::Color32::DARK_GRAY, egui::RichText::new("--").size(11.0));
-                                    }
-                                } else {
-                                    ui.colored_label(egui::Color32::DARK_GRAY, egui::RichText::new("--").size(11.0));
-                                }
-                            }
-                        );
-
-                        // Hit indicator (fixed width)
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(60.0, 28.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                if had_recent_hit {
-                                    ui.colored_label(BRIGHT_GREEN, egui::RichText::new("● HIT").size(16.0).strong());
-                                }
-                            }
-                        );
-
-                        ui.end_row();
-                    }
-                });
-
-            ui.add_space(8.0);
-
-            // Threshold direction hints
-            ui.horizontal(|ui| {
-                ui.colored_label(egui::Color32::DARK_GRAY, egui::RichText::new("← Stricter").size(12.0));
-                ui.add_space(ui.available_width() - 80.0);
-                ui.colored_label(egui::Color32::DARK_GRAY, egui::RichText::new("Easier →").size(12.0));
-            });
-
-            ui.add_space(4.0);
-
-            // Recognition timing controls
-            ui.horizontal(|ui| {
-                ui.colored_label(egui::Color32::GRAY, egui::RichText::new("HIT fires when Distance is below Threshold").size(13.0));
-            });
-
-            ui.horizontal(|ui| {
-                // Cooldown control
-                ui.label("Cooldown:");
-                let mut cooldown = self.recognition_config.cooldown_ms as i32;
-                if ui.add(egui::DragValue::new(&mut cooldown)
-                    .range(100..=2000)
-                    .speed(10)
-                    .suffix("ms")).changed()
-                {
-                    self.recognition_config.cooldown_ms = cooldown as u64;
-                    self.recognizer.set_cooldown_ms(self.recognition_config.cooldown_ms);
-                }
-                ui.colored_label(egui::Color32::GRAY, "(min time between hits)");
-            });
-
-            // Apply threshold changes
-            for (id, new_threshold, is_manual) in threshold_changes {
-                self.recognizer.set_threshold(id, new_threshold);
-                if let Some(gesture) = self.vocabulary.get_gesture_mut(id) {
-                    gesture.threshold = new_threshold;
-                    gesture.threshold_manual_override = is_manual;
-                }
-                self.mark_dirty();
+    // Now do the mutable operations
+    if let Some(gesture) = app.vocabulary.get_gesture_mut(gesture_id) {
+        if gesture.threshold_manual_override {
+            // Switch to auto mode
+            if let Some(thresh) = new_threshold {
+                gesture.threshold = thresh;
+                gesture.threshold_manual_override = false;
             }
-
-        });
+        } else {
+            // Switch to manual mode - keep current threshold
+            gesture.threshold_manual_override = true;
+        }
     }
 
-    /// Render the hit log panel (Performance mode) - LARGE for visibility from far away
-    fn show_hit_log_panel(&self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style())
-            .fill(egui::Color32::from_rgb(15, 15, 15))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.set_min_height(400.0);
-
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("HIT LOG").strong().size(20.0));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("{} total", self.hit_log.len())).size(16.0));
-                    });
-                });
-                ui.separator();
-
-                let recent = self.hit_log.recent(10);
-                if recent.is_empty() {
-                    ui.add_space(20.0);
-                    ui.colored_label(
-                        egui::Color32::GRAY,
-                        egui::RichText::new("No hits yet").size(18.0)
-                    );
-                    ui.colored_label(
-                        egui::Color32::DARK_GRAY,
-                        egui::RichText::new("Perform a trained gesture").size(14.0)
-                    );
-                } else {
-                    for (i, entry) in recent.iter().enumerate() {
-                        let ms_ago = entry.timestamp.elapsed().as_millis();
-                        let is_very_recent = ms_ago < 500;
-                        let is_recent = ms_ago < 2000;
-
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            // Time indicator - larger
-                            let time_text = if ms_ago < 1000 {
-                                "NOW".to_string()
-                            } else {
-                                format!("{}s", ms_ago / 1000)
-                            };
-                            let time_color = if is_very_recent { BRIGHT_GREEN } else { egui::Color32::GRAY };
-                            ui.colored_label(time_color, egui::RichText::new(format!("{:>4}", time_text)).size(18.0));
-
-                            ui.add_space(8.0);
-
-                            // Gesture name - LARGE and bright if recent
-                            let name_size = if i == 0 && is_very_recent { 28.0 } else { 22.0 };
-                            let name_color = if is_very_recent && i == 0 {
-                                BRIGHT_GREEN
-                            } else if is_recent {
-                                egui::Color32::LIGHT_GRAY
-                            } else {
-                                egui::Color32::DARK_GRAY
-                            };
-                            ui.colored_label(name_color, egui::RichText::new(&entry.gesture_name).size(name_size).strong());
-                        });
-                    }
-                }
-            });
+    // Update recognizer with new threshold
+    if let Some(thresh) = new_threshold {
+        app.recognizer.set_threshold(gesture_id, thresh);
     }
+
+    app.mark_dirty();
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_cooldown(state: State<Arc<Mutex<AppState>>>, ms: u64) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.recognition_config.cooldown_ms = ms;
+    app.recognizer.set_cooldown_ms(ms);
+    Ok(())
 }

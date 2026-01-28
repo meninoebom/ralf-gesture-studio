@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RALF Gesture Studio</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header id="header">
+            <h1>RALF Gesture Studio</h1>
+            <div id="dirty-indicator" class="hidden">●</div>
+            <div id="mode-toggle">
+                <button id="btn-training" class="mode-btn active">TRAINING</button>
+                <button id="btn-performance" class="mode-btn">PERFORMANCE</button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main id="main">
+            <!-- Vocabulary Panel -->
+            <section id="vocabulary-panel" class="panel">
+                <h2>VOCABULARY</h2>
+                <div class="panel-content">
+                    <div class="row">
+                        <span class="label">Name:</span>
+                        <span id="vocab-name" class="editable">Demo Vocabulary</span>
+                        <span id="vocab-path" class="dim"></span>
+                    </div>
+                    <div class="row">
+                        <span id="gesture-count">Gestures: 0</span>
+                        <div class="spacer"></div>
+                        <button id="btn-new">New</button>
+                        <button id="btn-open">Open</button>
+                        <button id="btn-save">Save As</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Connection Panel -->
+            <section id="connection-panel" class="panel">
+                <h2>CONNECTION</h2>
+                <div class="connection-layout">
+                    <div class="connection-group">
+                        <h3>INPUT</h3>
+                        <div class="connection-info">
+                            <span class="label">Port:</span>
+                            <span id="input-port">6448</span>
+                            <span class="label">Address:</span>
+                            <span id="input-address">/wek/inputs</span>
+                        </div>
+                        <div class="connection-status">
+                            <span id="input-status-dot" class="status-dot gray">●</span>
+                            <span id="input-status">STOPPED</span>
+                            <span id="input-detail" class="dim"></span>
+                            <span class="spacer"></span>
+                            <span id="frame-count" class="dim">Frames: 0</span>
+                        </div>
+                    </div>
+                    <div class="connection-group">
+                        <h3>OUTPUT</h3>
+                        <div class="connection-info">
+                            <span class="label">Host:</span>
+                            <span id="output-host">127.0.0.1</span>
+                            <span class="label">Port:</span>
+                            <span id="output-port">12000</span>
+                        </div>
+                        <div class="connection-status">
+                            <span id="output-status-dot" class="status-dot green">●</span>
+                            <span id="output-status">READY</span>
+                            <span id="output-detail" class="dim"></span>
+                            <span class="spacer"></span>
+                            <span id="send-count" class="dim">Sent: 0</span>
+                            <button id="btn-test-hit">Test</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Gestures Panel -->
+            <section id="gestures-panel" class="panel">
+                <h2>GESTURES</h2>
+                <div class="panel-content">
+                    <div class="gesture-header row">
+                        <span class="col-status"></span>
+                        <span class="col-name">Name</span>
+                        <span class="col-examples">Examples</span>
+                        <span class="col-address">Output Address</span>
+                        <span class="col-actions"></span>
+                    </div>
+                    <div id="gesture-list">
+                        <!-- Gesture rows inserted here -->
+                    </div>
+                    <button id="btn-add-gesture">+ Add Gesture</button>
+                </div>
+            </section>
+
+            <!-- Training Panel (Training Mode) -->
+            <section id="training-panel" class="panel">
+                <h2>TRAIN GESTURES</h2>
+                <div class="panel-content">
+                    <div class="row training-config">
+                        <span class="label">Gesture:</span>
+                        <span id="selected-gesture" class="highlight">wave</span>
+                        <span class="label">Reps:</span>
+                        <input type="number" id="train-reps" value="5" min="1" max="20">
+                        <span class="label">Count-in:</span>
+                        <input type="number" id="train-countdown" value="3" min="1" max="10">
+                        <span class="label">s</span>
+                        <span class="label">Capture:</span>
+                        <input type="number" id="train-duration" value="3" min="1" max="10">
+                        <span class="label">s</span>
+                        <span class="label">Rest:</span>
+                        <input type="number" id="train-rest" value="2" min="1" max="10">
+                        <span class="label">s</span>
+                    </div>
+                    <div id="training-display" class="training-idle">
+                        <button id="btn-start-training" class="big-button">▶ START TRAINING</button>
+                        <p id="training-hint">Press [Space] or click to train</p>
+                    </div>
+                    <div class="row">
+                        <span class="label">Status:</span>
+                        <span id="training-status" class="dim">IDLE</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Performance Panel (Performance Mode) -->
+            <section id="performance-panel" class="panel hidden">
+                <div class="performance-layout">
+                    <!-- Monitor Panel -->
+                    <div id="monitor-section">
+                        <!-- Large Hit Indicator -->
+                        <div id="hit-indicator">
+                            <span id="hit-display">—</span>
+                        </div>
+
+                        <div class="panel">
+                            <h2>GESTURE MONITOR</h2>
+                            <div class="panel-content">
+                                <div id="monitor-status" class="row">
+                                    <span id="recognizer-status" class="green">ACTIVE</span>
+                                    <span id="buffer-status" class="dim">Buffer: 0</span>
+                                    <span id="window-status" class="dim">Win: 0</span>
+                                    <span id="example-status" class="dim">Ex: 0</span>
+                                </div>
+                                <div class="monitor-header row">
+                                    <span class="col-gesture">Gesture</span>
+                                    <span class="col-distance">Distance</span>
+                                    <span class="col-threshold">&lt; Threshold</span>
+                                    <span class="col-mode">Mode</span>
+                                    <span class="col-hit"></span>
+                                </div>
+                                <div id="monitor-list">
+                                    <!-- Monitor rows inserted here -->
+                                </div>
+                                <div class="row threshold-hints">
+                                    <span class="dim">← Stricter</span>
+                                    <span class="spacer"></span>
+                                    <span class="dim">Easier →</span>
+                                </div>
+                                <div class="row">
+                                    <span class="dim">HIT fires when Distance is below Threshold</span>
+                                </div>
+                                <div class="row">
+                                    <span class="label">Cooldown:</span>
+                                    <input type="number" id="cooldown-ms" value="400" min="100" max="2000" step="50">
+                                    <span class="label">ms</span>
+                                    <span class="dim">(min time between hits)</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Hit Log Panel -->
+                    <div id="hitlog-section" class="panel">
+                        <h2>HIT LOG</h2>
+                        <span id="hit-total" class="dim">0 total</span>
+                        <div id="hit-log">
+                            <p class="dim">No hits yet</p>
+                            <p class="dim small">Perform a trained gesture</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="main.js"></script>
+</body>
+</html>

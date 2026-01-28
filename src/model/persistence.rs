@@ -2,7 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use directories::UserDirs;
+use serde::Deserialize;
 use thiserror::Error;
+use uuid::Uuid;
 
 use super::Vocabulary;
 
@@ -21,6 +23,15 @@ pub enum PersistenceError {
 
     #[error("Failed to create directory: {0}")]
     CreateDirError(std::io::Error),
+
+    #[error("Unsupported file format version: {0}")]
+    UnsupportedVersion(String),
+}
+
+/// Minimal struct to check file version before full parse
+#[derive(Deserialize)]
+struct VersionCheck {
+    version: String,
 }
 
 /// Get the default directory for vocabulary files: ~/Documents/RALF/
@@ -52,10 +63,37 @@ pub fn save_vocabulary(vocabulary: &Vocabulary, path: &Path) -> Result<(), Persi
 }
 
 /// Load a vocabulary from a .ralf file
+/// Handles migration from older file format versions.
 #[allow(dead_code)]
 pub fn load_vocabulary(path: &Path) -> Result<Vocabulary, PersistenceError> {
     let json = fs::read_to_string(path)?;
-    let mut vocabulary: Vocabulary = serde_json::from_str(&json)?;
+
+    // Check version first
+    let version_check: VersionCheck = serde_json::from_str(&json)?;
+
+    let mut vocabulary = match version_check.version.as_str() {
+        "1.0" => {
+            // v1.0 -> v1.1 migration: serde defaults handle new fields
+            // UUID will be generated, metadata fields get defaults
+            let mut vocab: Vocabulary = serde_json::from_str(&json)?;
+            // Generate a new UUID for migrated files (they didn't have one)
+            vocab.uuid = Uuid::new_v4();
+            // Update version to current
+            vocab.version = Vocabulary::CURRENT_VERSION.to_string();
+            vocab
+        }
+        "1.1" => {
+            // Current version, parse directly
+            serde_json::from_str(&json)?
+        }
+        v => {
+            // Unknown version - try to parse anyway (forward compatibility)
+            // If parsing fails, it will return an error
+            eprintln!("Warning: Unknown vocabulary version '{}', attempting to load anyway", v);
+            serde_json::from_str(&json)?
+        }
+    };
+
     // Recalculate the next ID counter since it's not stored in the file
     vocabulary.recalculate_next_id();
     Ok(vocabulary)

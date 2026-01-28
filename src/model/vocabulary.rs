@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use uuid::Uuid;
 
 /// Default coefficient for statistical threshold (μ + σ×coefficient)
 fn default_threshold_coefficient() -> f32 {
@@ -178,12 +180,33 @@ impl Gesture {
     }
 }
 
+// --- Default functions for serde ---
+
+fn default_tracking_system() -> String {
+    "mediapipe-pose-33-xy".to_string()
+}
+
+fn default_coordinate_system() -> String {
+    "normalized-0-1-xy".to_string()
+}
+
+fn default_tags() -> Vec<String> {
+    Vec::new()
+}
+
+fn default_extensions() -> HashMap<String, serde_json::Value> {
+    HashMap::new()
+}
+
 /// A collection of gestures that work together (e.g., "House Foundations").
 /// This is the root container - one vocabulary = one .ralf file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vocabulary {
-    /// File format version
+    /// File format version (SchemaVer: MODEL.REVISION.ADDITION)
     pub version: String,
+    /// Unique identifier for this vocabulary (UUID v4)
+    #[serde(default = "Uuid::new_v4")]
+    pub uuid: Uuid,
     /// User-editable vocabulary name
     pub name: String,
     /// When vocabulary was created
@@ -194,6 +217,30 @@ pub struct Vocabulary {
     pub input: InputConfig,
     /// OSC output configuration
     pub output: OutputConfig,
+
+    // --- Research-ready metadata (v1.1) ---
+    /// Tracking system identifier (e.g., "mediapipe-pose-33-xy", "kinect-v2-25")
+    #[serde(default = "default_tracking_system")]
+    pub tracking_system: String,
+    /// Coordinate system description (e.g., "normalized-0-1-xy", "meters-xyz")
+    #[serde(default = "default_coordinate_system")]
+    pub coordinate_system: String,
+    /// Frame rate of source data (if known)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fps: Option<f32>,
+    /// License for the data (e.g., "CC-BY-4.0")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// Creator/attribution
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    /// Tags for discoverability (e.g., ["house", "dance", "foundations"])
+    #[serde(default = "default_tags", skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Extensibility hook for future metadata without schema changes
+    #[serde(default = "default_extensions", skip_serializing_if = "HashMap::is_empty")]
+    pub extensions: HashMap<String, serde_json::Value>,
+
     /// Baseline frames (deprecated - kept for file compatibility)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Vec<Vec<f32>>>,
@@ -205,16 +252,29 @@ pub struct Vocabulary {
 }
 
 impl Vocabulary {
+    /// Current file format version
+    pub const CURRENT_VERSION: &'static str = "1.1";
+
     /// Create a new empty vocabulary with the given name
     pub fn new(name: &str) -> Self {
         let now = Utc::now();
         Self {
-            version: "1.0".to_string(),
+            version: Self::CURRENT_VERSION.to_string(),
+            uuid: Uuid::new_v4(),
             name: name.to_string(),
             created_at: now,
             modified_at: now,
             input: InputConfig::default(),
             output: OutputConfig::default(),
+            // Research metadata with sensible defaults
+            tracking_system: default_tracking_system(),
+            coordinate_system: default_coordinate_system(),
+            source_fps: Some(60.0), // Assume 60fps unless told otherwise
+            license: None,
+            creator: None,
+            tags: Vec::new(),
+            extensions: HashMap::new(),
+            // Legacy/internal fields
             baseline: None,
             gestures: Vec::new(),
             next_gesture_id: 1,

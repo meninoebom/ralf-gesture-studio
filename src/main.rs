@@ -61,7 +61,7 @@ mod tests {
         let vocab = Vocabulary::new("Test Vocab");
         assert_eq!(vocab.name, "Test Vocab");
         assert!(vocab.gestures.is_empty());
-        assert_eq!(vocab.version, "1.0");
+        assert_eq!(vocab.version, Vocabulary::CURRENT_VERSION);
     }
 
     #[test]
@@ -172,7 +172,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
 
         assert_eq!(parsed["name"], "My Vocabulary");
-        assert_eq!(parsed["version"], "1.0");
+        assert_eq!(parsed["version"], Vocabulary::CURRENT_VERSION);
         assert!(parsed["gestures"].is_array());
     }
 

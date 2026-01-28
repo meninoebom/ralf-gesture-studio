@@ -214,14 +214,25 @@ A named movement pattern (e.g., "wave", "jump") with:
 ### Example
 One recording of a gesture containing timestamped motion capture frames.
 
-### File Format
+### File Format (v1.1)
 
-Vocabulary files are human-readable JSON with the `.ralf` extension:
+Vocabulary files are human-readable JSON with the `.ralf` extension.
+
+**Key features:**
+- **UUID**: Each vocabulary has a unique identifier for cross-system references
+- **Research metadata**: Tracking system, coordinate system, license, tags for future computational musicology work
+- **Automatic migration**: v1.0 files are upgraded when loaded
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.1",
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
   "name": "House Foundations",
+  "tracking_system": "mediapipe-pose-33-xy",
+  "coordinate_system": "normalized-0-1-xy",
+  "source_fps": 60.0,
+  "license": "CC-BY-4.0",
+  "tags": ["house", "dance", "foundations"],
   "gestures": [
     {
       "id": 1,
@@ -235,6 +246,8 @@ Vocabulary files are human-readable JSON with the `.ralf` extension:
 ```
 
 Default save location: `~/Documents/RALF/`
+
+See `FORMAT.md` for complete field reference.
 
 ## Current Status
 

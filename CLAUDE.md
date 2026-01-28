@@ -57,6 +57,7 @@ src/
 | `rodio` | Audio feedback (training beeps) |
 | `rfd` | Native file dialogs (Open, Save As) |
 | `serde` + `serde_json` | Vocabulary serialization |
+| `uuid` | Unique vocabulary identifiers |
 | `directories` | Cross-platform default paths |
 | `crossbeam-channel` | Thread-safe communication |
 
@@ -68,7 +69,36 @@ src/
 - **Gesture**: Named movement pattern with threshold and OSC output address
 - **Example**: One recorded instance (timestamped frames of skeleton data)
 
-File location: `~/Documents/RALF/` by default
+**File location**: `~/Documents/RALF/` by default
+**Format specification**: See `FORMAT.md` for complete field reference
+
+### Research-Ready Metadata (v1.1)
+
+Vocabularies include metadata for research portability and future computational musicology work:
+
+```rust
+pub struct Vocabulary {
+    pub version: String,           // "1.1" (SchemaVer format)
+    pub uuid: Uuid,                // Unique identifier across systems
+    pub name: String,
+    // ... timestamps, input/output config ...
+
+    // Research metadata
+    pub tracking_system: String,   // "mediapipe-pose-33-xy"
+    pub coordinate_system: String, // "normalized-0-1-xy"
+    pub source_fps: Option<f32>,   // 60.0
+    pub license: Option<String>,   // "CC-BY-4.0"
+    pub creator: Option<String>,   // Attribution
+    pub tags: Vec<String>,         // ["house", "dance", "foundations"]
+    pub extensions: HashMap<String, Value>, // Future extensibility
+
+    pub gestures: Vec<Gesture>,
+}
+```
+
+**FAIR Principles**: UUID enables unique identification, tracking_system documents data compatibility, license clarifies usage rights.
+
+**Migration**: v1.0 files are automatically upgraded when loaded (UUID generated, defaults applied).
 
 ## Recognition Algorithm (Wekinator-Style)
 
@@ -330,6 +360,7 @@ oscsend localhost 6448 /wek/inputs f f f f ...
 ## Related Files
 
 - `requirements.md` - Full specification document
+- `FORMAT.md` - Complete .ralf file format specification
 - `ralf-graphviz.dot` - System architecture diagram
 - `RALF in context.png` - Context diagram showing RALF in the larger system
 

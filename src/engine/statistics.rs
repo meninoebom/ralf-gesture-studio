@@ -30,8 +30,10 @@ pub struct ThresholdStats {
     /// Standard deviation of distances
     pub std: f32,
     /// Recommended threshold (μ + σ × coefficient)
+    #[allow(dead_code)]
     pub threshold: f32,
     /// Number of pairwise distances computed
+    #[allow(dead_code)]
     pub sample_count: usize,
 }
 
@@ -108,6 +110,7 @@ pub fn compute_threshold_stats(examples: &[Sequence], coefficient: f32) -> Optio
 ///
 /// # Returns
 /// Same as `compute_threshold_stats`
+#[allow(dead_code)]
 pub fn compute_threshold_stats_downsampled(
     examples: &[Sequence],
     coefficient: f32,

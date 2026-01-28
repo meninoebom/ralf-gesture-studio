@@ -12,6 +12,8 @@ let state = {
     isEditingGestureName: false, // Prevent re-render during inline editing
     lastGesturesHash: null, // Track changes to avoid unnecessary re-renders
     lastTrainingHash: null, // Track training state changes
+    diagnosticsEnabled: false,
+    diagnosticsPath: null,
 };
 
 // DOM Elements
@@ -72,6 +74,8 @@ function cacheElements() {
     elements.cooldownMs = document.getElementById('cooldown-ms');
     elements.hitLog = document.getElementById('hit-log');
     elements.hitTotal = document.getElementById('hit-total');
+    elements.btnToggleDiagnostics = document.getElementById('btn-toggle-diagnostics');
+    elements.diagnosticsStatus = document.getElementById('diagnostics-status');
 }
 
 function setupEventListeners() {
@@ -112,6 +116,9 @@ function setupEventListeners() {
     elements.cooldownMs.addEventListener('change', async () => {
         await invoke('set_cooldown', { ms: parseInt(elements.cooldownMs.value) });
     });
+
+    // Diagnostics toggle
+    elements.btnToggleDiagnostics.addEventListener('click', toggleDiagnostics);
 }
 
 async function loadInitialState() {
@@ -581,5 +588,39 @@ async function startTraining() {
 async function cancelTraining() {
     if (state.trainingState !== 'idle') {
         await invoke('cancel_training');
+    }
+}
+
+async function toggleDiagnostics() {
+    if (state.diagnosticsEnabled) {
+        // Stop recording
+        await invoke('disable_diagnostics');
+        state.diagnosticsEnabled = false;
+        elements.btnToggleDiagnostics.textContent = 'Start Recording';
+        elements.btnToggleDiagnostics.classList.remove('recording');
+        elements.diagnosticsStatus.textContent = `Saved to: ${state.diagnosticsPath}`;
+        elements.diagnosticsStatus.className = 'green';
+    } else {
+        // Start recording - generate filename with timestamp
+        const now = new Date();
+        const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const filename = `ralf-diagnostics-${timestamp}.log`;
+
+        // Use Documents/RALF directory
+        const homeDir = await window.__TAURI__.path.homeDir();
+        const path = `${homeDir}Documents/RALF/${filename}`;
+
+        try {
+            await invoke('enable_diagnostics', { path });
+            state.diagnosticsEnabled = true;
+            state.diagnosticsPath = path;
+            elements.btnToggleDiagnostics.textContent = 'Stop Recording';
+            elements.btnToggleDiagnostics.classList.add('recording');
+            elements.diagnosticsStatus.textContent = 'Recording...';
+            elements.diagnosticsStatus.className = 'red';
+        } catch (e) {
+            elements.diagnosticsStatus.textContent = `Error: ${e}`;
+            elements.diagnosticsStatus.className = 'red';
+        }
     }
 }

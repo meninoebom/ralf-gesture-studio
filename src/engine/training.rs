@@ -289,6 +289,7 @@ impl TrainingSession {
     }
 
     /// Check if session is active (not idle or complete)
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         matches!(self.state, SessionState::Countdown | SessionState::Capturing | SessionState::Resting)
     }

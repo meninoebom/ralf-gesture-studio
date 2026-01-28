@@ -103,6 +103,7 @@ impl GestureState {
     }
 
     /// Disarm (called after hit)
+    #[allow(dead_code)]
     pub fn disarm(&mut self) {
         self.armed = false;
     }
@@ -394,6 +395,7 @@ pub struct HitLogEntry {
     pub gesture_name: String,
     #[allow(dead_code)]
     pub distance: f32,
+    #[allow(dead_code)]
     pub osc_address: String,
 }
 

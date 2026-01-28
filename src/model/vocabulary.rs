@@ -125,6 +125,7 @@ impl Gesture {
     /// Compute and update the effective threshold based on statistical data.
     /// If manual override is set or no statistics are available, uses the manual threshold.
     /// Otherwise, computes threshold = μ + σ × coefficient.
+    #[allow(dead_code)]
     pub fn effective_threshold(&self) -> f32 {
         if self.threshold_manual_override {
             return self.threshold;
@@ -147,12 +148,14 @@ impl Gesture {
     }
 
     /// Clear statistical data (e.g., when examples are removed)
+    #[allow(dead_code)]
     pub fn clear_statistics(&mut self) {
         self.distance_mean = None;
         self.distance_std = None;
     }
 
     /// Check if this gesture has valid statistical threshold data
+    #[allow(dead_code)]
     pub fn has_statistics(&self) -> bool {
         self.distance_mean.is_some() && self.distance_std.is_some()
     }
@@ -163,11 +166,13 @@ impl Gesture {
     }
 
     /// Returns true if this gesture has at least one example
+    #[allow(dead_code)]
     pub fn has_examples(&self) -> bool {
         !self.examples.is_empty()
     }
 
     /// Returns the number of recorded examples
+    #[allow(dead_code)]
     pub fn example_count(&self) -> usize {
         self.examples.len()
     }

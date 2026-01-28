@@ -20,6 +20,7 @@ pub struct TimestampedFrame {
 ///
 /// Maintains a fixed-size buffer of recent frames, automatically discarding
 /// old frames when the buffer is full.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct FrameBuffer {
     /// The frames in the buffer
@@ -28,6 +29,7 @@ pub struct FrameBuffer {
     max_frames: usize,
 }
 
+#[allow(dead_code)]
 impl FrameBuffer {
     /// Create a new frame buffer with the given capacity.
     ///

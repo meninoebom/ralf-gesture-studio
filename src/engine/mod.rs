@@ -18,11 +18,13 @@ pub mod buffer;
 pub mod recognizer;
 pub mod training;
 pub mod statistics;
+pub mod diagnostics;
 
 // Core types used by the app
 pub use recognizer::{Recognizer, HitLog, RecognitionConfig};
 pub use training::{TrainingSession, TrainingConfig, SessionState};
 pub use statistics::compute_threshold_stats;
+pub use diagnostics::{DiagnosticLogger, DiagnosticEvent, GestureDiag};
 
 // Additional exports available for future use
 #[allow(unused_imports)]

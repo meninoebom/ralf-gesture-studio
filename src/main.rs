@@ -39,6 +39,9 @@ fn main() {
             gui::set_threshold,
             gui::toggle_threshold_mode,
             gui::set_cooldown,
+            gui::enable_diagnostics,
+            gui::disable_diagnostics,
+            gui::is_diagnostics_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("Error running Tauri application");

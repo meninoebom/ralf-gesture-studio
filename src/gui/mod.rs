@@ -6,7 +6,7 @@ use tauri::State;
 use crate::model::{Vocabulary, Example};
 use crate::model::{save_vocabulary as model_save_vocabulary, load_vocabulary as model_load_vocabulary, default_vocabulary_dir};
 use crate::osc::{OscReceiverHandle, ConnectionStatus, OscSender, SenderStatus};
-use crate::engine::{Recognizer, HitLog, TrainingSession, TrainingConfig, SessionState, RecognitionConfig, compute_threshold_stats};
+use crate::engine::{Recognizer, HitLog, TrainingSession, TrainingConfig, SessionState, RecognitionConfig, compute_threshold_stats, DiagnosticLogger, DiagnosticEvent, GestureDiag};
 
 /// The two modes of the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +42,8 @@ pub struct AppState {
     training_config: TrainingConfig,
     /// Recognition config (cooldown timing)
     recognition_config: RecognitionConfig,
+    /// Diagnostic logger for recognition analysis
+    diagnostic_logger: DiagnosticLogger,
 }
 
 impl AppState {
@@ -85,6 +87,7 @@ impl AppState {
             training_session: TrainingSession::with_audio(false),
             training_config: TrainingConfig::default(),
             recognition_config,
+            diagnostic_logger: DiagnosticLogger::new(),
         }
     }
 
@@ -159,6 +162,17 @@ impl AppState {
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
                 gesture.update_statistics(stats.mean, stats.std);
                 self.recognizer.set_threshold(gesture_id, gesture.threshold);
+
+                // Log training completion
+                if self.diagnostic_logger.is_enabled() {
+                    self.diagnostic_logger.log(DiagnosticEvent::TrainingComplete {
+                        gesture_name: gesture.name.clone(),
+                        example_count: gesture.examples.len(),
+                        mean: gesture.distance_mean,
+                        std: gesture.distance_std,
+                        threshold: gesture.threshold,
+                    });
+                }
             }
         }
     }
@@ -191,6 +205,8 @@ impl AppState {
             frames.push(last_frame);
         }
 
+        let cooldown_ms = self.recognition_config.cooldown_ms;
+
         for frame in frames {
             // If training, add frames to session
             if self.training_session.state == SessionState::Capturing {
@@ -199,11 +215,31 @@ impl AppState {
 
             // Feed to recognizer
             if let Some(result) = self.recognizer.process_frame(frame.clone()) {
+                let frame_num = self.osc_receiver.state.frame_count as usize;
+
+                // Log diagnostic data if enabled
+                if self.diagnostic_logger.is_enabled() && self.mode == AppMode::Performance {
+                    self.log_recognition_diagnostics(frame_num, cooldown_ms);
+                }
+
                 if let (Some(id), Some(name)) = (result.gesture_id, result.gesture_name.clone()) {
                     let osc_address = self.recognizer
                         .get_gesture(id)
                         .map(|g| g.osc_address.clone())
                         .unwrap_or_else(|| format!("/gesture/{}", id));
+
+                    // Log hit
+                    if self.diagnostic_logger.is_enabled() {
+                        let threshold = self.recognizer.get_gesture(id).map(|g| g.threshold).unwrap_or(0.0);
+                        let margin_pct = ((threshold - result.distance) / threshold) * 100.0;
+                        self.diagnostic_logger.log(DiagnosticEvent::Hit {
+                            frame_num,
+                            gesture_name: name.clone(),
+                            distance: result.distance,
+                            threshold,
+                            margin_pct,
+                        });
+                    }
 
                     self.hit_log.record(id, &name, result.distance, &osc_address);
                     let _ = self.osc_sender.send_hit(&osc_address);
@@ -218,6 +254,69 @@ impl AppState {
         if self.training_session.state == SessionState::Complete {
             self.save_training_examples();
             self.training_session = TrainingSession::new();
+        }
+    }
+
+    /// Log recognition diagnostics for all gestures
+    fn log_recognition_diagnostics(&mut self, frame_num: usize, cooldown_ms: u64) {
+        use std::time::Duration;
+
+        let buffer_len = self.recognizer.buffer.len();
+        let window_size = self.recognizer.window_size();
+        let near_miss_pct = self.diagnostic_logger.near_miss_pct();
+        let cooldown = Duration::from_millis(cooldown_ms);
+
+        // Collect gesture diagnostics
+        let mut gestures: Vec<GestureDiag> = Vec::new();
+        let mut near_misses: Vec<(String, f32, f32, String)> = Vec::new();
+
+        for (id, name, distance, threshold) in self.recognizer.current_distances() {
+            let gesture = self.recognizer.get_gesture(id);
+            let armed = gesture.map(|g| g.is_armed()).unwrap_or(false);
+            let in_cooldown = gesture.map(|g| g.in_cooldown(cooldown)).unwrap_or(false);
+            let example_count = gesture.map(|g| g.example_count()).unwrap_or(0);
+
+            gestures.push(GestureDiag {
+                name: name.clone(),
+                distance,
+                threshold,
+                armed,
+                in_cooldown,
+                example_count,
+            });
+
+            // Check for near-misses
+            if let Some(dist) = distance {
+                // Near miss: within threshold + margin%, but didn't fire
+                if dist < threshold * (1.0 + near_miss_pct / 100.0) && dist >= threshold {
+                    near_misses.push((name.clone(), dist, threshold, "above_threshold".to_string()));
+                } else if dist < threshold && !armed {
+                    near_misses.push((name.clone(), dist, threshold, "not_armed".to_string()));
+                } else if dist < threshold && in_cooldown {
+                    near_misses.push((name.clone(), dist, threshold, "in_cooldown".to_string()));
+                }
+            }
+        }
+
+        // Log recognition cycle
+        self.diagnostic_logger.log(DiagnosticEvent::Recognition {
+            frame_num,
+            buffer_len,
+            window_size,
+            gestures,
+        });
+
+        // Log near misses
+        for (name, dist, threshold, reason) in near_misses {
+            let margin_pct = ((threshold - dist) / threshold) * 100.0;
+            self.diagnostic_logger.log(DiagnosticEvent::NearMiss {
+                frame_num,
+                gesture_name: name,
+                distance: dist,
+                threshold,
+                margin_pct,
+                reason,
+            });
         }
     }
 }
@@ -729,4 +828,25 @@ pub fn set_cooldown(state: State<Arc<Mutex<AppState>>>, ms: u64) -> Result<(), S
     app.recognition_config.cooldown_ms = ms;
     app.recognizer.set_cooldown_ms(ms);
     Ok(())
+}
+
+#[tauri::command]
+pub fn enable_diagnostics(state: State<Arc<Mutex<AppState>>>, path: String) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.diagnostic_logger.enable(std::path::PathBuf::from(path))
+        .map_err(|e| format!("Failed to enable diagnostics: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn disable_diagnostics(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.diagnostic_logger.disable();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn is_diagnostics_enabled(state: State<Arc<Mutex<AppState>>>) -> Result<bool, String> {
+    let app = state.lock().map_err(|e| e.to_string())?;
+    Ok(app.diagnostic_logger.is_enabled())
 }

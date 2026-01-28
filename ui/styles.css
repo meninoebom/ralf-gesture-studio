@@ -574,6 +574,13 @@ input[type="range"]::-webkit-slider-thumb {
     color: #000;
 }
 
+/* Diagnostics recording button */
+#btn-toggle-diagnostics.recording {
+    background-color: var(--red);
+    color: #fff;
+    animation: pulse 1s ease-in-out infinite;
+}
+
 /* Hit Log */
 #hitlog-section h2 {
     display: flex;

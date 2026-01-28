@@ -546,6 +546,13 @@ input[type="range"]::-webkit-slider-thumb {
     font-size: var(--font-size-small);
 }
 
+/* Stats hint for auto-calibration display */
+.stats-hint {
+    font-size: var(--font-size-small);
+    margin-left: 8px;
+    white-space: nowrap;
+}
+
 /* Hit Log */
 #hitlog-section h2 {
     display: flex;

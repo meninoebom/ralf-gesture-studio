@@ -1,8 +1,6 @@
 // RALF Gesture Studio - Frontend JavaScript
-console.log('main.js loading...');
 
 const { invoke } = window.__TAURI__.core;
-console.log('Tauri invoke loaded:', typeof invoke);
 
 // Application State
 let state = {
@@ -21,15 +19,10 @@ const elements = {};
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
-    console.log('DOMContentLoaded fired');
     cacheElements();
-    console.log('Elements cached');
     setupEventListeners();
-    console.log('Event listeners set up');
     await loadInitialState();
-    console.log('Initial state loaded');
     startPolling();
-    console.log('Polling started');
 });
 
 function cacheElements() {
@@ -99,19 +92,15 @@ function setupEventListeners() {
 
     // Training button is dynamically rendered, use event delegation
     elements.trainingDisplay.addEventListener('click', (e) => {
-        console.log('Training display clicked, target:', e.target.id);
         if (e.target.id === 'btn-start-training') {
-            console.log('Start training button detected via delegation');
             startTraining();
         }
     });
 
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
-        console.log('Keydown:', e.code, 'mode:', state.mode, 'trainingState:', state.trainingState);
         if (e.code === 'Space' && state.mode === 'training' && state.trainingState === 'idle') {
             e.preventDefault();
-            console.log('Space pressed, calling startTraining');
             startTraining();
         }
         if (e.code === 'Escape') {
@@ -283,10 +272,6 @@ function updateTrainingState(training) {
     const previousState = state.trainingState;
     state.trainingState = training.state;
 
-    // Log state changes
-    if (previousState !== training.state) {
-        console.log('Training state changed:', previousState, '->', training.state);
-    }
 
     // For idle state, only re-render if state changed or selectedGestureId changed
     if (training.state === 'idle') {
@@ -353,8 +338,17 @@ function updateTrainingState(training) {
             break;
 
         case 'complete':
+            // Phase 3: Show calibration info after training completes
+            const trainedGesture = training.gesture_id && state.vocabulary?.gestures
+                ? state.vocabulary.gestures.find(g => g.id === training.gesture_id)
+                : null;
+            const calibrationInfo = trainedGesture
+                ? `Threshold auto-set to ${Math.round(trainedGesture.threshold)}`
+                : 'Calibration complete';
+
             elements.trainingDisplay.innerHTML = `
-                <span style="font-size: 28px; font-weight: 700; color: var(--green);">COMPLETE!</span>
+                <span style="font-size: 28px; font-weight: 700; color: var(--green);">✓ COMPLETE!</span>
+                <p class="dim">${calibrationInfo}</p>
             `;
             elements.trainingStatus.textContent = 'COMPLETE';
             elements.trainingStatus.className = 'green';
@@ -380,15 +374,26 @@ function updateMonitor(monitor) {
         const distanceColor = g.distance !== null && g.distance < g.threshold ? 'green' : '';
         const distanceText = g.distance !== null ? Math.round(g.distance) : '...';
 
+        // Phase 1: Dynamic slider range based on threshold
+        const sliderMin = Math.max(100, Math.floor(g.threshold * 0.1));
+        const sliderMax = Math.max(1000, Math.ceil(g.threshold * 3));
+        const sliderStep = Math.max(1, Math.floor((sliderMax - sliderMin) / 100));
+
+        // Phase 2: Show μ±σ when in AUTO mode and stats are available
+        const statsDisplay = g.auto_mode && g.distance_mean != null
+            ? `<span class="stats-hint dim">μ=${Math.round(g.distance_mean)} σ=${Math.round(g.distance_std)}</span>`
+            : '';
+
         row.innerHTML = `
             <span class="gesture-name col-gesture">${g.name} (${g.example_count})</span>
             <span class="distance col-distance ${distanceColor}">${distanceText}</span>
             <span class="threshold-control col-threshold">
-                <input type="range" min="10" max="500" value="${g.threshold}"
-                       data-id="${g.id}" class="threshold-slider">
+                <input type="range" min="${sliderMin}" max="${sliderMax}" step="${sliderStep}"
+                       value="${Math.round(g.threshold)}" data-id="${g.id}" class="threshold-slider">
                 <span class="threshold-value">${Math.round(g.threshold)}</span>
+                ${statsDisplay}
             </span>
-            <span class="mode-toggle col-mode ${g.auto_mode ? 'blue' : 'dim'}" data-id="${g.id}">
+            <span class="mode-toggle col-mode ${g.auto_mode ? 'green' : 'dim'}" data-id="${g.id}">
                 ${g.auto_mode ? 'AUTO' : 'MAN'}
             </span>
             <span class="hit-indicator col-hit ${g.recent_hit ? 'green' : ''}">
@@ -552,35 +557,16 @@ async function deleteGesture(id) {
 }
 
 async function startTraining() {
-    console.log('startTraining called', {
-        selectedGestureId: state.selectedGestureId,
-        trainingState: state.trainingState
-    });
+    if (!state.selectedGestureId) return;
+    if (state.trainingState !== 'idle') return;
 
-    if (!state.selectedGestureId) {
-        console.log('No gesture selected, returning');
-        return;
-    }
-    if (state.trainingState !== 'idle') {
-        console.log('Training state is not idle:', state.trainingState);
-        return;
-    }
-
-    const params = {
+    await invoke('start_training', {
         gestureId: state.selectedGestureId,
         reps: parseInt(elements.trainReps.value),
         countdownSecs: parseInt(elements.trainCountdown.value),
         durationSecs: parseInt(elements.trainDuration.value),
         restSecs: parseInt(elements.trainRest.value),
-    };
-    console.log('Invoking start_training with:', params);
-
-    try {
-        await invoke('start_training', params);
-        console.log('start_training invoke succeeded');
-    } catch (e) {
-        console.error('start_training invoke failed:', e);
-    }
+    });
 }
 
 async function cancelTraining() {

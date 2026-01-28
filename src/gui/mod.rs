@@ -274,6 +274,7 @@ pub struct OscStatusDto {
 #[derive(Serialize)]
 pub struct TrainingDto {
     state: String,
+    gesture_id: Option<u32>,
     countdown: u32,
     current_rep: u32,
     total_reps: u32,
@@ -302,6 +303,10 @@ pub struct GestureMonitorDto {
     threshold: f32,
     auto_mode: bool,
     recent_hit: bool,
+    // Statistics for auto-calibration display
+    distance_mean: Option<f32>,
+    distance_std: Option<f32>,
+    threshold_coefficient: f32,
 }
 
 #[derive(Serialize)]
@@ -376,6 +381,11 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
 
     let training = TrainingDto {
         state: training_state.to_string(),
+        gesture_id: if app.training_session.state != SessionState::Idle {
+            Some(app.training_session.gesture_id)
+        } else {
+            None
+        },
         countdown: app.training_session.countdown_value(),
         current_rep: app.training_session.completed_reps + 1,
         total_reps: app.training_session.config.reps,
@@ -400,6 +410,9 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
             let gesture = app.vocabulary.get_gesture(*id);
             let auto_mode = gesture.map(|g| !g.threshold_manual_override).unwrap_or(false);
             let recent_hit = recent_hit_name.as_ref().map(|n| n == name).unwrap_or(false);
+            let (distance_mean, distance_std, threshold_coefficient) = gesture
+                .map(|g| (g.distance_mean, g.distance_std, g.threshold_coefficient))
+                .unwrap_or((None, None, 2.0));
 
             GestureMonitorDto {
                 id: *id,
@@ -409,6 +422,9 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
                 threshold: *thresh,
                 auto_mode,
                 recent_hit,
+                distance_mean,
+                distance_std,
+                threshold_coefficient,
             }
         }).collect(),
         recent_hit: recent_hit_name,

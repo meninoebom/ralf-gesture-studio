@@ -13,11 +13,6 @@
             <h1>RALF Gesture Studio</h1>
             <div id="dirty-indicator" class="hidden">●</div>
 
-            <div id="mode-toggle">
-                <button id="btn-training" class="mode-btn active">TRAINING</button>
-                <button id="btn-performance" class="mode-btn">PERFORMANCE</button>
-            </div>
-
             <!-- Connection Status (compact, clickable for details) -->
             <div id="connection-status">
                 <div class="conn-item" data-conn="input">
@@ -109,99 +104,106 @@
                 </div>
             </section>
 
-            <!-- Training Panel (Training Mode) -->
-            <section id="training-panel" class="panel">
-                <h2>TRAIN GESTURES</h2>
-                <div class="panel-content">
-                    <div class="row training-config">
-                        <span class="label">Gesture:</span>
-                        <span id="selected-gesture" class="highlight">wave</span>
-                        <span class="label">Reps:</span>
-                        <input type="number" id="train-reps" value="5" min="1" max="20">
-                        <span class="label">Count-in:</span>
-                        <input type="number" id="train-countdown" value="3" min="1" max="10">
-                        <span class="label">s</span>
-                        <span class="label">Capture:</span>
-                        <input type="number" id="train-duration" value="3" min="1" max="10">
-                        <span class="label">s</span>
-                        <span class="label">Rest:</span>
-                        <input type="number" id="train-rest" value="2" min="1" max="10">
-                        <span class="label">s</span>
-                    </div>
-                    <div id="training-display" class="training-idle">
-                        <button id="btn-start-training" class="big-button">▶ START TRAINING</button>
-                        <p id="training-hint">Press [Space] or click to train</p>
-                    </div>
-                    <div class="row">
-                        <span class="label">Status:</span>
-                        <span id="training-status" class="dim">IDLE</span>
-                    </div>
+            <!-- Mode Section (Training/Performance with vertical tabs) -->
+            <section id="mode-section">
+                <!-- Vertical Tab Buttons -->
+                <div id="mode-tabs">
+                    <button id="btn-training" class="mode-tab active">TRAINING</button>
+                    <button id="btn-performance" class="mode-tab">PERFORMANCE</button>
                 </div>
-            </section>
 
-            <!-- Performance Panel (Performance Mode) -->
-            <section id="performance-panel" class="panel hidden">
-                <div class="performance-layout">
-                    <!-- Monitor Panel -->
-                    <div id="monitor-section">
-                        <!-- Large Hit Indicator -->
-                        <div id="hit-indicator">
-                            <span id="hit-display">—</span>
-                        </div>
-
-                        <div class="panel">
-                            <h2>GESTURE MONITOR</h2>
-                            <div class="panel-content">
-                                <div id="monitor-status" class="row">
-                                    <span id="recognizer-status" class="green">ACTIVE</span>
-                                    <span id="buffer-status" class="dim">Buffer: 0</span>
-                                    <span id="window-status" class="dim">Win: 0</span>
-                                    <span id="example-status" class="dim">Ex: 0</span>
-                                </div>
-                                <div class="monitor-header row">
-                                    <span class="col-gesture">Gesture</span>
-                                    <span class="col-distance">Distance</span>
-                                    <span class="col-threshold">&lt; Threshold</span>
-                                    <span class="col-hit"></span>
-                                </div>
-                                <div id="monitor-list">
-                                    <!-- Monitor rows inserted here -->
-                                </div>
-                                <div class="row threshold-hints">
-                                    <span class="dim">← Stricter</span>
-                                    <span class="spacer"></span>
-                                    <span class="dim">Easier →</span>
-                                </div>
-                                <div class="row">
-                                    <span class="dim">HIT fires when Distance is below Threshold</span>
-                                </div>
-                                <div class="row">
-                                    <span class="label">Cooldown:</span>
-                                    <input type="number" id="cooldown-ms" value="400" min="100" max="2000" step="50">
-                                    <span class="label">ms</span>
-                                    <span class="dim">(min time between hits)</span>
-                                </div>
-                                <div class="row">
-                                    <span class="label">Comparison:</span>
-                                    <button id="btn-toggle-comparison" class="alt-mode">All Examples</button>
-                                    <span class="dim">(A/B test)</span>
-                                </div>
-                                <div class="row">
-                                    <span class="label">Diagnostics:</span>
-                                    <button id="btn-toggle-diagnostics">Start Recording</button>
-                                    <span id="diagnostics-status" class="dim"></span>
-                                </div>
+                <!-- Mode Content Area -->
+                <div id="mode-content">
+                    <!-- Training Panel (Training Mode) -->
+                    <div id="training-panel" class="mode-panel">
+                        <h2>TRAIN GESTURES</h2>
+                        <div class="panel-content">
+                            <div class="row training-config">
+                                <span class="label">Gesture:</span>
+                                <span id="selected-gesture" class="highlight">wave</span>
+                                <span class="label">Reps:</span>
+                                <input type="number" id="train-reps" value="5" min="1" max="20">
+                                <span class="label">Count-in:</span>
+                                <input type="number" id="train-countdown" value="3" min="1" max="10">
+                                <span class="label">s</span>
+                                <span class="label">Capture:</span>
+                                <input type="number" id="train-duration" value="3" min="1" max="10">
+                                <span class="label">s</span>
+                                <span class="label">Rest:</span>
+                                <input type="number" id="train-rest" value="2" min="1" max="10">
+                                <span class="label">s</span>
+                            </div>
+                            <div id="training-display" class="training-idle">
+                                <button id="btn-start-training" class="big-button">▶ START TRAINING</button>
+                                <p id="training-hint">Press [Space] or click to train</p>
+                            </div>
+                            <div class="row">
+                                <span class="label">Status:</span>
+                                <span id="training-status" class="dim">IDLE</span>
                             </div>
                         </div>
                     </div>
 
-                    <!-- Hit Log Panel -->
-                    <div id="hitlog-section" class="panel">
-                        <h2>HIT LOG</h2>
-                        <span id="hit-total" class="dim">0 total</span>
-                        <div id="hit-log">
-                            <p class="dim">No hits yet</p>
-                            <p class="dim small">Perform a trained gesture</p>
+                    <!-- Performance Panel (Performance Mode) -->
+                    <div id="performance-panel" class="mode-panel hidden">
+                        <div class="performance-layout">
+                            <!-- Monitor Panel -->
+                            <div id="monitor-section">
+                                <!-- Large Hit Indicator -->
+                                <div id="hit-indicator">
+                                    <span id="hit-display">—</span>
+                                </div>
+
+                                <div class="panel">
+                                    <h2>GESTURE MONITOR</h2>
+                                    <div class="panel-content">
+                                        <div id="monitor-status" class="row">
+                                            <span id="recognizer-status" class="green">ACTIVE</span>
+                                            <span id="buffer-status" class="dim">Buffer: 0</span>
+                                            <span id="window-status" class="dim">Win: 0</span>
+                                            <span id="example-status" class="dim">Ex: 0</span>
+                                        </div>
+                                        <div class="monitor-header row">
+                                            <span class="col-gesture">Gesture</span>
+                                            <span class="col-distance">Distance</span>
+                                            <span class="col-threshold">&lt; Threshold</span>
+                                            <span class="col-hit"></span>
+                                        </div>
+                                        <div id="monitor-list">
+                                            <!-- Monitor rows inserted here -->
+                                        </div>
+                                        <div class="row threshold-hints">
+                                            <span class="dim">← Stricter</span>
+                                            <span class="spacer"></span>
+                                            <span class="dim">Easier →</span>
+                                        </div>
+                                        <div class="row">
+                                            <span class="dim">HIT fires when Distance is below Threshold</span>
+                                        </div>
+                                        <div class="row">
+                                            <span class="label">Cooldown:</span>
+                                            <input type="number" id="cooldown-ms" value="400" min="100" max="2000" step="50">
+                                            <span class="label">ms</span>
+                                            <span class="dim">(min time between hits)</span>
+                                        </div>
+                                        <div class="row">
+                                            <span class="label">Diagnostics:</span>
+                                            <button id="btn-toggle-diagnostics">Start Recording</button>
+                                            <span id="diagnostics-status" class="dim"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Hit Log Panel -->
+                            <div id="hitlog-section" class="panel">
+                                <h2>HIT LOG</h2>
+                                <span id="hit-total" class="dim">0 total</span>
+                                <div id="hit-log">
+                                    <p class="dim">No hits yet</p>
+                                    <p class="dim small">Perform a trained gesture</p>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>

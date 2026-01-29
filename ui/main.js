@@ -84,7 +84,6 @@ function cacheElements() {
     elements.hitTotal = document.getElementById('hit-total');
     elements.btnToggleDiagnostics = document.getElementById('btn-toggle-diagnostics');
     elements.diagnosticsStatus = document.getElementById('diagnostics-status');
-    elements.btnToggleComparison = document.getElementById('btn-toggle-comparison');
 }
 
 function setupEventListeners() {
@@ -145,19 +144,12 @@ function setupEventListeners() {
 
     // Diagnostics toggle
     elements.btnToggleDiagnostics.addEventListener('click', toggleDiagnostics);
-
-    // Comparison mode toggle (A/B test Phase 3)
-    elements.btnToggleComparison.addEventListener('click', toggleComparisonMode);
 }
 
 async function loadInitialState() {
     try {
         const appState = await invoke('get_state');
         updateFromState(appState);
-
-        // Load comparison mode state
-        const useBestTemplate = await invoke('get_best_template_mode');
-        updateComparisonButton(useBestTemplate);
     } catch (e) {
         console.error('Failed to load initial state:', e);
     }
@@ -634,25 +626,6 @@ async function startTraining() {
 async function cancelTraining() {
     if (state.trainingState !== 'idle') {
         await invoke('cancel_training');
-    }
-}
-
-async function toggleComparisonMode() {
-    try {
-        const useBestTemplate = await invoke('toggle_best_template_mode');
-        updateComparisonButton(useBestTemplate);
-    } catch (e) {
-        console.error('Failed to toggle comparison mode:', e);
-    }
-}
-
-function updateComparisonButton(useBestTemplate) {
-    if (useBestTemplate) {
-        elements.btnToggleComparison.textContent = 'Best Template (Phase 3)';
-        elements.btnToggleComparison.classList.remove('alt-mode');
-    } else {
-        elements.btnToggleComparison.textContent = 'All Examples (Pre-Phase 3)';
-        elements.btnToggleComparison.classList.add('alt-mode');
     }
 }
 

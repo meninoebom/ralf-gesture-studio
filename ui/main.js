@@ -40,15 +40,23 @@ function cacheElements() {
     elements.btnOpen = document.getElementById('btn-open');
     elements.btnSave = document.getElementById('btn-save');
 
+    elements.connectionStatus = document.getElementById('connection-status');
     elements.inputStatus = document.getElementById('input-status');
     elements.inputStatusDot = document.getElementById('input-status-dot');
-    elements.inputDetail = document.getElementById('input-detail');
     elements.frameCount = document.getElementById('frame-count');
     elements.outputStatus = document.getElementById('output-status');
     elements.outputStatusDot = document.getElementById('output-status-dot');
-    elements.outputDetail = document.getElementById('output-detail');
     elements.sendCount = document.getElementById('send-count');
     elements.btnTestHit = document.getElementById('btn-test-hit');
+
+    // Popover elements
+    elements.connectionPopover = document.getElementById('connection-popover');
+    elements.popoverInputPort = document.getElementById('popover-input-port');
+    elements.popoverInputAddress = document.getElementById('popover-input-address');
+    elements.popoverInputTime = document.getElementById('popover-input-time');
+    elements.popoverOutputHost = document.getElementById('popover-output-host');
+    elements.popoverOutputPort = document.getElementById('popover-output-port');
+    elements.popoverOutputTime = document.getElementById('popover-output-time');
 
     elements.gestureList = document.getElementById('gesture-list');
     elements.btnAddGesture = document.getElementById('btn-add-gesture');
@@ -90,7 +98,24 @@ function setupEventListeners() {
     elements.btnSave.addEventListener('click', saveVocabulary);
 
     // Connection
-    elements.btnTestHit.addEventListener('click', sendTestHit);
+    elements.btnTestHit.addEventListener('click', (e) => {
+        e.stopPropagation(); // Don't trigger popover
+        sendTestHit();
+    });
+
+    // Connection popover toggle
+    elements.connectionStatus.addEventListener('click', (e) => {
+        // Don't toggle if clicking the test button
+        if (e.target.id === 'btn-test-hit') return;
+        toggleConnectionPopover();
+    });
+
+    // Close popover when clicking outside
+    document.addEventListener('click', (e) => {
+        if (!elements.connectionStatus.contains(e.target)) {
+            elements.connectionPopover.classList.add('hidden');
+        }
+    });
 
     // Gestures
     elements.btnAddGesture.addEventListener('click', addGesture);
@@ -182,37 +207,50 @@ function updateFromState(appState) {
     }
 }
 
+function toggleConnectionPopover() {
+    elements.connectionPopover.classList.toggle('hidden');
+}
+
+function formatTimeAgo(ms) {
+    if (ms === 0 || ms === undefined) return '—';
+    if (ms < 1000) return `${ms}ms ago`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s ago`;
+    return `${Math.floor(ms / 60000)}m ago`;
+}
+
 function updateConnectionStatus(status) {
     if (!status) return;
 
     // Input
     const inputColors = {
-        'Stopped': ['gray', 'STOPPED', ''],
-        'Listening': ['gold', 'LISTENING', '(waiting for data)'],
-        'Receiving': ['green', 'RECEIVING', `(${(status.ms_since_last_frame / 1000).toFixed(1)}s ago)`],
-        'Error': ['red', 'ERROR', `(${status.input_error || 'Unknown error'})`],
+        'Stopped': ['gray', 'STOPPED'],
+        'Listening': ['gold', 'LISTENING'],
+        'Receiving': ['green', 'RECEIVING'],
+        'Error': ['red', 'ERROR'],
     };
 
-    const [dotClass, statusText, detail] = inputColors[status.input_status] || ['gray', 'UNKNOWN', ''];
+    const [dotClass, statusText] = inputColors[status.input_status] || ['gray', 'UNKNOWN'];
     elements.inputStatusDot.className = `status-dot ${dotClass}`;
     elements.inputStatus.textContent = statusText;
     elements.inputStatus.className = dotClass;
-    elements.inputDetail.textContent = detail;
-    elements.frameCount.textContent = `Frames: ${status.frame_count}`;
+    elements.frameCount.textContent = status.frame_count;
 
     // Output
     const outputColors = {
-        'Ready': ['green', 'READY', ''],
-        'Sent': ['green', 'SENT', `(${(status.ms_since_last_send / 1000).toFixed(1)}s ago)`],
-        'Error': ['red', 'ERROR', `(${status.output_error || 'Unknown error'})`],
+        'Ready': ['green', 'READY'],
+        'Sent': ['green', 'SENT'],
+        'Error': ['red', 'ERROR'],
     };
 
-    const [outDot, outStatus, outDetail] = outputColors[status.output_status] || ['green', 'READY', ''];
+    const [outDot, outStatus] = outputColors[status.output_status] || ['green', 'READY'];
     elements.outputStatusDot.className = `status-dot ${outDot}`;
     elements.outputStatus.textContent = outStatus;
     elements.outputStatus.className = outDot;
-    elements.outputDetail.textContent = outDetail;
-    elements.sendCount.textContent = `Sent: ${status.send_count}`;
+    elements.sendCount.textContent = status.send_count;
+
+    // Update popover with detailed timing info
+    elements.popoverInputTime.textContent = formatTimeAgo(status.ms_since_last_frame);
+    elements.popoverOutputTime.textContent = formatTimeAgo(status.ms_since_last_send);
 }
 
 function renderGestures(gestures) {

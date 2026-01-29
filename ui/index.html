@@ -12,9 +12,61 @@
         <header id="header">
             <h1>RALF Gesture Studio</h1>
             <div id="dirty-indicator" class="hidden">●</div>
+
             <div id="mode-toggle">
                 <button id="btn-training" class="mode-btn active">TRAINING</button>
                 <button id="btn-performance" class="mode-btn">PERFORMANCE</button>
+            </div>
+
+            <!-- Connection Status (compact, clickable for details) -->
+            <div id="connection-status">
+                <div class="conn-item" data-conn="input">
+                    <span class="conn-label">IN</span>
+                    <span id="input-status-dot" class="status-dot gray">●</span>
+                    <span id="input-status">STOPPED</span>
+                    <span id="frame-count" class="dim">0</span>
+                </div>
+                <div class="conn-item" data-conn="output">
+                    <span class="conn-label">OUT</span>
+                    <span id="output-status-dot" class="status-dot green">●</span>
+                    <span id="output-status">READY</span>
+                    <span id="send-count" class="dim">0</span>
+                    <button id="btn-test-hit" class="small-btn">Test</button>
+                </div>
+
+                <!-- Connection Details Popover -->
+                <div id="connection-popover" class="popover hidden">
+                    <div class="popover-section">
+                        <h4>INPUT</h4>
+                        <div class="popover-row">
+                            <span class="label">Port:</span>
+                            <span id="popover-input-port">6448</span>
+                        </div>
+                        <div class="popover-row">
+                            <span class="label">Address:</span>
+                            <span id="popover-input-address">/wek/inputs</span>
+                        </div>
+                        <div class="popover-row">
+                            <span class="label">Last frame:</span>
+                            <span id="popover-input-time" class="dim">—</span>
+                        </div>
+                    </div>
+                    <div class="popover-section">
+                        <h4>OUTPUT</h4>
+                        <div class="popover-row">
+                            <span class="label">Host:</span>
+                            <span id="popover-output-host">127.0.0.1</span>
+                        </div>
+                        <div class="popover-row">
+                            <span class="label">Port:</span>
+                            <span id="popover-output-port">12000</span>
+                        </div>
+                        <div class="popover-row">
+                            <span class="label">Last send:</span>
+                            <span id="popover-output-time" class="dim">—</span>
+                        </div>
+                    </div>
+                </div>
             </div>
         </header>
 
@@ -35,46 +87,6 @@
                         <button id="btn-new">New</button>
                         <button id="btn-open">Open</button>
                         <button id="btn-save">Save As</button>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Connection Panel -->
-            <section id="connection-panel" class="panel">
-                <h2>CONNECTION</h2>
-                <div class="connection-layout">
-                    <div class="connection-group">
-                        <h3>INPUT</h3>
-                        <div class="connection-info">
-                            <span class="label">Port:</span>
-                            <span id="input-port">6448</span>
-                            <span class="label">Address:</span>
-                            <span id="input-address">/wek/inputs</span>
-                        </div>
-                        <div class="connection-status">
-                            <span id="input-status-dot" class="status-dot gray">●</span>
-                            <span id="input-status">STOPPED</span>
-                            <span id="input-detail" class="dim"></span>
-                            <span class="spacer"></span>
-                            <span id="frame-count" class="dim">Frames: 0</span>
-                        </div>
-                    </div>
-                    <div class="connection-group">
-                        <h3>OUTPUT</h3>
-                        <div class="connection-info">
-                            <span class="label">Host:</span>
-                            <span id="output-host">127.0.0.1</span>
-                            <span class="label">Port:</span>
-                            <span id="output-port">12000</span>
-                        </div>
-                        <div class="connection-status">
-                            <span id="output-status-dot" class="status-dot green">●</span>
-                            <span id="output-status">READY</span>
-                            <span id="output-detail" class="dim"></span>
-                            <span class="spacer"></span>
-                            <span id="send-count" class="dim">Sent: 0</span>
-                            <button id="btn-test-hit">Test</button>
-                        </div>
                     </div>
                 </div>
             </section>

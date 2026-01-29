@@ -108,6 +108,11 @@ impl AppState {
             for example in &gesture.examples {
                 self.recognizer.add_example(gesture.id, example.frames.clone());
             }
+
+            // Set best template index for GRT-style recognition (loaded from vocabulary)
+            if let Some(recognizer_gesture) = self.recognizer.get_gesture_mut(gesture.id) {
+                recognizer_gesture.set_best_template_index(gesture.best_template_index);
+            }
         }
 
         if was_active {
@@ -160,8 +165,13 @@ impl AppState {
 
         if let Some(stats) = compute_threshold_stats(&examples, coefficient) {
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
-                gesture.update_statistics(stats.mean, stats.std);
+                gesture.update_statistics(stats.mean, stats.std, stats.best_template_index);
                 self.recognizer.set_threshold(gesture_id, gesture.threshold);
+
+                // Set best template index on recognizer for GRT-style recognition
+                if let Some(recognizer_gesture) = self.recognizer.get_gesture_mut(gesture_id) {
+                    recognizer_gesture.set_best_template_index(stats.best_template_index);
+                }
 
                 // Log training completion
                 if self.diagnostic_logger.is_enabled() {

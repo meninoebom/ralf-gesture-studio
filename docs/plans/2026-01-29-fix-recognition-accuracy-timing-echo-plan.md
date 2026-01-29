@@ -149,17 +149,23 @@ RecognitionState::Recovery => {
 - Gesture distance: ~14-15
 - User feedback: "Absolute best run ever. Really good. Accurate, timely, no echo."
 
-### Phase 3: Improve Accuracy (GRT-Style Template Selection)
+### Phase 3: Improve Accuracy (GRT-Style Template Selection) ✅ COMPLETE
 
 **Goal**: Use best template instead of comparing to all examples.
 
-- [ ] During training, compute distances between all pairs of examples
-- [ ] Select "best template" = example with lowest average distance to others
-- [ ] Store `best_template_index` in `Gesture` struct
-- [ ] During recognition, compare only to best template (not all examples)
-- [ ] Fall back to all-example comparison if only 1-2 examples
+- [x] During training, compute distances between all pairs of examples
+- [x] Select "best template" = example with lowest average distance to others
+- [x] Store `best_template_index` in `Gesture` struct
+- [x] During recognition, compare only to best template (not all examples)
+- [x] Fall back to all-example comparison if only 1-2 examples
 
 **Files**: `src/engine/statistics.rs`, `src/model/vocabulary.rs`, `src/engine/recognizer.rs`
+
+**Implementation Notes**:
+- Best template = example with lowest average distance to all other examples
+- Computed automatically during `compute_threshold_stats()` after training
+- Persisted in vocabulary file (survives save/load)
+- Recognizer uses best template for 3+ examples, falls back to all examples for 1-2
 
 **Test**: More consistent recognition, especially with varied training data
 

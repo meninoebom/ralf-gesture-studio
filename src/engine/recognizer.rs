@@ -119,6 +119,12 @@ pub struct GestureState {
     pub current_distance: Option<f32>,
     pub last_hit_time: Option<Instant>,
 
+    // --- GRT-style best template selection ---
+    /// Index of the best template (example with lowest average distance to others)
+    /// Used during recognition to compare only against this representative example.
+    /// Falls back to comparing all examples if None or fewer than 3 examples.
+    best_template_index: Option<usize>,
+
     // --- VAD state machine ---
     /// Current state in the recognition state machine
     state: RecognitionState,
@@ -138,11 +144,24 @@ impl GestureState {
             examples: Vec::new(),
             current_distance: None,
             last_hit_time: None,
+            // GRT-style best template selection
+            best_template_index: None,
             // VAD state machine
             state: RecognitionState::Idle,
             frames_below_threshold: 0,
             recovery_start: None,
         }
+    }
+
+    /// Set the best template index (computed during training)
+    pub fn set_best_template_index(&mut self, index: Option<usize>) {
+        self.best_template_index = index;
+    }
+
+    /// Get the best template index
+    #[allow(dead_code)]
+    pub fn best_template_index(&self) -> Option<usize> {
+        self.best_template_index
     }
 
     pub fn add_example(&mut self, example: Sequence) {
@@ -347,6 +366,20 @@ impl Recognizer {
         seq.iter().step_by(factor).cloned().collect()
     }
 
+    /// Find the best (minimum) distance to any example in the list
+    /// Used as fallback when best template selection is not available
+    fn find_best_distance(window: &Sequence, examples: &[Sequence], downsample: usize) -> f32 {
+        let mut best = f32::MAX;
+        for example in examples {
+            let example_ds = Self::downsample_seq(example, downsample);
+            let dist = dtw_distance(window, &example_ds);
+            if dist < best {
+                best = dist;
+            }
+        }
+        best
+    }
+
     #[allow(dead_code)]
     pub fn config(&self) -> &RecognitionConfig {
         &self.config
@@ -443,6 +476,7 @@ impl Recognizer {
         let window = Self::downsample_seq(&window_full, self.downsample);
 
         // Compute distances for all gestures
+        // GRT-style: Use best template if available (3+ examples), else compare all
         let mut distances: Vec<(usize, f32)> = Vec::new();
 
         for (idx, gesture) in self.gestures.iter().enumerate() {
@@ -450,15 +484,25 @@ impl Recognizer {
                 continue;
             }
 
-            // Find best distance to any example of this gesture
-            let mut best_for_gesture = f32::MAX;
-            for example in gesture.examples() {
-                let example_ds = Self::downsample_seq(example, self.downsample);
-                let dist = dtw_distance(&window, &example_ds);
-                if dist < best_for_gesture {
-                    best_for_gesture = dist;
+            let examples = gesture.examples();
+            let best_for_gesture = if examples.len() >= 3 {
+                // GRT-style: Compare only to best template (most representative example)
+                if let Some(best_idx) = gesture.best_template_index {
+                    if best_idx < examples.len() {
+                        let example_ds = Self::downsample_seq(&examples[best_idx], self.downsample);
+                        dtw_distance(&window, &example_ds)
+                    } else {
+                        // Invalid index, fall back to all examples
+                        Self::find_best_distance(&window, examples, self.downsample)
+                    }
+                } else {
+                    // No best template computed, fall back to all examples
+                    Self::find_best_distance(&window, examples, self.downsample)
                 }
-            }
+            } else {
+                // 1-2 examples: compare against all (can't pick a representative)
+                Self::find_best_distance(&window, examples, self.downsample)
+            };
 
             distances.push((idx, best_for_gesture));
         }

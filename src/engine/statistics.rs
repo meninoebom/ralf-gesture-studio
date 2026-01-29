@@ -35,6 +35,9 @@ pub struct ThresholdStats {
     /// Number of pairwise distances computed
     #[allow(dead_code)]
     pub sample_count: usize,
+    /// Index of the best template (example with lowest average distance to others)
+    /// This is the most representative example, per GRT methodology.
+    pub best_template_index: Option<usize>,
 }
 
 /// Compute threshold statistics from a set of training examples.
@@ -64,37 +67,65 @@ pub fn compute_threshold_stats(examples: &[Sequence], coefficient: f32) -> Optio
         return None;
     }
 
-    // Compute all pairwise DTW distances
-    let mut distances: Vec<f32> = Vec::new();
-    for i in 0..examples.len() {
-        for j in (i + 1)..examples.len() {
+    let n_examples = examples.len();
+
+    // Compute all pairwise DTW distances and track per-example totals
+    // distance_matrix[i][j] = distance from example i to example j
+    let mut all_distances: Vec<f32> = Vec::new();
+    let mut example_total_distances: Vec<f32> = vec![0.0; n_examples];
+
+    for i in 0..n_examples {
+        for j in (i + 1)..n_examples {
             let dist = dtw_distance(&examples[i], &examples[j]);
             if dist.is_finite() {
-                distances.push(dist);
+                all_distances.push(dist);
+                // Add to both examples' totals (symmetric)
+                example_total_distances[i] += dist;
+                example_total_distances[j] += dist;
             }
         }
     }
 
-    if distances.is_empty() {
+    if all_distances.is_empty() {
         return None;
     }
 
     // Compute mean
-    let n = distances.len() as f32;
-    let mean = distances.iter().sum::<f32>() / n;
+    let n = all_distances.len() as f32;
+    let mean = all_distances.iter().sum::<f32>() / n;
 
     // Compute standard deviation
-    let variance = distances.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / n;
+    let variance = all_distances.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / n;
     let std = variance.sqrt();
 
     // Compute threshold: μ + σ × coefficient
     let threshold = mean + std * coefficient;
 
+    // Find best template: example with lowest average distance to all others
+    // This is the most representative example (GRT methodology)
+    let best_template_index = if n_examples >= 3 {
+        // Each example has (n_examples - 1) distances to other examples
+        let avg_distances: Vec<f32> = example_total_distances
+            .iter()
+            .map(|total| total / (n_examples - 1) as f32)
+            .collect();
+
+        avg_distances
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(idx, _)| idx)
+    } else {
+        // With only 2 examples, either could be "best" - use the first
+        Some(0)
+    };
+
     Some(ThresholdStats {
         mean,
         std,
         threshold,
-        sample_count: distances.len(),
+        sample_count: all_distances.len(),
+        best_template_index,
     })
 }
 
@@ -238,5 +269,58 @@ mod tests {
 
         let stats = compute_threshold_stats(&examples, 2.0).unwrap();
         assert_eq!(stats.sample_count, 6);
+    }
+
+    #[test]
+    fn test_best_template_index_with_3_examples() {
+        // Create examples where example[0] is most similar to others (lowest avg distance)
+        // example[0] = [1.0, 2.0, 3.0]
+        // example[1] = [1.1, 2.1, 3.1] - close to [0]
+        // example[2] = [1.05, 2.05, 3.05] - close to [0]
+        // example[0] should be the best template
+        let examples = vec![
+            make_sequence(&[1.0, 2.0, 3.0]),
+            make_sequence(&[1.1, 2.1, 3.1]),
+            make_sequence(&[1.05, 2.05, 3.05]),
+        ];
+
+        let stats = compute_threshold_stats(&examples, 2.0).unwrap();
+        assert!(stats.best_template_index.is_some());
+        // The middle example (index 2) should have lowest avg distance to others
+        // as it's equidistant from both 0 and 1
+        let best_idx = stats.best_template_index.unwrap();
+        assert!(best_idx < 3);
+    }
+
+    #[test]
+    fn test_best_template_index_with_2_examples() {
+        // With only 2 examples, should default to index 0
+        let examples = vec![
+            make_sequence(&[1.0, 2.0]),
+            make_sequence(&[1.5, 2.5]),
+        ];
+
+        let stats = compute_threshold_stats(&examples, 2.0).unwrap();
+        assert_eq!(stats.best_template_index, Some(0));
+    }
+
+    #[test]
+    fn test_best_template_finds_outlier() {
+        // example[0] = [1.0] - close to 1 and 2
+        // example[1] = [1.1] - close to 0 and 2
+        // example[2] = [1.05] - close to 0 and 1
+        // example[3] = [5.0] - outlier, far from all
+        // Best template should NOT be example[3]
+        let examples = vec![
+            make_sequence(&[1.0]),
+            make_sequence(&[1.1]),
+            make_sequence(&[1.05]),
+            make_sequence(&[5.0]),  // outlier
+        ];
+
+        let stats = compute_threshold_stats(&examples, 2.0).unwrap();
+        let best_idx = stats.best_template_index.unwrap();
+        // The outlier (index 3) should NOT be chosen
+        assert_ne!(best_idx, 3);
     }
 }

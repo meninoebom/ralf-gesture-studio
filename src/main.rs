@@ -39,8 +39,6 @@ fn main() {
             gui::set_threshold,
             gui::toggle_threshold_mode,
             gui::set_cooldown,
-            gui::set_motion_gate_enabled,
-            gui::recalibrate_motion,
             gui::enable_diagnostics,
             gui::disable_diagnostics,
             gui::is_diagnostics_enabled,

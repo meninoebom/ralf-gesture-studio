@@ -272,7 +272,6 @@ impl AppState {
 
         for (id, name, distance, threshold) in self.recognizer.current_distances() {
             let gesture = self.recognizer.get_gesture(id);
-            let armed = gesture.map(|g| g.is_armed()).unwrap_or(false);
             let in_cooldown = gesture.map(|g| g.in_cooldown(cooldown)).unwrap_or(false);
             let example_count = gesture.map(|g| g.example_count()).unwrap_or(0);
 
@@ -280,7 +279,7 @@ impl AppState {
                 name: name.clone(),
                 distance,
                 threshold,
-                armed,
+                armed: true, // Simple mode: always armed (cooldown handles repetition)
                 in_cooldown,
                 example_count,
             });
@@ -290,8 +289,6 @@ impl AppState {
                 // Near miss: within threshold + margin%, but didn't fire
                 if dist < threshold * (1.0 + near_miss_pct / 100.0) && dist >= threshold {
                     near_misses.push((name.clone(), dist, threshold, "above_threshold".to_string()));
-                } else if dist < threshold && !armed {
-                    near_misses.push((name.clone(), dist, threshold, "not_armed".to_string()));
                 } else if dist < threshold && in_cooldown {
                     near_misses.push((name.clone(), dist, threshold, "in_cooldown".to_string()));
                 }
@@ -391,11 +388,6 @@ pub struct MonitorDto {
     total_examples: usize,
     gestures: Vec<GestureMonitorDto>,
     recent_hit: Option<String>,
-    // Motion gate state
-    motion_energy: f32,
-    motion_gate_active: bool,
-    motion_threshold: f32,
-    calibration_ready: bool,
 }
 
 #[derive(Serialize)]
@@ -505,12 +497,6 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
         .filter(|h| h.timestamp.elapsed().as_millis() < 300)
         .map(|h| h.gesture_name.clone());
 
-    // Calibration state
-    let calibration_ready = matches!(
-        app.recognizer.calibration_state(),
-        crate::engine::recognizer::CalibrationState::Calibrated { .. }
-    );
-
     let monitor = MonitorDto {
         active: app.recognizer.is_active(),
         buffer_len: app.recognizer.buffer.len(),
@@ -538,10 +524,6 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
             }
         }).collect(),
         recent_hit: recent_hit_name,
-        motion_energy: app.recognizer.current_motion_energy(),
-        motion_gate_active: app.recognizer.is_motion_gate_active(),
-        motion_threshold: app.recognizer.motion_threshold(),
-        calibration_ready,
     };
 
     let hit_entries: Vec<HitEntryDto> = app.hit_log.recent(10).iter().map(|e| {
@@ -845,19 +827,8 @@ pub fn set_cooldown(state: State<Arc<Mutex<AppState>>>, ms: u64) -> Result<(), S
     Ok(())
 }
 
-#[tauri::command]
-pub fn set_motion_gate_enabled(state: State<Arc<Mutex<AppState>>>, enabled: bool) -> Result<(), String> {
-    let mut app = state.lock().map_err(|e| e.to_string())?;
-    app.recognizer.set_motion_gate_enabled(enabled);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn recalibrate_motion(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> {
-    let mut app = state.lock().map_err(|e| e.to_string())?;
-    app.recognizer.recalibrate();
-    Ok(())
-}
+// Motion gate commands removed in Phase 1 simplification
+// The simple Wekinator-style approach doesn't need motion gating
 
 #[tauri::command]
 pub fn enable_diagnostics(state: State<Arc<Mutex<AppState>>>) -> Result<String, String> {

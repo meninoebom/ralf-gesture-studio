@@ -40,16 +40,12 @@ pub struct RecognitionConfig {
     /// Distance must be below threshold × threshold_high_factor to enter Building
     pub threshold_high_factor: f32,
 
-    /// Hysteresis factor for exit (0.7 = 70% of trained threshold)
-    /// Distance must exceed threshold × threshold_low_factor to exit to Recovery
-    pub threshold_low_factor: f32,
-
     /// Number of consecutive frames below threshold required to fire
     /// (at ~15Hz DTW rate, 3 frames = ~200ms of confirmation)
     pub frames_to_fire: usize,
 
-    /// Hangover time in ms after exiting Peak state
-    /// Stays in Recovery state, blocking new detections
+    /// Hangover time in ms after firing (Recovery state duration)
+    /// Blocks new detections to prevent echo
     pub hangover_ms: u64,
 }
 
@@ -57,12 +53,11 @@ impl Default for RecognitionConfig {
     fn default() -> Self {
         Self {
             cooldown_ms: 500,
-            // Hysteresis: entry at 100% of threshold, exit at 150% (must return to rest)
+            // Entry at 100% of threshold
             threshold_high_factor: 1.0,
-            threshold_low_factor: 1.5,
             // Frame accumulation: require 3 consecutive frames (~200ms at 15Hz DTW)
             frames_to_fire: 3,
-            // Hangover: stay in recovery for 300ms after gesture
+            // Hangover: block new detections for 300ms after firing
             hangover_ms: 300,
         }
     }
@@ -197,7 +192,6 @@ impl GestureState {
         config: &RecognitionConfig,
     ) -> bool {
         let entry_threshold = self.threshold * config.threshold_high_factor;
-        let exit_threshold = self.threshold * config.threshold_low_factor;
         let hangover = Duration::from_millis(config.hangover_ms);
 
         match self.state {
@@ -250,13 +244,12 @@ impl GestureState {
                     .map(|t| t.elapsed() >= hangover)
                     .unwrap_or(true);
 
-                // Check if distance is above exit threshold (returned to rest)
-                let returned_to_rest = distance > exit_threshold;
-
-                // Need BOTH conditions to exit recovery:
-                // 1. Hangover time elapsed
-                // 2. Distance above exit threshold (user returned to rest)
-                if hangover_complete && returned_to_rest {
+                // Exit recovery when hangover is complete
+                // (Wekinator-style: simple time-based cooldown)
+                //
+                // Note: We tried requiring distance > exit_threshold but that fails
+                // when resting distance is still below threshold (common for body tracking)
+                if hangover_complete {
                     self.reset_to_idle();
                 }
                 false
@@ -730,12 +723,11 @@ mod tests {
     }
 
     #[test]
-    fn test_state_machine_recovery_needs_both_conditions() {
+    fn test_state_machine_recovery_exits_after_hangover() {
         let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
         let config = RecognitionConfig {
             frames_to_fire: 1,
             hangover_ms: 50,
-            threshold_low_factor: 1.5, // Exit threshold = 150
             ..Default::default()
         };
 
@@ -744,14 +736,14 @@ mod tests {
         gesture.process_state_machine(50.0, &config); // Recovery
 
         // Hangover not complete, should stay in Recovery
-        gesture.process_state_machine(200.0, &config); // Above exit threshold
+        gesture.process_state_machine(50.0, &config);
         assert_eq!(gesture.recognition_state(), RecognitionState::Recovery);
 
         // Wait for hangover
         std::thread::sleep(Duration::from_millis(60));
 
-        // Now with both conditions met, should go to Idle
-        gesture.process_state_machine(200.0, &config);
+        // Now hangover complete, should go to Idle (regardless of distance)
+        gesture.process_state_machine(50.0, &config);
         assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
     }
 

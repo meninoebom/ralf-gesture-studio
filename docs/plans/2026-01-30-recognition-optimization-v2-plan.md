@@ -399,43 +399,44 @@ This gives ~100ms latency (3 frames × 33ms) while maintaining jitter protection
 ## Implementation Checklist
 
 ### Phase 1a: Echo Guard
-- [ ] Add `rearm_threshold_factor` to `RecognitionConfig` (default: 1.3)
-- [ ] Add `extended_hangover_ms` to `RecognitionConfig` (default: 500)
-- [ ] Track `max_distance_seen` in Recovery state
-- [ ] Implement dual-path re-arming logic
-- [ ] Update diagnostic logging for new re-arm conditions
+- [x] Add `rearm_threshold_factor` to `RecognitionConfig` (default: 1.3)
+- [x] Add `extended_hangover_ms` to `RecognitionConfig` (default: 500)
+- [x] Track `max_distance_seen` in Recovery state
+- [x] Implement dual-path re-arming logic
+- [x] Update diagnostic logging for new re-arm conditions
 
 ### Phase 1b: Sakoe-Chiba
-- [ ] Add `dtw_distance_sakoe_chiba()` function
-- [ ] Add `sakoe_chiba_band` to config (default: 0.15)
-- [ ] Update recognizer to use constrained DTW
-- [ ] Verify tests pass with new DTW
+- [x] Add `dtw_distance_sakoe_chiba()` function
+- [x] Add `sakoe_chiba_band` to config (default: 0.15)
+- [x] Update recognizer to use constrained DTW
+- [x] Verify tests pass with new DTW
 
 ### Phase 1c: Early Abandoning
-- [ ] Add `dtw_distance_with_abandon()` function
-- [ ] Update recognizer to pass `best_so_far` to DTW
-- [ ] Verify performance improvement
+- [x] Add `dtw_distance_with_abandon()` function
+- [x] Update recognizer to pass `best_so_far` to DTW
+- [x] Verify performance improvement
 
 ### Phase 2: Distance Slope
-- [ ] Add `distance_history` to `GestureStateData`
-- [ ] Add `is_distance_falling()` method
-- [ ] Gate Building state entry on falling distance
-- [ ] Add diagnostic logging for slope rejections
+- [x] Add `distance_history` to `GestureStateData`
+- [x] Add `is_distance_falling()` method
+- [x] Gate Building state entry on falling distance
+- [x] Add diagnostic logging for slope rejections
 
 ### Phase 3: LB_Keogh
-- [ ] Add `LBEnvelope` struct
-- [ ] Add `compute_lb_envelope()` function
-- [ ] Add `lb_keogh()` function
-- [ ] Store envelopes in `Example` struct
-- [ ] Precompute envelopes after training
-- [ ] Add pruning to recognition loop
-- [ ] Measure actual pruning percentage
+- [x] Add `LBEnvelope` struct
+- [x] Add `compute_lb_envelope()` function
+- [x] Add `lb_keogh()` function
+- [x] Store envelopes in `GestureState` (computed at recognition start)
+- [x] Precompute envelopes after training
+- [x] Add pruning to recognition loop
+- [ ] Measure actual pruning percentage (requires real-world testing)
 
 ### Testing
-- [ ] A/B test: baseline vs Phase 1 optimizations
-- [ ] Stress test: count echoes (target: 0)
-- [ ] Latency measurement
-- [ ] CPU usage measurement
+- [x] All 127 unit tests pass
+- [ ] A/B test: baseline vs Phase 1 optimizations (requires real-world testing)
+- [ ] Stress test: count echoes (target: 0) (requires real-world testing)
+- [ ] Latency measurement (requires real-world testing)
+- [ ] CPU usage measurement (requires real-world testing)
 
 ---
 

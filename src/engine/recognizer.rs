@@ -80,6 +80,24 @@ pub enum RecognitionState {
     Recovery,
 }
 
+/// Information about a state transition (for diagnostic logging)
+#[derive(Debug, Clone)]
+pub struct StateTransition {
+    pub from_state: RecognitionState,
+    pub to_state: RecognitionState,
+    pub frames_in_prev_state: usize,
+    pub reason: String,
+}
+
+/// Result of processing a frame through the state machine
+#[derive(Debug, Clone)]
+pub struct StateMachineResult {
+    /// Whether to fire a hit
+    pub should_fire: bool,
+    /// State transition that occurred (if any)
+    pub transition: Option<StateTransition>,
+}
+
 impl std::fmt::Display for RecognitionState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -204,16 +222,18 @@ impl GestureState {
     }
 
     /// Process a distance value through the state machine.
-    /// Returns true if we should fire a hit (transition to Peak).
+    /// Returns result with fire signal and any state transition that occurred.
     fn process_state_machine(
         &mut self,
         distance: f32,
         config: &RecognitionConfig,
-    ) -> bool {
+    ) -> StateMachineResult {
         let entry_threshold = self.threshold * config.threshold_high_factor;
         let hangover = Duration::from_millis(config.hangover_ms);
+        let prev_state = self.state;
+        let prev_frames = self.frames_below_threshold;
 
-        match self.state {
+        let (should_fire, new_state, reason) = match self.state {
             RecognitionState::Idle => {
                 // Check if distance is below entry threshold
                 if distance < entry_threshold {
@@ -225,10 +245,13 @@ impl GestureState {
                     if self.frames_below_threshold >= config.frames_to_fire {
                         self.state = RecognitionState::Peak;
                         self.record_hit();
-                        return true;
+                        (true, Some(RecognitionState::Peak), "below_threshold_instant_fire")
+                    } else {
+                        (false, Some(RecognitionState::Building), "below_threshold")
                     }
+                } else {
+                    (false, None, "")
                 }
-                false
             }
 
             RecognitionState::Building => {
@@ -241,20 +264,22 @@ impl GestureState {
                         // Transition to Peak - FIRE!
                         self.state = RecognitionState::Peak;
                         self.record_hit();
-                        return true;
+                        (true, Some(RecognitionState::Peak), "accumulated_frames")
+                    } else {
+                        (false, None, "") // Still building, no transition
                     }
                 } else {
                     // Distance rose above threshold, reset to Idle
                     self.reset_to_idle();
+                    (false, Some(RecognitionState::Idle), "above_threshold")
                 }
-                false
             }
 
             RecognitionState::Peak => {
                 // Immediately transition to Recovery after firing
                 self.state = RecognitionState::Recovery;
                 self.recovery_start = Some(Instant::now());
-                false
+                (false, Some(RecognitionState::Recovery), "post_fire")
             }
 
             RecognitionState::Recovery => {
@@ -270,9 +295,24 @@ impl GestureState {
                 // when resting distance is still below threshold (common for body tracking)
                 if hangover_complete {
                     self.reset_to_idle();
+                    (false, Some(RecognitionState::Idle), "hangover_complete")
+                } else {
+                    (false, None, "")
                 }
-                false
             }
+        };
+
+        // Build transition info if state changed
+        let transition = new_state.map(|to_state| StateTransition {
+            from_state: prev_state,
+            to_state,
+            frames_in_prev_state: prev_frames,
+            reason: reason.to_string(),
+        });
+
+        StateMachineResult {
+            should_fire,
+            transition,
         }
     }
 }
@@ -318,6 +358,15 @@ impl FrameBuffer {
 // Recognizer
 // ============================================================================
 
+/// A state transition with gesture context (for logging)
+#[derive(Debug, Clone)]
+pub struct GestureStateTransition {
+    pub gesture_name: String,
+    pub transition: StateTransition,
+    pub distance: f32,
+    pub threshold: f32,
+}
+
 /// The recognizer with VAD-style state machine
 #[derive(Debug)]
 pub struct Recognizer {
@@ -333,6 +382,12 @@ pub struct Recognizer {
     dtw_skip: usize,
     /// Downsample factor for DTW (compare at 15fps instead of 60fps)
     downsample: usize,
+    /// Whether to use GRT-style best template selection (Phase 3)
+    /// When true: Compare only to best template for gestures with 3+ examples
+    /// When false: Compare to ALL examples (Wekinator-style)
+    use_best_template: bool,
+    /// Pending state transitions to be logged (cleared after retrieval)
+    pending_transitions: Vec<GestureStateTransition>,
 }
 
 impl Recognizer {
@@ -355,7 +410,15 @@ impl Recognizer {
             frame_count: 0,
             dtw_skip: 4,      // Compute DTW every 4th frame (15Hz @ 60fps input)
             downsample: 4,    // Compare at 15fps
+            use_best_template: false, // Default: compare ALL examples (Wekinator-style, more responsive)
+            pending_transitions: Vec::new(),
         }
+    }
+
+    /// Take pending state transitions (for diagnostic logging).
+    /// Returns transitions and clears the internal list.
+    pub fn take_transitions(&mut self) -> Vec<GestureStateTransition> {
+        std::mem::take(&mut self.pending_transitions)
     }
 
     /// Downsample a sequence by taking every Nth frame
@@ -387,6 +450,18 @@ impl Recognizer {
 
     pub fn set_cooldown_ms(&mut self, ms: u64) {
         self.config.cooldown_ms = ms;
+    }
+
+    /// Set whether to use GRT-style best template selection (Phase 3)
+    /// When true: Compare only to best template for gestures with 3+ examples
+    /// When false: Compare to ALL examples (Wekinator-style, pre-Phase 3)
+    pub fn set_use_best_template(&mut self, use_it: bool) {
+        self.use_best_template = use_it;
+    }
+
+    /// Get whether using best template selection
+    pub fn use_best_template(&self) -> bool {
+        self.use_best_template
     }
 
     pub fn add_gesture(&mut self, id: u32, name: &str, osc_address: &str, threshold: f32) {
@@ -485,8 +560,8 @@ impl Recognizer {
             }
 
             let examples = gesture.examples();
-            let best_for_gesture = if examples.len() >= 3 {
-                // GRT-style: Compare only to best template (most representative example)
+            let best_for_gesture = if self.use_best_template && examples.len() >= 3 {
+                // GRT-style (Phase 3): Compare only to best template (most representative example)
                 if let Some(best_idx) = gesture.best_template_index {
                     if best_idx < examples.len() {
                         let example_ds = Self::downsample_seq(&examples[best_idx], self.downsample);
@@ -500,7 +575,7 @@ impl Recognizer {
                     Self::find_best_distance(&window, examples, self.downsample)
                 }
             } else {
-                // 1-2 examples: compare against all (can't pick a representative)
+                // Wekinator-style (pre-Phase 3): compare against ALL examples
                 Self::find_best_distance(&window, examples, self.downsample)
             };
 
@@ -528,9 +603,19 @@ impl Recognizer {
                     .unwrap_or(false);
 
                 if is_best {
-                    let should_fire = gesture.process_state_machine(dist, &self.config);
+                    let result = gesture.process_state_machine(dist, &self.config);
 
-                    if should_fire {
+                    // Collect state transition for logging
+                    if let Some(transition) = result.transition {
+                        self.pending_transitions.push(GestureStateTransition {
+                            gesture_name: gesture.name.clone(),
+                            transition,
+                            distance: dist,
+                            threshold: gesture.threshold,
+                        });
+                    }
+
+                    if result.should_fire {
                         hit_result = Some((
                             gesture.id,
                             gesture.name.clone(),
@@ -708,10 +793,15 @@ mod tests {
         let config = RecognitionConfig::default();
 
         // Distance below threshold should transition to Building
-        let should_fire = gesture.process_state_machine(50.0, &config);
-        assert!(!should_fire);
+        let result = gesture.process_state_machine(50.0, &config);
+        assert!(!result.should_fire);
         assert_eq!(gesture.recognition_state(), RecognitionState::Building);
         assert_eq!(gesture.frames_below_threshold, 1);
+        // Should have a transition
+        assert!(result.transition.is_some());
+        let t = result.transition.unwrap();
+        assert_eq!(t.from_state, RecognitionState::Idle);
+        assert_eq!(t.to_state, RecognitionState::Building);
     }
 
     #[test]
@@ -729,9 +819,14 @@ mod tests {
         gesture.process_state_machine(45.0, &config); // Building, count=2
         assert_eq!(gesture.recognition_state(), RecognitionState::Building);
 
-        let should_fire = gesture.process_state_machine(40.0, &config); // Peak!
-        assert!(should_fire);
+        let result = gesture.process_state_machine(40.0, &config); // Peak!
+        assert!(result.should_fire);
         assert_eq!(gesture.recognition_state(), RecognitionState::Peak);
+        // Should have a transition to Peak
+        assert!(result.transition.is_some());
+        let t = result.transition.unwrap();
+        assert_eq!(t.to_state, RecognitionState::Peak);
+        assert_eq!(t.reason, "accumulated_frames");
     }
 
     #[test]
@@ -743,9 +838,14 @@ mod tests {
         assert_eq!(gesture.recognition_state(), RecognitionState::Building);
 
         // Distance rises above threshold - should reset to Idle
-        gesture.process_state_machine(150.0, &config);
+        let result = gesture.process_state_machine(150.0, &config);
         assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
         assert_eq!(gesture.frames_below_threshold, 0);
+        // Should have a transition back to Idle
+        assert!(result.transition.is_some());
+        let t = result.transition.unwrap();
+        assert_eq!(t.to_state, RecognitionState::Idle);
+        assert_eq!(t.reason, "above_threshold");
     }
 
     #[test]
@@ -757,13 +857,17 @@ mod tests {
         };
 
         // First frame below threshold: Idle → Building → Peak (fires)
-        let should_fire = gesture.process_state_machine(50.0, &config);
-        assert!(should_fire, "Should fire when frames_to_fire=1");
+        let result = gesture.process_state_machine(50.0, &config);
+        assert!(result.should_fire, "Should fire when frames_to_fire=1");
         assert_eq!(gesture.recognition_state(), RecognitionState::Peak);
 
         // Next frame should transition Peak → Recovery
-        gesture.process_state_machine(50.0, &config);
+        let result = gesture.process_state_machine(50.0, &config);
         assert_eq!(gesture.recognition_state(), RecognitionState::Recovery);
+        assert!(result.transition.is_some());
+        let t = result.transition.unwrap();
+        assert_eq!(t.from_state, RecognitionState::Peak);
+        assert_eq!(t.to_state, RecognitionState::Recovery);
     }
 
     #[test]
@@ -780,15 +884,20 @@ mod tests {
         gesture.process_state_machine(50.0, &config); // Recovery
 
         // Hangover not complete, should stay in Recovery
-        gesture.process_state_machine(50.0, &config);
+        let result = gesture.process_state_machine(50.0, &config);
         assert_eq!(gesture.recognition_state(), RecognitionState::Recovery);
+        assert!(result.transition.is_none()); // No transition yet
 
         // Wait for hangover
         std::thread::sleep(Duration::from_millis(60));
 
         // Now hangover complete, should go to Idle (regardless of distance)
-        gesture.process_state_machine(50.0, &config);
+        let result = gesture.process_state_machine(50.0, &config);
         assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
+        assert!(result.transition.is_some());
+        let t = result.transition.unwrap();
+        assert_eq!(t.to_state, RecognitionState::Idle);
+        assert_eq!(t.reason, "hangover_complete");
     }
 
     #[test]

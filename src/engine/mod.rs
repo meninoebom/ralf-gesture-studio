@@ -57,4 +57,4 @@ pub use dtw::{
 pub use buffer::{FrameBuffer, TimestampedFrame};
 
 #[allow(unused_imports)]
-pub use recognizer::{GestureState, RecognitionResult, HitLogEntry};
+pub use recognizer::{GestureState, RecognitionResult, HitLogEntry, RecognitionState, StateTransition, GestureStateTransition};

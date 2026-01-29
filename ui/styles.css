@@ -581,6 +581,12 @@ input[type="range"]::-webkit-slider-thumb {
     animation: pulse 1s ease-in-out infinite;
 }
 
+/* Comparison mode toggle (A/B test) */
+#btn-toggle-comparison.alt-mode {
+    background-color: var(--gold);
+    color: #000;
+}
+
 /* Hit Log */
 #hitlog-section h2 {
     display: flex;

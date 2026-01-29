@@ -94,8 +94,10 @@ impl AppState {
     /// Sync recognizer with vocabulary
     fn sync_recognizer(&mut self) {
         let was_active = self.recognizer.is_active();
+        let use_best_template = self.recognizer.use_best_template();
 
         self.recognizer = Recognizer::with_config(600, 180, self.recognition_config.clone());
+        self.recognizer.set_use_best_template(use_best_template);
 
         for gesture in &self.vocabulary.gestures {
             self.recognizer.add_gesture(
@@ -226,6 +228,23 @@ impl AppState {
             // Feed to recognizer
             if let Some(result) = self.recognizer.process_frame(frame.clone()) {
                 let frame_num = self.osc_receiver.state.frame_count as usize;
+
+                // Log state transitions if diagnostics enabled
+                if self.diagnostic_logger.is_enabled() && self.mode == AppMode::Performance {
+                    for transition in self.recognizer.take_transitions() {
+                        let margin_pct = ((transition.threshold - transition.distance) / transition.threshold) * 100.0;
+                        self.diagnostic_logger.log(DiagnosticEvent::StateChange {
+                            gesture_name: transition.gesture_name,
+                            from_state: format!("{}", transition.transition.from_state),
+                            to_state: format!("{}", transition.transition.to_state),
+                            distance: transition.distance,
+                            threshold: transition.threshold,
+                            margin_pct,
+                            frames_in_state: transition.transition.frames_in_prev_state,
+                            reason: transition.transition.reason,
+                        });
+                    }
+                }
 
                 // Log diagnostic data if enabled
                 if self.diagnostic_logger.is_enabled() && self.mode == AppMode::Performance {
@@ -835,6 +854,23 @@ pub fn set_cooldown(state: State<Arc<Mutex<AppState>>>, ms: u64) -> Result<(), S
     app.recognition_config.cooldown_ms = ms;
     app.recognizer.set_cooldown_ms(ms);
     Ok(())
+}
+
+/// Toggle between best template (Phase 3) and all examples (Wekinator-style) comparison
+/// Used for A/B testing Phase 3 changes
+#[tauri::command]
+pub fn toggle_best_template_mode(state: State<Arc<Mutex<AppState>>>) -> Result<bool, String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    let new_value = !app.recognizer.use_best_template();
+    app.recognizer.set_use_best_template(new_value);
+    Ok(new_value)
+}
+
+/// Get current comparison mode
+#[tauri::command]
+pub fn get_best_template_mode(state: State<Arc<Mutex<AppState>>>) -> Result<bool, String> {
+    let app = state.lock().map_err(|e| e.to_string())?;
+    Ok(app.recognizer.use_best_template())
 }
 
 // Motion gate commands removed in Phase 1 simplification

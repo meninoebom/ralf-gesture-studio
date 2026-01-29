@@ -169,14 +169,14 @@ RecognitionState::Recovery => {
 
 **Test**: More consistent recognition, especially with varied training data
 
-### Phase 4: Diagnostic Enhancement
+### Phase 4: Diagnostic Enhancement ✅ COMPLETE
 
 **Goal**: Log state transitions for debugging.
 
-- [ ] Log state transitions: `IDLE→BUILDING`, `BUILDING→PEAK`, etc.
-- [ ] Log reason for each transition
-- [ ] Include margin% (how far below/above threshold)
-- [ ] Include frame count in each state
+- [x] Log state transitions: `IDLE→BUILDING`, `BUILDING→PEAK`, etc.
+- [x] Log reason for each transition
+- [x] Include margin% (how far below/above threshold)
+- [x] Include frame count in each state
 
 **Log format**:
 ```
@@ -188,7 +188,17 @@ timestamp,STATE_CHANGE,from_state,to_state,gesture,distance,threshold,margin%,re
 1234,STATE_CHANGE,Recovery,Idle,wave,9000,8000,-12%,hangover_complete
 ```
 
-**Files**: `src/engine/diagnostics.rs`, `src/gui/mod.rs`
+**Files**: `src/engine/diagnostics.rs`, `src/engine/recognizer.rs`, `src/engine/mod.rs`, `src/gui/mod.rs`
+
+**Implementation Notes**:
+- Added `StateChange` event type to `DiagnosticEvent` enum
+- Added `StateTransition` and `StateMachineResult` structs to track state machine output
+- Added `GestureStateTransition` for gesture-contextualized transitions
+- Modified `process_state_machine()` to return `StateMachineResult` with transition info
+- Added `pending_transitions` field and `take_transitions()` method to `Recognizer`
+- GUI logs transitions after each frame processing cycle
+
+**Result**: All 114 tests pass. State transitions now logged with full context.
 
 ## Acceptance Criteria
 
@@ -244,12 +254,38 @@ timestamp,STATE_CHANGE,from_state,to_state,gesture,distance,threshold,margin%,re
 | **Peak detection (local minima)** | Added latency, didn't improve accuracy |
 | **Adaptive threshold** | Computed from wrong data, over-complicated |
 | **Motion gate** | Blocked valid gestures, added tuning complexity |
+| **GRT best template selection** | Too restrictive for body tracking; single template can't represent gesture variability (A/B test showed 30% fewer detections) |
 
 ### Critical Insight
 
 **Recovery MUST be time-based only, NOT distance-based.**
 
 Body tracking data (unlike audio) has a "resting distance" that is often close to the gesture threshold. Waiting for distance > exit_threshold can cause recognition to get stuck permanently after one hit.
+
+### Phase 3 A/B Test Results (2026-01-29)
+
+Compared "Best Template" (Phase 3, GRT-style) vs "All Examples" (Wekinator-style):
+
+| Metric | Best Template | All Examples | Winner |
+|--------|---------------|--------------|--------|
+| **Gestures Detected** | 13 | 17 | All Examples (+30%) |
+| **Echoes** | 5 | 5 | Tie |
+| **Detection Rate** | 6.8/min | 9.5/min | All Examples |
+| **Echo Margins** | 3-11% | 1-2% | All Examples (easier to fix) |
+
+**Key Finding**: Best template selection is too restrictive for body tracking data. The "most representative" training example may not capture the full range of valid gesture variations.
+
+**Decision**: Default to "All Examples" comparison. Keep toggle for future testing.
+
+**Why All Examples Works Better**:
+1. Takes minimum distance across ALL training examples
+2. More forgiving of gesture variations
+3. User's natural performance varies more than GRT's audio gesture assumptions
+
+**Why Best Template Failed**:
+1. Single template can't represent gesture variability
+2. May pick a template that's slightly closer to resting pose
+3. Results in narrower "hit zone" that misses valid gestures
 
 ### Tuning Guidelines
 

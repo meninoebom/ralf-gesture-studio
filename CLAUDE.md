@@ -217,6 +217,30 @@ Testing with "wings" gesture (lifting both arms):
 4. **Frame accumulation prevents noise** - 3 frames = ~200ms confirmation
 5. **Hangover prevents echo** - 300ms blocks all new detections after fire
 
+### A/B Test: Best Template vs All Examples (2026-01-29)
+
+Tested GRT-style "best template" (single most representative example) vs Wekinator-style "all examples" (minimum distance across all training examples):
+
+| Metric | Best Template | All Examples | Winner |
+|--------|---------------|--------------|--------|
+| Gestures Detected | 13 | 17 | **All Examples (+30%)** |
+| Echoes | 5 | 5 | Tie |
+| Detection Rate | 6.8/min | 9.5/min | **All Examples** |
+
+**Decision**: Default to "All Examples" comparison mode.
+
+**Why All Examples wins for body tracking**:
+- Takes minimum distance across ALL training examples
+- More forgiving of gesture variations
+- User's natural performance varies more than GRT's audio gesture assumptions
+
+**Why Best Template failed**:
+- Single template can't represent gesture variability
+- May pick a template closer to resting pose
+- Results in narrower "hit zone" that misses valid gestures
+
+**Note**: Toggle available in Performance mode UI for future A/B testing.
+
 #### Diagnostic Logging
 
 Enable via UI button to write detailed logs:

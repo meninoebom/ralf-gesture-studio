@@ -308,12 +308,12 @@ pub fn compute_prototype(examples: &[Sequence]) -> Sequence {
     for t in 0..target_len {
         let mut avg_frame = vec![0.0; dim];
         for example in &resampled {
-            for d in 0..dim {
-                avg_frame[d] += example[t][d];
+            for (d, val) in avg_frame.iter_mut().enumerate().take(dim) {
+                *val += example[t][d];
             }
         }
-        for d in 0..dim {
-            avg_frame[d] /= n_examples;
+        for val in avg_frame.iter_mut().take(dim) {
+            *val /= n_examples;
         }
         prototype.push(avg_frame);
     }

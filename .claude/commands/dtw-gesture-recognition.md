@@ -471,7 +471,212 @@ GestureState (runtime)
 
 ---
 
-## Advanced Recognition: Peak Detection + Sustained Detection (v0.4.0)
+## VAD-Style State Machine Recognition (v0.5.0) ✅ PRODUCTION READY
+
+**Breakthrough 2026-01-29**: After multiple complex approaches failed, a VAD (Voice Activity Detection) inspired state machine proved to be the winning pattern. This approach is borrowed from speech recognition systems like CMU Sphinx, Kaldi, and WebRTC VAD.
+
+### The Problem with Previous Approaches
+
+| Approach | Problem |
+|----------|---------|
+| **Simple threshold crossing** | Echo hits when distance stays below threshold |
+| **Peak detection** | Latency waiting for rise, misses flat-bottom gestures |
+| **Distance-based re-arming** | Fails when resting distance is still close to threshold |
+| **Adaptive threshold** | Over-complicated, hard to tune, didn't solve root issues |
+
+### The Solution: VAD-Style State Machine
+
+A state machine with **frame accumulation** for confirmation and **time-based hangover** for echo prevention.
+
+```
+                    ┌─────────────┐
+                    │    IDLE     │◄──────────────────┐
+                    │  (armed)    │                   │
+                    └──────┬──────┘                   │
+                           │                          │
+          distance < threshold                        │
+                           │                          │
+                           ▼                          │
+                    ┌─────────────┐                   │
+                    │  BUILDING   │                   │
+                    │ (accumulate)│                   │
+                    └──────┬──────┘                   │
+                           │                          │
+          accumulated >= 3 frames (~200ms)            │
+                           │                          │
+                           ▼                          │
+              ┌────────────────────────┐              │
+              │         PEAK           │              │
+              │  *** FIRE GESTURE ***  │              │
+              └───────────┬────────────┘              │
+                          │                           │
+              immediately transition                  │
+                          │                           │
+                          ▼                           │
+                   ┌─────────────┐                    │
+                   │  RECOVERY   │                    │
+                   │ (hangover)  │────────────────────┘
+                   └─────────────┘
+                   after hangover_ms (300ms)
+```
+
+### ⚠️ CRITICAL INSIGHT: Recovery Must Be Time-Based Only
+
+**The #1 learning**: Recovery MUST exit based on time alone, NOT distance.
+
+**Why distance-based recovery fails**:
+- With body tracking, "resting" distance is often still close to threshold
+- Example from real use: threshold=17, resting distance=21-24
+- If exit threshold was 1.5× = 25.5, user barely exceeds it
+- Earlier bug: exit at 1.5× threshold caused stuck recognition (one hit, never re-arms)
+
+**What works**:
+```rust
+RecognitionState::Recovery => {
+    let hangover_complete = self.recovery_start
+        .map(|t| t.elapsed() >= hangover)
+        .unwrap_or(true);
+
+    // Exit recovery when hangover is complete (TIME-BASED ONLY)
+    // Do NOT check distance here - user may still be close to gesture zone
+    if hangover_complete {
+        self.reset_to_idle();
+    }
+    false
+}
+```
+
+### Why This Works
+
+| Mechanism | Purpose | Why It Works |
+|-----------|---------|--------------|
+| **Frame accumulation** | Prevents noise spikes from firing | 3 frames = ~200ms of consistent low distance |
+| **Time-based hangover** | Prevents echo hits | Blocks new detections regardless of distance |
+| **No hysteresis exit** | Prevents stuck recognition | Works even when resting distance ≈ threshold |
+| **Simple state machine** | Predictable behavior | Easy to debug, no complex armed/disarmed logic |
+
+### Production Configuration
+
+```rust
+pub struct RecognitionConfig {
+    pub cooldown_ms: 500,              // Backup protection (rarely used)
+    pub threshold_high_factor: 1.0,    // Entry at 100% of threshold
+    pub frames_to_fire: 3,             // ~200ms confirmation at 15Hz DTW
+    pub hangover_ms: 300,              // 300ms recovery before re-arming
+}
+```
+
+### Real-World Results (2026-01-29)
+
+Testing with "wings" gesture (lifting both arms):
+- **7 HITs, 0 false positives, 0 echo**
+- Threshold: 17 (AUTO from μ+σ)
+- Resting distance: ~21-24
+- Gesture distance: ~14-15 when performing
+- Each HIT followed by ~300ms recovery, then re-armed
+
+### Log Pattern for Successful Recognition
+
+```
+# Pattern: Resting → Gesture → HIT → Recovery → Resting → Ready
+timestamp,REC,frame,buffer,window,wings:68:27:1
+timestamp,REC,frame,buffer,window,wings:65:27:1
+timestamp,REC,frame,buffer,window,wings:15:27:1  # Distance drops
+timestamp,REC,frame,buffer,window,wings:14:27:1
+timestamp,REC,frame,buffer,window,wings:14:27:1  # Building (3 frames)
+timestamp,HIT,frame,wings,14.2,27.0,47%          # FIRE!
+timestamp,REC,frame,buffer,window,wings:15:27:0:in_cooldown  # Recovery
+# ... 300ms later ...
+timestamp,REC,frame,buffer,window,wings:68:27:1  # Re-armed, ready
+```
+
+### Implementation (from recognizer.rs)
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecognitionState {
+    Idle,      // Waiting for gesture, ready to detect
+    Building,  // Distance below threshold, accumulating frames
+    Peak,      // Gesture detected, fire OSC
+    Recovery,  // Hangover period, blocking new detections
+}
+
+fn process_state_machine(&mut self, distance: f32, config: &RecognitionConfig) -> bool {
+    let entry_threshold = self.threshold * config.threshold_high_factor;
+    let hangover = Duration::from_millis(config.hangover_ms);
+
+    match self.state {
+        RecognitionState::Idle => {
+            if distance < entry_threshold {
+                self.state = RecognitionState::Building;
+                self.frames_below_threshold = 1;
+                // Check for immediate fire if frames_to_fire = 1
+                if self.frames_below_threshold >= config.frames_to_fire {
+                    self.state = RecognitionState::Peak;
+                    self.record_hit();
+                    return true;
+                }
+            }
+            false
+        }
+
+        RecognitionState::Building => {
+            if distance < entry_threshold {
+                self.frames_below_threshold += 1;
+                if self.frames_below_threshold >= config.frames_to_fire {
+                    self.state = RecognitionState::Peak;
+                    self.record_hit();
+                    return true;
+                }
+            } else {
+                self.reset_to_idle(); // Distance rose, reset
+            }
+            false
+        }
+
+        RecognitionState::Peak => {
+            // Immediately transition to Recovery
+            self.state = RecognitionState::Recovery;
+            self.recovery_start = Some(Instant::now());
+            false
+        }
+
+        RecognitionState::Recovery => {
+            let hangover_complete = self.recovery_start
+                .map(|t| t.elapsed() >= hangover)
+                .unwrap_or(true);
+            // TIME-BASED ONLY - do not check distance!
+            if hangover_complete {
+                self.reset_to_idle();
+            }
+            false
+        }
+    }
+}
+```
+
+### What We Removed (Simplification)
+
+| Removed | Why |
+|---------|-----|
+| `AdaptiveThreshold` | Computed from wrong data, over-complicated |
+| Motion gate | Blocked recognition when it shouldn't |
+| Calibration step | Not needed with statistical threshold |
+| Armed/disarmed tracking | State machine handles this implicitly |
+| Peak detection (local minima) | Frame accumulation is simpler and works |
+| Distance-based re-arming | Fails with body tracking data |
+
+**Result**: ~500 lines → ~350 lines, better results.
+
+---
+
+## DEPRECATED: Peak Detection + Sustained Detection (v0.4.0)
+
+> **Note**: This approach was superseded by the VAD-style state machine (v0.5.0).
+> Kept for historical reference only.
+
+<details>
+<summary>Click to expand deprecated approach</summary>
 
 The simple threshold approach works but has issues with **continuous gesture performance** where the user performs gestures without returning to a resting state. This section documents the more sophisticated approach developed for RALF Gesture Studio.
 
@@ -542,21 +747,11 @@ if best_distance < threshold {
 
 **Critical**: Both detection methods share ONE armed state to prevent echoes.
 
-```rust
-struct Recognizer {
-    recognition_armed: bool,       // Shared by peak and sustained detection
-    last_fire_time: Option<Instant>,
-    // ...
-}
-```
-
 After ANY hit (peak or sustained), set `recognition_armed = false`. This prevents:
 - Peak detection from firing, then sustained detection firing
 - Multiple peak detections from tiny fluctuations
 
 ### Re-arming Logic (The Hard Part)
-
-**The challenge**: How does the system know the user is done with one gesture and ready for the next?
 
 Two re-arming paths:
 
@@ -570,8 +765,6 @@ if best_distance > rearm_threshold {
 }
 ```
 
-**Why 75%**: Full threshold re-arm is too strict (user might never get there). 75% provides hysteresis to prevent oscillation.
-
 #### Path 2: Time-Based Re-arming (for continuous gestures)
 
 ```rust
@@ -584,58 +777,9 @@ if let Some(fire_time) = last_fire_time {
 }
 ```
 
-**Why this helps**: For continuous performance where distance never rises, time-based re-arming allows repeated gesture recognition.
+**Known issue**: Time-based re-arming can cause echo hits at regular intervals.
 
-**Known issue**: Time-based re-arming can cause echo hits at regular intervals (~1400ms with 700ms rearm delay).
-
-### Configuration Parameters
-
-```rust
-pub struct RecognitionConfig {
-    pub cooldown_ms: u64,           // Min time between hits (default: 400-500)
-    pub peak_history_size: usize,   // Frames for peak detection (default: 5)
-    pub max_sustain_frames: usize,  // Frames for sustained detection (default: 8)
-}
-```
-
-### Known Issues Being Tuned
-
-| Issue | Symptom | Cause | Potential Solutions |
-|-------|---------|-------|---------------------|
-| **Latency** | Hit fires slightly after gesture peak | Peak detection waits for ascending pattern | Reduce history size, or accept latency trade-off |
-| **Echoes** | Hits at ~1400ms intervals | Time-based re-arming too aggressive | Longer rearm delay, or smarter rearm logic |
-| **Missed hits** | Gesture performed but no hit | Re-arm threshold too strict | Lower rearm threshold, or use time-based |
-
-### Diagnostic Logging
-
-For tuning, log every recognition decision:
-
-```
-# Log format (tab-separated):
-TIMESTAMP	EVENT	DISTANCE	THRESHOLD	REASON
-
-# Events:
-REC  - Recognition check (every skip_factor frames)
-HIT  - Gesture fired (includes method: peak/sustained)
-NEAR - Almost hit but blocked (shows reason: not_armed, in_cooldown, etc.)
-
-# Example log:
-2026-01-28 02:03:51.123	REC	45.2	97.0	armed=true
-2026-01-28 02:03:51.189	HIT	38.1	97.0	peak_detection gesture=0
-2026-01-28 02:03:51.256	REC	42.8	97.0	armed=false (disarmed after hit)
-2026-01-28 02:03:52.590	NEAR	35.5	97.0	not_armed
-```
-
-### Implementation Checklist (Advanced)
-
-- [ ] Distance history buffer (VecDeque for peak detection)
-- [ ] Peak detection: descending→ascending pattern
-- [ ] Sustained detection: N frames below threshold
-- [ ] Unified `recognition_armed` state
-- [ ] Distance-based re-arming (hysteresis at 75%)
-- [ ] Time-based re-arming (2× cooldown fallback)
-- [ ] Diagnostic logging for tuning
-- [ ] Configurable parameters exposed in UI
+</details>
 
 ---
 

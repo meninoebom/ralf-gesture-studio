@@ -94,8 +94,10 @@ impl AppState {
     /// Sync recognizer with vocabulary
     fn sync_recognizer(&mut self) {
         let was_active = self.recognizer.is_active();
+        let use_best_template = self.recognizer.use_best_template();
 
         self.recognizer = Recognizer::with_config(600, 180, self.recognition_config.clone());
+        self.recognizer.set_use_best_template(use_best_template);
 
         for gesture in &self.vocabulary.gestures {
             self.recognizer.add_gesture(
@@ -107,6 +109,11 @@ impl AppState {
 
             for example in &gesture.examples {
                 self.recognizer.add_example(gesture.id, example.frames.clone());
+            }
+
+            // Set best template index for GRT-style recognition (loaded from vocabulary)
+            if let Some(recognizer_gesture) = self.recognizer.get_gesture_mut(gesture.id) {
+                recognizer_gesture.set_best_template_index(gesture.best_template_index);
             }
         }
 
@@ -160,8 +167,13 @@ impl AppState {
 
         if let Some(stats) = compute_threshold_stats(&examples, coefficient) {
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
-                gesture.update_statistics(stats.mean, stats.std);
+                gesture.update_statistics(stats.mean, stats.std, stats.best_template_index);
                 self.recognizer.set_threshold(gesture_id, gesture.threshold);
+
+                // Set best template index on recognizer for GRT-style recognition
+                if let Some(recognizer_gesture) = self.recognizer.get_gesture_mut(gesture_id) {
+                    recognizer_gesture.set_best_template_index(stats.best_template_index);
+                }
 
                 // Log training completion
                 if self.diagnostic_logger.is_enabled() {
@@ -216,6 +228,23 @@ impl AppState {
             // Feed to recognizer
             if let Some(result) = self.recognizer.process_frame(frame.clone()) {
                 let frame_num = self.osc_receiver.state.frame_count as usize;
+
+                // Log state transitions if diagnostics enabled
+                if self.diagnostic_logger.is_enabled() && self.mode == AppMode::Performance {
+                    for transition in self.recognizer.take_transitions() {
+                        let margin_pct = ((transition.threshold - transition.distance) / transition.threshold) * 100.0;
+                        self.diagnostic_logger.log(DiagnosticEvent::StateChange {
+                            gesture_name: transition.gesture_name,
+                            from_state: format!("{}", transition.transition.from_state),
+                            to_state: format!("{}", transition.transition.to_state),
+                            distance: transition.distance,
+                            threshold: transition.threshold,
+                            margin_pct,
+                            frames_in_state: transition.transition.frames_in_prev_state,
+                            reason: transition.transition.reason,
+                        });
+                    }
+                }
 
                 // Log diagnostic data if enabled
                 if self.diagnostic_logger.is_enabled() && self.mode == AppMode::Performance {
@@ -272,7 +301,6 @@ impl AppState {
 
         for (id, name, distance, threshold) in self.recognizer.current_distances() {
             let gesture = self.recognizer.get_gesture(id);
-            let armed = gesture.map(|g| g.is_armed()).unwrap_or(false);
             let in_cooldown = gesture.map(|g| g.in_cooldown(cooldown)).unwrap_or(false);
             let example_count = gesture.map(|g| g.example_count()).unwrap_or(0);
 
@@ -280,7 +308,7 @@ impl AppState {
                 name: name.clone(),
                 distance,
                 threshold,
-                armed,
+                armed: true, // Simple mode: always armed (cooldown handles repetition)
                 in_cooldown,
                 example_count,
             });
@@ -290,8 +318,6 @@ impl AppState {
                 // Near miss: within threshold + margin%, but didn't fire
                 if dist < threshold * (1.0 + near_miss_pct / 100.0) && dist >= threshold {
                     near_misses.push((name.clone(), dist, threshold, "above_threshold".to_string()));
-                } else if dist < threshold && !armed {
-                    near_misses.push((name.clone(), dist, threshold, "not_armed".to_string()));
                 } else if dist < threshold && in_cooldown {
                     near_misses.push((name.clone(), dist, threshold, "in_cooldown".to_string()));
                 }
@@ -461,11 +487,11 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
 
     let osc_status = OscStatusDto {
         input_status,
-        ms_since_last_frame: app.osc_receiver.ms_since_last_frame().unwrap_or(0) as u64,
+        ms_since_last_frame: app.osc_receiver.ms_since_last_frame().unwrap_or(0),
         input_error: app.osc_receiver.state.error_message.clone(),
         frame_count: app.osc_receiver.state.frame_count,
         output_status,
-        ms_since_last_send: app.osc_sender.ms_since_last_send().unwrap_or(0) as u64,
+        ms_since_last_send: app.osc_sender.ms_since_last_send().unwrap_or(0),
         output_error: app.osc_sender.state.error_message.clone(),
         send_count: app.osc_sender.state.send_count,
     };
@@ -634,7 +660,7 @@ pub fn save_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String>
     let mut dialog = rfd::FileDialog::new()
         .add_filter("RALF Vocabulary", &["ralf"])
         .set_title("Save Vocabulary")
-        .set_file_name(&format!("{}.ralf", vocab_name));
+        .set_file_name(format!("{}.ralf", vocab_name));
 
     if let Some(dir) = default_dir {
         dialog = dialog.set_directory(dir);
@@ -829,6 +855,26 @@ pub fn set_cooldown(state: State<Arc<Mutex<AppState>>>, ms: u64) -> Result<(), S
     app.recognizer.set_cooldown_ms(ms);
     Ok(())
 }
+
+/// Toggle between best template (Phase 3) and all examples (Wekinator-style) comparison
+/// Used for A/B testing Phase 3 changes
+#[tauri::command]
+pub fn toggle_best_template_mode(state: State<Arc<Mutex<AppState>>>) -> Result<bool, String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    let new_value = !app.recognizer.use_best_template();
+    app.recognizer.set_use_best_template(new_value);
+    Ok(new_value)
+}
+
+/// Get current comparison mode
+#[tauri::command]
+pub fn get_best_template_mode(state: State<Arc<Mutex<AppState>>>) -> Result<bool, String> {
+    let app = state.lock().map_err(|e| e.to_string())?;
+    Ok(app.recognizer.use_best_template())
+}
+
+// Motion gate commands removed in Phase 1 simplification
+// The simple Wekinator-style approach doesn't need motion gating
 
 #[tauri::command]
 pub fn enable_diagnostics(state: State<Arc<Mutex<AppState>>>) -> Result<String, String> {

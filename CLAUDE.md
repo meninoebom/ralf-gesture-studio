@@ -100,131 +100,158 @@ pub struct Vocabulary {
 
 **Migration**: v1.0 files are automatically upgraded when loaded (UUID generated, defaults applied).
 
-## Recognition Algorithm (Wekinator-Style)
+## Recognition Algorithm (VAD-Style State Machine)
 
-The recognizer uses a DTW approach modeled after Wekinator's proven implementation.
+The recognizer uses a DTW approach combined with a VAD (Voice Activity Detection) style state machine, borrowing patterns from speech recognition systems like CMU Sphinx, Kaldi, and WebRTC VAD.
 
-**Reference**: `fiebrink1/wekinator` - `src/wekimini/learning/dtw/DtwModel.java`
+**References**:
+- Wekinator: `fiebrink1/wekinator` - `src/wekimini/learning/dtw/DtwModel.java`
+- GRT: `nickgillian/grt` - `GRT/ClassificationModules/DTW/DTW.cpp`
+- CMU Sphinx VAD, WebRTC VAD
 
-### Breakthrough (2026-01-26)
+### Breakthrough (2026-01-29)
 
-**Simple implementations work best.** After multiple complex attempts failed:
-- Fixed window size (matches first training example length)
-- Compare against ALL training examples
-- Simple threshold check: distance < threshold = hit
-- Frame skipping (DTW every 4th frame) for performance
-- Downsampling (compare at 15fps, not 60fps) for performance
+**VAD-style state machine with time-based hangover** - After multiple complex approaches failed (peak detection, hysteresis, distance-based re-arming), this simple state machine works reliably:
 
-User successfully recognized gestures at threshold ~8000.
+```
+IDLE → BUILDING → PEAK (fire!) → RECOVERY → IDLE
+```
+
+Key success factors:
+- **Frame accumulation**: 3 consecutive frames below threshold (~200ms confirmation)
+- **Time-based hangover**: 300ms recovery blocks new detections
+- **No distance-based exit from recovery**: Critical for body tracking where resting distance is close to threshold
 
 ### How It Works
 
 1. **Fixed Window**: Window size = first training example's length
-2. **Compare Against All Examples**: For each gesture, compare against every training example (not just a prototype)
-3. **Simple Threshold Check**: If best distance < threshold, fire the gesture; otherwise return "no match"
-4. **Cooldown Period**: Prevent same gesture from firing repeatedly (default: 500ms)
-5. **Performance**: Skip frames + downsample = ~64x faster than naive implementation
+2. **Compare Against All Examples**: For each gesture, compare against every training example
+3. **State Machine**: Not simple threshold crossing - uses VAD-style states
+4. **Frame Accumulation**: Require 3 frames below threshold before firing
+5. **Time-Based Recovery**: 300ms hangover prevents echo, exits regardless of distance
+6. **Performance**: Skip frames + downsample = ~64x faster than naive implementation
 
-### Key Code (from recognizer.rs)
+### State Machine Flow
+
+```
+                    ┌─────────────┐
+                    │    IDLE     │◄──────────────────┐
+                    │  (armed)    │                   │
+                    └──────┬──────┘                   │
+                           │                          │
+          distance < threshold                        │
+                           │                          │
+                           ▼                          │
+                    ┌─────────────┐                   │
+                    │  BUILDING   │                   │
+                    │ (accumulate)│                   │
+                    └──────┬──────┘                   │
+                           │                          │
+          accumulated >= 3 frames (~200ms)            │
+                           │                          │
+                           ▼                          │
+              ┌────────────────────────┐              │
+              │         PEAK           │              │
+              │  *** FIRE GESTURE ***  │              │
+              └───────────┬────────────┘              │
+                          │                           │
+              immediately transition                  │
+                          │                           │
+                          ▼                           │
+                   ┌─────────────┐                    │
+                   │  RECOVERY   │                    │
+                   │ (hangover)  │────────────────────┘
+                   └─────────────┘
+                   after hangover_ms (300ms)
+```
+
+### ⚠️ Critical Learning: Time-Based Recovery Only
+
+**Recovery MUST exit based on time alone, NOT distance.**
+
+Why distance-based recovery fails:
+- With body tracking, "resting" distance is often still close to threshold
+- Example from real use: threshold=17, resting distance=21-24
+- If exit required distance > 25, user barely exceeds it
+- Bug caught: exit at 1.5× threshold caused stuck recognition (one hit, never re-arms)
 
 ```rust
-// Generate candidates between min/max example lengths
-let candidate_lengths = self.generate_candidate_lengths();
-
-// Compare against all examples for all gestures
-for candidate_len in &candidate_lengths {
-    let window = self.buffer.downsampled(*candidate_len, downsample_factor);
-    for gesture in &self.gestures {
-        for example in gesture.examples() {
-            let distance = dtw_distance(&window, example);
-            // Track best match...
-        }
+// CORRECT - time-based only
+RecognitionState::Recovery => {
+    if hangover_time_elapsed >= 300ms {
+        self.reset_to_idle();  // Ready for next gesture
     }
+    false  // Never fire in Recovery
 }
 
-// Simple threshold check (Wekinator-style)
-if best_distance < gesture.threshold {
-    return Some(hit);  // Matched!
-} else {
-    return Some(no_match);  // Idle state
+// WRONG - fails with body tracking
+if distance > threshold * 1.5 {  // User might never exceed this!
+    self.reset_to_idle();
 }
 ```
 
-### Configuration
+### Configuration (v0.5.0 Production)
 
 ```rust
 RecognitionConfig {
-    cooldown_ms: 500,           // Min time between same gesture hits
-    peak_history_size: 3,       // Frames to track for peak detection
-    max_sustain_frames: 8,      // Frames before sustained detection fires
+    cooldown_ms: 500,              // Backup protection (rarely used)
+    threshold_high_factor: 1.0,    // Entry at 100% of threshold
+    frames_to_fire: 3,             // ~200ms confirmation at 15Hz DTW
+    hangover_ms: 300,              // 300ms recovery before re-arming
 }
 ```
 
-### Advanced Recognition: Peak Detection + Sustained Detection (v0.4.0)
+### Real-World Results (2026-01-29)
 
-**Problem Solved**: Simple threshold crossing causes "stuck" recognition (fires once, never re-arms) or "echo" hits (multiple fires per gesture).
+Testing with "wings" gesture (lifting both arms):
+- **7 HITs, 0 false positives, 0 echo**
+- Threshold: 17 (AUTO from μ+σ)
+- Resting distance: ~21-24
+- Gesture distance: ~14-15 when performing
 
-**Solution**: Two-layer detection with armed/disarmed state:
+### Key Learnings (2026-01-29)
 
-#### 1. Peak Detection (Primary)
-Fire at **local minimum** of distance, not threshold crossing:
-```rust
-// Track distance history: [d1, d2, d3]
-// Fire when: d1 >= d2 AND d2 < d3 (valley detected)
-// AND d2 < threshold AND armed AND not in cooldown
-```
-This naturally handles gestures because:
-- Resting state has **flat** distance (no valley)
-- Gesture creates a **dip**: high → low → high
+1. **VAD patterns from speech recognition work** - frame accumulation + hangover
+2. **Time-based recovery is essential** - distance-based fails with body tracking
+3. **Simplification helps** - removed motion gate, adaptive threshold, peak detection
+4. **Frame accumulation prevents noise** - 3 frames = ~200ms confirmation
+5. **Hangover prevents echo** - 300ms blocks all new detections after fire
 
-#### 2. Sustained Detection (Fallback)
-For continuous gestures where user doesn't return to rest:
-```rust
-// If distance stays below threshold for 8 DTW frames (~1.6s), fire
-// This handles: perform → stay in gesture zone → perform again
-```
+### A/B Test: Best Template vs All Examples (2026-01-29)
 
-#### 3. Re-Arming Logic (Prevents Echoes)
-After any hit, recognition is **disarmed**. Two paths to re-arm:
-```rust
-// Path 1: Distance-based (returning to rest)
-if distance > threshold * 0.75 { armed = true; }
+Tested GRT-style "best template" (single most representative example) vs Wekinator-style "all examples" (minimum distance across all training examples):
 
-// Path 2: Time-based (continuous gesture mode)
-if time_since_fire > cooldown * 2 { armed = true; }
-```
+| Metric | Best Template | All Examples | Winner |
+|--------|---------------|--------------|--------|
+| Gestures Detected | 13 | 17 | **All Examples (+30%)** |
+| Echoes | 5 | 5 | Tie |
+| Detection Rate | 6.8/min | 9.5/min | **All Examples** |
 
-#### Key Learnings (2026-01-28)
+**Decision**: Default to "All Examples" comparison mode.
 
-1. **Threshold crossing alone fails** - causes stuck or echo behavior
-2. **Peak detection works for discrete gestures** - fire at the "best match" moment
-3. **Sustained detection handles continuous performance** - user stays in gesture zone
-4. **Re-arming is critical** - must balance echo prevention vs. responsiveness
-5. **Distance patterns matter**:
-   - Resting distance: typically 70-90% of threshold
-   - Gesture distance: typically 20-40% of threshold
-   - Re-arm threshold at 75% works when resting > 75%
-   - Time-based re-arm needed when user doesn't return to rest
+**Why All Examples wins for body tracking**:
+- Takes minimum distance across ALL training examples
+- More forgiving of gesture variations
+- User's natural performance varies more than GRT's audio gesture assumptions
 
-#### Current Issues Being Tuned
+**Why Best Template failed**:
+- Single template can't represent gesture variability
+- May pick a template closer to resting pose
+- Results in narrower "hit zone" that misses valid gestures
 
-| Issue | Cause | Potential Fix |
-|-------|-------|---------------|
-| **Latency** | Peak detection waits for rise | Reduce peak_history_size |
-| **Echo hits** | Time-based re-arm at 2×cooldown | Increase multiplier or disable |
-| **Missed gestures** | Re-arm threshold too high | Lower to 0.5× or use time-based only |
+**Note**: Toggle available in Performance mode UI for future A/B testing.
 
 #### Diagnostic Logging
 
 Enable via UI button to write detailed logs:
 ```
 # Format: timestamp,event_type,data...
-1234,REC,frame,buffer,window,gesture:dist:thresh:armed:cooldown,...
+1234,REC,frame,buffer,window,gesture:dist:thresh:armed,...
 1234,HIT,frame,gesture,distance,threshold,margin%
 1234,NEAR,frame,gesture,distance,threshold,margin%,reason
 ```
 
-Reasons for NEAR misses: `not_armed`, `above_threshold`, `in_cooldown`
+Reasons for NEAR misses: `in_cooldown`, `above_threshold`
 
 ### Statistical Threshold (μ+σ Approach)
 
@@ -258,6 +285,15 @@ threshold_coefficient: f32,        // Default 2.0 (μ + σ×coeff)
 See `.llm/active-plan.md` for detailed algorithm documentation and Wekinator source references.
 
 ## Implementation Status
+
+**v0.5.0 COMPLETE** - VAD-style state machine (2026-01-29):
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| State Machine | ✅ | Idle → Building → Peak → Recovery → Idle |
+| Frame Accumulation | ✅ | 3 frames below threshold to fire (~200ms) |
+| Time-Based Hangover | ✅ | 300ms recovery blocks new detections |
+| Simplification | ✅ | Removed motion gate, adaptive threshold, peak detection |
 
 **v0.3.0 COMPLETE** - Statistical threshold (μ+σ approach):
 

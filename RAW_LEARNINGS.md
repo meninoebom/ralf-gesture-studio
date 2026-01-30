@@ -23,6 +23,101 @@ A living document capturing insights, calibrations, bugs, and best practices dis
 
 ## Learnings Log
 
+### 2026-01-29 — Three-Layer Echo Defense: From 63% Echo Rate to 0%
+
+`[ALGORITHM]` `[CALIBRATION]`
+
+**Problem:** After implementing VAD-style state machine (v0.5.0), stress testing revealed 38 echoes across 60 HITs (63.3% echo rate). Echoes appeared in two patterns:
+1. **Same-gesture echoes**: Gesture fires, short recovery, fires again (window still contains gesture data)
+2. **Cross-gesture round-robin**: jump fires → spin fires → wave fires in rapid succession (different gestures aren't coordinated)
+
+**Root Cause Analysis:**
+
+| Echo Type | Root Cause | Why Previous Fix Failed |
+|-----------|-----------|------------------------|
+| Same-gesture | DTW sliding window (2033ms) retains gesture data longer than hangover (300ms). At re-arm, ~75% of window is stale gesture data. | Hangover was too short relative to window size |
+| Cross-gesture | No coordination between gestures. Gesture A fires → enters Recovery. Gesture B sees same window data → fires. | Each gesture's state machine was independent |
+| Threshold hover | Resting distance permanently below threshold (e.g., jump: rest=15, thresh=53). Distance never "clears" above threshold. | Distance-based re-arming assumed resting > threshold |
+
+**Solution: Three-Layer Defense**
+
+1. **Schmitt Trigger Hysteresis** (Recovery state): Track `min_distance_in_recovery` (not max). Re-arm only when minimum distance exceeds `threshold × rearm_safety_factor (1.1)` AND hangover elapsed. Uses minimum (not instantaneous) to prevent noise spikes from faking clearance.
+
+2. **Safety Valve Timeout** (`max_recovery_ms=5000`): Force re-arm after 5 seconds regardless of distance. Handles "always-on" gestures where resting distance is permanently below threshold.
+
+3. **Global Cooldown / Non-Maximum Suppression** (`global_cooldown_ms=1500`): After ANY gesture fires, ALL gestures are blocked from entering Building state for 1500ms. Eliminates cross-gesture round-robin entirely.
+
+**Results:**
+
+| Metric | Before | After |
+|--------|--------|-------|
+| HITs | 60 | 43 |
+| Echoes | 38 | 0 |
+| Echo rate | 63.3% | 0.0% |
+| Cross-gesture min gap | 66ms | 2029ms |
+
+**Key Finding:** In practice, `hysteresis_cleared` never triggers — all 41 Recovery→Idle transitions use `safety_valve_timeout`. This means resting distances are permanently below threshold for all gestures. The Schmitt trigger is a correct theoretical mechanism but the safety valve does the actual work. The global cooldown is the primary echo prevention mechanism.
+
+**Config values:**
+```rust
+RecognitionConfig {
+    hangover_ms: 300,              // Minimum recovery time
+    rearm_safety_factor: 1.1,      // Schmitt trigger: need 110% of threshold
+    max_recovery_ms: 5000,         // Safety valve: force re-arm after 5s
+    global_cooldown_ms: 1500,      // NMS: block all gestures after any hit
+}
+```
+
+**Design principle:** Layer defenses so each handles a different failure mode. Timer-based > distance-based for body tracking where resting pose is never "far" from gesture pose.
+
+---
+
+### 2026-01-29 — More Training Examples Stabilize Statistical Thresholds
+
+`[ALGORITHM]` `[CALIBRATION]`
+
+**Problem:** With 4 training examples per gesture, the μ+σ threshold was noisy. Jump had σ/μ = 0.56 (high coefficient of variation), meaning the threshold was sensitive to which examples happened to be recorded.
+
+**Discovery:** Increasing from 4 to 6 examples per gesture produced more stable thresholds:
+
+| Gesture | 4 examples (μ, σ, thresh) | 6 examples (μ, σ, thresh) |
+|---------|--------------------------|--------------------------|
+| wave | 8.1, 7.6, 23.2 | 28.7, 15.6, 59.8 |
+| jump | 22.2, 16.9, 56.1 | 24.6, 14.0, 52.7 |
+| spin | 6.2, 7.6, 21.3 | 17.5, 7.8, 33.0 |
+
+**Key insight:** With n=4 examples, there are only C(4,2)=6 pairwise distances to compute statistics from. With n=6, there are C(6,2)=15 pairwise distances — 2.5× more data points for the same number of examples. The statistical estimates become meaningfully more reliable.
+
+**Practical impact:** Jump's threshold tightened (56.1→52.7) because 6 examples captured the gesture's true variability better. Wave and spin thresholds increased because the additional examples revealed more natural variation that was previously undersampled.
+
+**Recommendation:** Minimum 6 examples per gesture for stable statistical thresholds. The μ+σ approach with coefficient=2.0 works well with this sample size. With only 3-4 examples, consider coefficient=2.5-3.0 to compensate for undersampled variance.
+
+**Statistical note:** μ+2σ assumes roughly unimodal distribution. With small sample sizes (n<6), the σ estimate is unreliable. This is the same reason quality control uses n≥25 for process capability studies — small samples underestimate true variance.
+
+---
+
+### 2026-01-29 — Sakoe-Chiba Band: Faster AND Better DTW
+
+`[ALGORITHM]` `[CALIBRATION]`
+
+**Problem:** Unconstrained DTW allows pathological warping paths where one frame maps to dozens of frames in the other sequence. This both wastes compute and produces misleading distances.
+
+**Discovery:** The Sakoe-Chiba band constraint (1978) limits the warping path to a diagonal band of width proportional to sequence length. With `band_fraction=0.15` (15%), DTW can only warp ±15% of the sequence length away from the diagonal.
+
+**Why this works for dance:** "Matches how dancers actually move — tempo varies, but structure doesn't." A dancer might perform a wave slightly faster or slower, but the arm still goes up before it comes down. The band prevents matching "arm up" in one sequence to "arm down" in another.
+
+**Performance impact:**
+- Unconstrained: O(N²) — compute full NxN matrix
+- Sakoe-Chiba 15%: O(N×B) where B = 0.15×N — ~85% fewer cells computed
+- Combined with early abandoning: additional 50-70% pruning of unpromising computations
+- Combined with LB_Keogh: additional 50-70% pruning before DTW even starts
+
+**Key insight from external review:** "One of those rare 'faster and better' constraints." The band doesn't just speed things up — it prevents bad alignments that would produce incorrect distances.
+
+**Do NOT use spatial resampling:** Spatial resampling (equidistant points from $1 Recognizer) destroys velocity information. A slow wave and fast wave become identical sequences. For dance, use temporal downsampling only (fixed frame rate), which preserves velocity because fast movements cover more space between frames.
+
+---
+
 ### 2026-01-27 — Clean Architecture Separation Enables UI Framework Swaps
 
 `[CODE QUALITY]` `[ARCHITECTURE]`
@@ -546,18 +641,23 @@ if is_hit {
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| Debounce (confirm_ms) | 80ms | Filters noise, stays responsive |
-| Cooldown (refractory_ms) | 500ms | Allows 2 hits/sec |
-| Training reps | 5 | Good balance of data vs time |
+| Cooldown (cooldown_ms) | 500ms | Per-gesture, allows 2 hits/sec |
+| Global cooldown (NMS) | 1500ms | Cross-gesture echo prevention |
+| Hangover (hangover_ms) | 300ms | Minimum recovery time |
+| Safety valve (max_recovery_ms) | 5000ms | Force re-arm timeout |
+| Rearm safety factor | 1.1 | Schmitt trigger: 110% of threshold |
+| Frames to fire | 3 | ~200ms confirmation at 15Hz DTW |
+| Sakoe-Chiba band | 0.15 | 15% warping constraint |
+| Training reps | 6+ | Minimum for stable μ+σ thresholds |
 | Training duration | 3.0s | Long enough for most gestures |
 | Training rest | 2.0s | Enough to reset position |
 | Countdown | 3.0s | Standard "3, 2, 1" |
-| Baseline duration | 3.0s | Enough frames to average |
 | Buffer size | 600 frames | ~10 sec at 60fps |
-| Window size | 180 frames | ~3 sec |
-| Threshold | Auto-calibrate | 80% of baseline distance |
+| Window size | First example length | ~2-3 sec typically |
+| Threshold coefficient | 2.0 | μ + σ×2.0 (with 6+ examples) |
+| Threshold | AUTO (μ+σ) | Statistical calibration preferred |
 | OSC host | 127.0.0.1 | NOT "localhost" |
 
 ---
 
-*Last updated: 2026-01-26*
+*Last updated: 2026-01-29*

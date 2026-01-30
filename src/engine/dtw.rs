@@ -140,6 +140,78 @@ pub fn dtw_distance_constrained(seq1: &Sequence, seq2: &Sequence, band_width: us
     cost[n][m]
 }
 
+/// Calculate DTW distance with Sakoe-Chiba band constraint and early abandoning.
+///
+/// This function combines two optimizations:
+/// 1. **Sakoe-Chiba band**: Limits warping to diagonal band, reducing O(N×M) to O(N×B)
+/// 2. **Early abandoning**: Stops computation if minimum possible distance exceeds `best_so_far`
+///
+/// The early abandoning works by tracking the minimum value in each row. If the minimum
+/// exceeds `best_so_far`, we can guarantee the final distance will also exceed it,
+/// so we abandon the computation.
+///
+/// # Arguments
+/// * `seq1` - First sequence
+/// * `seq2` - Second sequence
+/// * `band_width` - Maximum allowed deviation from diagonal (in frames)
+/// * `best_so_far` - Current best distance found; computation abandons if exceeded
+///
+/// # Returns
+/// `Some(distance)` if computation completes, `None` if abandoned (worse than `best_so_far`)
+pub fn dtw_distance_with_abandon(
+    seq1: &Sequence,
+    seq2: &Sequence,
+    band_width: usize,
+    best_so_far: f32,
+) -> Option<f32> {
+    if seq1.is_empty() || seq2.is_empty() {
+        return None; // Can't compute distance for empty sequences
+    }
+
+    let n = seq1.len();
+    let m = seq2.len();
+
+    // Use two rows instead of full matrix (memory optimization)
+    let mut prev_row = vec![f32::INFINITY; m + 1];
+    let mut curr_row = vec![f32::INFINITY; m + 1];
+    prev_row[0] = 0.0;
+
+    for i in 1..=n {
+        // Reset current row
+        curr_row.fill(f32::INFINITY);
+
+        // Calculate the band bounds for this row
+        let diagonal = (i * m) / n;
+        let j_min = diagonal.saturating_sub(band_width).max(1);
+        let j_max = (diagonal + band_width + 1).min(m);
+
+        // Track minimum value in this row for early abandoning
+        let mut row_min = f32::INFINITY;
+
+        for j in j_min..=j_max {
+            let dist = euclidean_distance(&seq1[i - 1], &seq2[j - 1]);
+
+            // Minimum of three possible moves (if within band)
+            let min_prev = prev_row[j - 1]
+                .min(prev_row[j])
+                .min(curr_row[j - 1]);
+
+            curr_row[j] = dist + min_prev;
+            row_min = row_min.min(curr_row[j]);
+        }
+
+        // Early abandon: if minimum possible path exceeds best, stop
+        if row_min > best_so_far {
+            return None;
+        }
+
+        // Swap rows for next iteration
+        std::mem::swap(&mut prev_row, &mut curr_row);
+    }
+
+    Some(prev_row[m])
+}
+
 /// Calculate normalized DTW distance with Sakoe-Chiba band constraint.
 ///
 /// Combines normalization with band constraint for efficient, length-independent matching.
@@ -218,6 +290,110 @@ pub fn find_best_match(input: &Sequence, examples: &[Sequence]) -> Option<(usize
     }
 
     Some((best_idx, best_dist))
+}
+
+// =========================================================================
+// LB_Keogh Lower Bound
+// =========================================================================
+
+/// Envelope for LB_Keogh lower bound computation.
+///
+/// The envelope consists of upper and lower bounds for each frame,
+/// computed by taking the max/min within a window around each position.
+/// This allows O(n) lower bound computation vs O(n²) full DTW.
+#[derive(Debug, Clone)]
+pub struct LBEnvelope {
+    /// Upper bound at each position (max within window)
+    pub upper: Sequence,
+    /// Lower bound at each position (min within window)
+    pub lower: Sequence,
+}
+
+/// Compute the LB_Keogh envelope for a sequence.
+///
+/// The envelope is computed by finding the max and min values within a
+/// window of `band_width` frames around each position. This envelope
+/// is used for fast lower bound computation.
+///
+/// # Arguments
+/// * `sequence` - The reference sequence (typically a training example)
+/// * `band_width` - The Sakoe-Chiba band width in frames
+///
+/// # Returns
+/// An `LBEnvelope` with upper and lower bounds for each frame.
+pub fn compute_lb_envelope(sequence: &Sequence, band_width: usize) -> LBEnvelope {
+    if sequence.is_empty() {
+        return LBEnvelope {
+            upper: Vec::new(),
+            lower: Vec::new(),
+        };
+    }
+
+    let n = sequence.len();
+    let dim = sequence[0].len();
+    let mut upper = Vec::with_capacity(n);
+    let mut lower = Vec::with_capacity(n);
+
+    for i in 0..n {
+        // Window bounds
+        let start = i.saturating_sub(band_width);
+        let end = (i + band_width + 1).min(n);
+
+        // Initialize with first frame in window
+        let mut u = sequence[start].clone();
+        let mut l = sequence[start].clone();
+
+        // Find max/min across window
+        for frame in sequence.iter().take(end).skip(start) {
+            for k in 0..dim {
+                u[k] = u[k].max(frame[k]);
+                l[k] = l[k].min(frame[k]);
+            }
+        }
+
+        upper.push(u);
+        lower.push(l);
+    }
+
+    LBEnvelope { upper, lower }
+}
+
+/// Compute the LB_Keogh lower bound distance.
+///
+/// This is a fast O(n) lower bound on the DTW distance. If the lower bound
+/// exceeds a threshold, we can skip the full DTW computation.
+///
+/// The lower bound is computed by measuring how much the candidate sequence
+/// lies outside the envelope of the reference sequence.
+///
+/// # Arguments
+/// * `candidate` - The candidate sequence (e.g., current window)
+/// * `envelope` - The precomputed envelope of the reference sequence
+///
+/// # Returns
+/// A lower bound on the DTW distance. The actual DTW distance is guaranteed
+/// to be >= this value.
+pub fn lb_keogh(candidate: &Sequence, envelope: &LBEnvelope) -> f32 {
+    if candidate.is_empty() || envelope.upper.is_empty() {
+        return f32::INFINITY;
+    }
+
+    let len = candidate.len().min(envelope.upper.len());
+    let mut lb_sum = 0.0;
+
+    for i in 0..len {
+        let dim = candidate[i].len().min(envelope.upper[i].len());
+        for k in 0..dim {
+            if candidate[i][k] > envelope.upper[i][k] {
+                lb_sum += (candidate[i][k] - envelope.upper[i][k]).powi(2);
+            } else if candidate[i][k] < envelope.lower[i][k] {
+                lb_sum += (envelope.lower[i][k] - candidate[i][k]).powi(2);
+            }
+            // If within envelope, contributes 0 to lower bound
+        }
+    }
+
+    lb_sum.sqrt()
 }
 
 // =========================================================================
@@ -606,6 +782,143 @@ mod tests {
 
         // Should be reasonably small for similar sequences
         assert!(normalized < 2.0, "Normalized distance should be small, got {}", normalized);
+    }
+
+    // =========================================================================
+    // Early Abandoning DTW Tests
+    // =========================================================================
+
+    #[test]
+    fn test_dtw_with_abandon_completes_when_better() {
+        // Two similar sequences - should compute full distance
+        let seq1: Vec<Vec<f32>> = (0..10).map(|i| vec![i as f32]).collect();
+        let seq2: Vec<Vec<f32>> = (0..10).map(|i| vec![(i as f32) + 0.5]).collect();
+
+        // With very high best_so_far, should complete
+        let result = dtw_distance_with_abandon(&seq1, &seq2, 3, f32::MAX);
+        assert!(result.is_some());
+
+        // Verify result matches constrained DTW
+        let expected = dtw_distance_constrained(&seq1, &seq2, 3);
+        assert!((result.unwrap() - expected).abs() < 0.01, "Should match constrained DTW");
+    }
+
+    #[test]
+    fn test_dtw_with_abandon_abandons_when_worse() {
+        // Two very different sequences
+        let seq1: Vec<Vec<f32>> = (0..10).map(|_| vec![0.0]).collect();
+        let seq2: Vec<Vec<f32>> = (0..10).map(|_| vec![100.0]).collect();
+
+        // With low best_so_far, should abandon
+        let result = dtw_distance_with_abandon(&seq1, &seq2, 3, 1.0);
+        assert!(result.is_none(), "Should abandon when distance exceeds best_so_far");
+    }
+
+    #[test]
+    fn test_dtw_with_abandon_empty_sequences() {
+        let empty: Sequence = vec![];
+        let seq = vec![vec![1.0]];
+
+        assert!(dtw_distance_with_abandon(&empty, &seq, 2, f32::MAX).is_none());
+        assert!(dtw_distance_with_abandon(&seq, &empty, 2, f32::MAX).is_none());
+    }
+
+    #[test]
+    fn test_dtw_with_abandon_identical_sequences() {
+        let seq = vec![vec![1.0], vec![2.0], vec![3.0], vec![4.0], vec![5.0]];
+
+        let result = dtw_distance_with_abandon(&seq, &seq, 2, f32::MAX);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 0.0);
+    }
+
+    // =========================================================================
+    // LB_Keogh Lower Bound Tests
+    // =========================================================================
+
+    #[test]
+    fn test_lb_envelope_creation() {
+        let seq = vec![
+            vec![1.0, 10.0],
+            vec![2.0, 20.0],
+            vec![3.0, 30.0],
+            vec![4.0, 40.0],
+            vec![5.0, 50.0],
+        ];
+
+        let envelope = compute_lb_envelope(&seq, 1);
+
+        assert_eq!(envelope.upper.len(), 5);
+        assert_eq!(envelope.lower.len(), 5);
+
+        // Middle element (index 2): window covers indices 1,2,3
+        // Upper should be max([2,20], [3,30], [4,40]) = [4, 40]
+        // Lower should be min(...) = [2, 20]
+        assert_eq!(envelope.upper[2], vec![4.0, 40.0]);
+        assert_eq!(envelope.lower[2], vec![2.0, 20.0]);
+    }
+
+    #[test]
+    fn test_lb_envelope_empty() {
+        let empty: Sequence = vec![];
+        let envelope = compute_lb_envelope(&empty, 2);
+        assert!(envelope.upper.is_empty());
+        assert!(envelope.lower.is_empty());
+    }
+
+    #[test]
+    fn test_lb_keogh_identical_sequences() {
+        let seq = vec![vec![1.0], vec![2.0], vec![3.0], vec![4.0], vec![5.0]];
+        let envelope = compute_lb_envelope(&seq, 2);
+
+        // Identical sequence should have LB = 0 (all within envelope)
+        let lb = lb_keogh(&seq, &envelope);
+        assert_eq!(lb, 0.0);
+    }
+
+    #[test]
+    fn test_lb_keogh_outside_envelope() {
+        let reference = vec![vec![5.0], vec![5.0], vec![5.0]];
+        let envelope = compute_lb_envelope(&reference, 0); // Band=0, tight envelope
+
+        // Candidate outside the envelope
+        let candidate = vec![vec![10.0], vec![10.0], vec![10.0]];
+
+        let lb = lb_keogh(&candidate, &envelope);
+
+        // Each point is 5 units above upper bound
+        // LB = sqrt(5^2 + 5^2 + 5^2) = sqrt(75) ≈ 8.66
+        let expected = (75.0_f32).sqrt();
+        assert!((lb - expected).abs() < 0.01, "Expected ~8.66, got {}", lb);
+    }
+
+    #[test]
+    fn test_lb_keogh_is_lower_bound() {
+        // LB_Keogh should always be <= actual DTW distance
+        let seq1: Vec<Vec<f32>> = (0..10).map(|i| vec![i as f32]).collect();
+        let seq2: Vec<Vec<f32>> = (0..10).map(|i| vec![(i as f32) + 3.0]).collect();
+
+        let band_width = 2;
+        let envelope = compute_lb_envelope(&seq1, band_width);
+        let lb = lb_keogh(&seq2, &envelope);
+        let dtw = dtw_distance_constrained(&seq2, &seq1, band_width);
+
+        assert!(
+            lb <= dtw,
+            "LB_Keogh ({}) should be <= DTW distance ({})",
+            lb,
+            dtw
+        );
+    }
+
+    #[test]
+    fn test_lb_keogh_empty() {
+        let empty: Sequence = vec![];
+        let seq = vec![vec![1.0]];
+        let envelope = compute_lb_envelope(&seq, 1);
+
+        assert_eq!(lb_keogh(&empty, &envelope), f32::INFINITY);
+        assert_eq!(lb_keogh(&seq, &LBEnvelope { upper: vec![], lower: vec![] }), f32::INFINITY);
     }
 
     // =========================================================================

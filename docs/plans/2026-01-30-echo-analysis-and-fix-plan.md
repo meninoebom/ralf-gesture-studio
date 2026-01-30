@@ -603,8 +603,8 @@ All Recovery→Idle transitions use reason: `extended_hangover_complete` (never 
 - [x] Block Idle→Building entry during global cooldown
 - [x] Set `last_any_hit_time` when any gesture fires
 - [x] Global cooldown suppression passed to state machine via `in_global_cooldown` param
-- [ ] Test: verify spin/wave echoes eliminated (requires real-world testing)
-- [ ] Test: verify cross-gesture cycling eliminated (requires real-world testing)
+- [x] Test: verify spin/wave echoes eliminated — **0 echoes across 43 HITs (2026-01-29 test)**
+- [x] Test: verify cross-gesture cycling eliminated — **min gap 2029ms, all beyond 1500ms global cooldown**
 
 ### Phase 2: Schmitt Trigger Hysteresis
 - [x] Add `min_distance_in_recovery` to GestureState (initialize to f32::MAX)

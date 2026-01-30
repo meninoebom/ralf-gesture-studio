@@ -54,16 +54,25 @@ pub struct RecognitionConfig {
     /// Blocks new detections to prevent echo
     pub hangover_ms: u64,
 
-    // --- Echo guard (hysteresis re-arming) ---
+    // --- Schmitt trigger hysteresis (echo guard) ---
 
-    /// Factor for re-arm threshold (distance must exceed threshold × this factor to re-arm quickly)
-    /// Example: 1.3 means distance must rise 30% above threshold to exit Recovery early
-    /// If distance never exceeds this, use extended_hangover_ms instead
-    pub rearm_threshold_factor: f32,
+    /// Safety factor for Schmitt trigger re-arming.
+    /// After firing, distance must *consistently* exceed threshold × this factor to re-arm.
+    /// Uses min_distance tracking (not max) to prevent flickering on noise spikes.
+    /// Example: 1.1 means distance must stay 10% above threshold.
+    pub rearm_safety_factor: f32,
 
-    /// Extended hangover time (ms) used when distance never exceeds rearm_threshold
-    /// This is the fallback path for "sticky" distances that hover near threshold
-    pub extended_hangover_ms: u64,
+    /// Maximum time in Recovery before forcing re-arm (safety valve, ms).
+    /// Prevents permanent stuck state when resting distance < threshold (e.g., jump).
+    pub max_recovery_ms: u64,
+
+    // --- Global echo suppression (NMS) ---
+
+    /// Global cooldown after ANY gesture fires (ms).
+    /// Blocks all gestures from entering Building during this period.
+    /// Prevents cross-gesture round-robin echo chains.
+    /// (Temporal equivalent of Non-Maximum Suppression in object detection)
+    pub global_cooldown_ms: u64,
 
     // --- DTW optimization ---
 
@@ -84,10 +93,12 @@ impl Default for RecognitionConfig {
             frames_to_fire: 3,
             // Hangover: block new detections for 300ms after firing
             hangover_ms: 300,
-            // Echo guard: distance must exceed 30% above threshold to re-arm quickly
-            rearm_threshold_factor: 1.3,
-            // Extended hangover: 500ms if distance never clearly exceeds threshold
-            extended_hangover_ms: 500,
+            // Schmitt trigger: distance must stay 10% above threshold to re-arm
+            rearm_safety_factor: 1.1,
+            // Safety valve: force re-arm after 5s (prevents stuck state for jump)
+            max_recovery_ms: 5000,
+            // Global cooldown: 1500ms after any gesture fires, block all from Building
+            global_cooldown_ms: 1500,
             // Sakoe-Chiba band: 15% of sequence length (recommended for gesture recognition)
             sakoe_chiba_band: 0.15,
         }
@@ -183,8 +194,9 @@ pub struct GestureState {
     frames_below_threshold: usize,
     /// When we entered Recovery state (for hangover timing)
     recovery_start: Option<Instant>,
-    /// Maximum distance seen during Recovery state (for hysteresis re-arming)
-    max_distance_in_recovery: f32,
+    /// Minimum distance seen during Recovery state (for Schmitt trigger re-arming).
+    /// Tracking min ensures distance was *consistently* above threshold, not just spiked once.
+    min_distance_in_recovery: f32,
     /// History of recent distance values (for slope detection)
     distance_history: VecDeque<f32>,
 }
@@ -206,7 +218,7 @@ impl GestureState {
             state: RecognitionState::Idle,
             frames_below_threshold: 0,
             recovery_start: None,
-            max_distance_in_recovery: 0.0,
+            min_distance_in_recovery: f32::MAX,
             distance_history: VecDeque::with_capacity(DISTANCE_HISTORY_SIZE),
         }
     }
@@ -278,7 +290,7 @@ impl GestureState {
         self.state = RecognitionState::Idle;
         self.frames_below_threshold = 0;
         self.recovery_start = None;
-        self.max_distance_in_recovery = 0.0;
+        self.min_distance_in_recovery = f32::MAX;
         // Note: We don't clear distance_history here - it's useful for the next detection
     }
 
@@ -311,10 +323,13 @@ impl GestureState {
 
     /// Process a distance value through the state machine.
     /// Returns result with fire signal and any state transition that occurred.
+    ///
+    /// `in_global_cooldown`: If true, blocks Idle→Building entry (NMS suppression).
     fn process_state_machine(
         &mut self,
         distance: f32,
         config: &RecognitionConfig,
+        in_global_cooldown: bool,
     ) -> StateMachineResult {
         // Record distance for slope detection (before state processing)
         self.record_distance(distance);
@@ -325,9 +340,10 @@ impl GestureState {
 
         let (should_fire, new_state, reason) = match self.state {
             RecognitionState::Idle => {
-                // Check if distance is below entry threshold AND falling
-                // The slope check reduces false triggers on noise/echo with flat minima
-                if distance < entry_threshold && self.is_distance_falling(distance) {
+                if in_global_cooldown {
+                    // Global cooldown active - suppress all new detections (NMS)
+                    (false, None, "")
+                } else if distance < entry_threshold && self.is_distance_falling(distance) {
                     // Start building
                     self.state = RecognitionState::Building;
                     self.frames_below_threshold = 1;
@@ -377,33 +393,40 @@ impl GestureState {
             }
 
             RecognitionState::Recovery => {
-                // Track max distance seen during recovery (for hysteresis)
-                self.max_distance_in_recovery = self.max_distance_in_recovery.max(distance);
+                // Schmitt trigger: track min distance (for consistent above-threshold check)
+                self.min_distance_in_recovery = self.min_distance_in_recovery.min(distance);
 
                 let elapsed = self.recovery_start
                     .map(|t| t.elapsed())
                     .unwrap_or(Duration::ZERO);
 
-                let hangover = Duration::from_millis(config.hangover_ms);
-                let extended_hangover = Duration::from_millis(config.extended_hangover_ms);
-                let rearm_threshold = self.threshold * config.rearm_threshold_factor;
+                let min_hangover = Duration::from_millis(config.hangover_ms);
+                let max_recovery = Duration::from_millis(config.max_recovery_ms);
+                let rearm_threshold = self.threshold * config.rearm_safety_factor;
 
-                // Dual-path re-arming (hysteresis echo guard):
-                // Path 1: Distance clearly exceeded rearm threshold + standard hangover
-                // Path 2: Extended hangover (for sticky distances that hover near threshold)
-                let can_rearm = if self.max_distance_in_recovery > rearm_threshold {
-                    // Fast path: distance went clearly above threshold
-                    elapsed >= hangover
+                // Schmitt trigger hysteresis:
+                // Re-arm when min_distance (not max!) consistently exceeds threshold.
+                // min_distance means the distance STAYED above threshold during recovery,
+                // not just spiked briefly due to noise.
+                let distance_cleared = self.min_distance_in_recovery > rearm_threshold;
+
+                let can_rearm = if distance_cleared && elapsed >= min_hangover {
+                    // Normal re-arm: distance consistently above threshold + minimum hangover
+                    true
+                } else if elapsed >= max_recovery {
+                    // Safety valve: force re-arm after max recovery time
+                    // (prevents permanent stuck state for gestures like jump
+                    //  where resting distance is below threshold)
+                    true
                 } else {
-                    // Slow path: distance stayed near threshold, wait longer
-                    elapsed >= extended_hangover
+                    false
                 };
 
                 if can_rearm {
-                    let reason = if self.max_distance_in_recovery > rearm_threshold {
-                        "hangover_complete_distance_exceeded"
+                    let reason = if distance_cleared {
+                        "hysteresis_cleared"
                     } else {
-                        "extended_hangover_complete"
+                        "safety_valve_timeout"
                     };
                     self.reset_to_idle();
                     (false, Some(RecognitionState::Idle), reason)
@@ -499,6 +522,8 @@ pub struct Recognizer {
     use_best_template: bool,
     /// Pending state transitions to be logged (cleared after retrieval)
     pending_transitions: Vec<GestureStateTransition>,
+    /// When any gesture last fired (for global cooldown / NMS)
+    last_any_hit_time: Option<Instant>,
 }
 
 impl Recognizer {
@@ -523,6 +548,7 @@ impl Recognizer {
             downsample: 4,    // Compare at 15fps
             use_best_template: false, // Default: compare ALL examples (Wekinator-style, more responsive)
             pending_transitions: Vec::new(),
+            last_any_hit_time: None,
         }
     }
 
@@ -652,6 +678,7 @@ impl Recognizer {
 
     pub fn start(&mut self) {
         self.active = true;
+        self.last_any_hit_time = None;
 
         // Compute LB_Keogh envelopes for all gestures
         // Band width is computed from config (default 15%)
@@ -773,6 +800,11 @@ impl Recognizer {
             distances.push((idx, best_for_gesture));
         }
 
+        // Check global cooldown (NMS: suppress all detections after any hit)
+        let in_global_cooldown = self.last_any_hit_time
+            .map(|t| t.elapsed() < Duration::from_millis(self.config.global_cooldown_ms))
+            .unwrap_or(false);
+
         // Update gesture distances for UI and run state machines
         let mut hit_result: Option<(u32, String, f32, f32)> = None;
 
@@ -794,7 +826,7 @@ impl Recognizer {
                     .unwrap_or(false);
 
                 if is_best {
-                    let result = gesture.process_state_machine(dist, &self.config);
+                    let result = gesture.process_state_machine(dist, &self.config, in_global_cooldown);
 
                     // Collect state transition for logging
                     if let Some(transition) = result.transition {
@@ -826,6 +858,8 @@ impl Recognizer {
 
         // Return hit if we fired
         if let Some((id, name, distance, threshold)) = hit_result {
+            // Set global cooldown timestamp (NMS: suppress all gestures)
+            self.last_any_hit_time = Some(Instant::now());
             return Some(RecognitionResult {
                 gesture_id: Some(id),
                 gesture_name: Some(name),
@@ -984,7 +1018,7 @@ mod tests {
         let config = RecognitionConfig::default();
 
         // Distance below threshold should transition to Building
-        let result = gesture.process_state_machine(50.0, &config);
+        let result = gesture.process_state_machine(50.0, &config, false);
         assert!(!result.should_fire);
         assert_eq!(gesture.recognition_state(), RecognitionState::Building);
         assert_eq!(gesture.frames_below_threshold, 1);
@@ -1004,13 +1038,13 @@ mod tests {
         };
 
         // Accumulate frames
-        gesture.process_state_machine(50.0, &config); // Building, count=1
+        gesture.process_state_machine(50.0, &config, false); // Building, count=1
         assert_eq!(gesture.recognition_state(), RecognitionState::Building);
 
-        gesture.process_state_machine(45.0, &config); // Building, count=2
+        gesture.process_state_machine(45.0, &config, false); // Building, count=2
         assert_eq!(gesture.recognition_state(), RecognitionState::Building);
 
-        let result = gesture.process_state_machine(40.0, &config); // Peak!
+        let result = gesture.process_state_machine(40.0, &config, false); // Peak!
         assert!(result.should_fire);
         assert_eq!(gesture.recognition_state(), RecognitionState::Peak);
         // Should have a transition to Peak
@@ -1025,11 +1059,11 @@ mod tests {
         let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
         let config = RecognitionConfig::default();
 
-        gesture.process_state_machine(50.0, &config); // Building
+        gesture.process_state_machine(50.0, &config, false); // Building
         assert_eq!(gesture.recognition_state(), RecognitionState::Building);
 
         // Distance rises above threshold - should reset to Idle
-        let result = gesture.process_state_machine(150.0, &config);
+        let result = gesture.process_state_machine(150.0, &config, false);
         assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
         assert_eq!(gesture.frames_below_threshold, 0);
         // Should have a transition back to Idle
@@ -1048,12 +1082,12 @@ mod tests {
         };
 
         // First frame below threshold: Idle → Building → Peak (fires)
-        let result = gesture.process_state_machine(50.0, &config);
+        let result = gesture.process_state_machine(50.0, &config, false);
         assert!(result.should_fire, "Should fire when frames_to_fire=1");
         assert_eq!(gesture.recognition_state(), RecognitionState::Peak);
 
         // Next frame should transition Peak → Recovery
-        let result = gesture.process_state_machine(50.0, &config);
+        let result = gesture.process_state_machine(50.0, &config, false);
         assert_eq!(gesture.recognition_state(), RecognitionState::Recovery);
         assert!(result.transition.is_some());
         let t = result.transition.unwrap();
@@ -1062,71 +1096,130 @@ mod tests {
     }
 
     #[test]
-    fn test_state_machine_recovery_exits_fast_when_distance_exceeds_rearm() {
-        // Test the "fast path": distance exceeds rearm threshold → exit after standard hangover
+    fn test_state_machine_recovery_schmitt_trigger_hysteresis_cleared() {
+        // Test Schmitt trigger: distance consistently above threshold → re-arm after hangover
         let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
         let config = RecognitionConfig {
             frames_to_fire: 1,
             hangover_ms: 50,
-            rearm_threshold_factor: 1.3,      // rearm_threshold = 130
-            extended_hangover_ms: 200,        // Extended would be 200ms
+            rearm_safety_factor: 1.1,  // rearm_threshold = 110
+            max_recovery_ms: 5000,
             ..Default::default()
         };
 
         // Go to Peak and then Recovery
-        gesture.process_state_machine(50.0, &config); // Peak
-        gesture.process_state_machine(50.0, &config); // Recovery
+        gesture.process_state_machine(50.0, &config, false); // Peak
+        gesture.process_state_machine(50.0, &config, false); // Recovery
 
-        // Distance exceeds rearm threshold (130)
-        gesture.process_state_machine(150.0, &config); // max_distance_in_recovery = 150
+        // Distance consistently above rearm threshold (110)
+        // min_distance_in_recovery tracks the minimum, so all values must exceed 110
+        gesture.process_state_machine(150.0, &config, false); // min = 150
+        gesture.process_state_machine(120.0, &config, false); // min = 120
 
-        // Wait for standard hangover only (50ms)
+        // Wait for standard hangover (50ms)
         std::thread::sleep(Duration::from_millis(60));
 
-        // Should exit via fast path (distance exceeded rearm threshold)
-        let result = gesture.process_state_machine(150.0, &config);
+        // Should exit via hysteresis_cleared (min_distance 120 > 110)
+        let result = gesture.process_state_machine(130.0, &config, false);
         assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
         assert!(result.transition.is_some());
         let t = result.transition.unwrap();
         assert_eq!(t.to_state, RecognitionState::Idle);
-        assert_eq!(t.reason, "hangover_complete_distance_exceeded");
+        assert_eq!(t.reason, "hysteresis_cleared");
     }
 
     #[test]
-    fn test_state_machine_recovery_exits_slow_when_distance_stays_low() {
-        // Test the "slow path": distance stays near threshold → exit after extended hangover
+    fn test_state_machine_recovery_schmitt_trigger_blocked_by_dip() {
+        // Test Schmitt trigger: if distance dips below threshold even once, don't re-arm via hysteresis
         let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
         let config = RecognitionConfig {
             frames_to_fire: 1,
             hangover_ms: 50,
-            rearm_threshold_factor: 1.3,      // rearm_threshold = 130
-            extended_hangover_ms: 100,        // Extended is 100ms
+            rearm_safety_factor: 1.1,  // rearm_threshold = 110
+            max_recovery_ms: 200,      // Short safety valve for test
             ..Default::default()
         };
 
         // Go to Peak and then Recovery
-        gesture.process_state_machine(50.0, &config); // Peak
-        gesture.process_state_machine(50.0, &config); // Recovery
+        gesture.process_state_machine(50.0, &config, false); // Peak
+        gesture.process_state_machine(50.0, &config, false); // Recovery
 
-        // Distance stays below rearm threshold (always 50 < 130)
-        gesture.process_state_machine(50.0, &config);
+        // Distance goes high but dips once below rearm threshold
+        gesture.process_state_machine(150.0, &config, false); // min = 150
+        gesture.process_state_machine(90.0, &config, false);  // min = 90 (below 110!)
+        gesture.process_state_machine(150.0, &config, false); // min stays 90
 
-        // Wait for standard hangover (50ms) - should NOT exit yet
+        // Wait for hangover
         std::thread::sleep(Duration::from_millis(60));
-        let result = gesture.process_state_machine(50.0, &config);
+
+        // Should NOT re-arm via hysteresis (min_distance 90 < 110)
+        let result = gesture.process_state_machine(150.0, &config, false);
         assert_eq!(gesture.recognition_state(), RecognitionState::Recovery);
         assert!(result.transition.is_none());
 
-        // Wait for extended hangover (100ms total from Recovery start)
-        std::thread::sleep(Duration::from_millis(50)); // Total ~110ms
+        // Wait for safety valve (200ms total)
+        std::thread::sleep(Duration::from_millis(200));
 
-        // Now should exit via slow path
-        let result = gesture.process_state_machine(50.0, &config);
+        // Safety valve forces re-arm
+        let result = gesture.process_state_machine(150.0, &config, false);
         assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
         assert!(result.transition.is_some());
         let t = result.transition.unwrap();
         assert_eq!(t.to_state, RecognitionState::Idle);
-        assert_eq!(t.reason, "extended_hangover_complete");
+        assert_eq!(t.reason, "safety_valve_timeout");
+    }
+
+    #[test]
+    fn test_state_machine_recovery_safety_valve_timeout() {
+        // Test safety valve: distance never clears threshold → forced re-arm after max_recovery_ms
+        let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
+        let config = RecognitionConfig {
+            frames_to_fire: 1,
+            hangover_ms: 50,
+            rearm_safety_factor: 1.1,  // rearm_threshold = 110
+            max_recovery_ms: 100,      // Short safety valve for test
+            ..Default::default()
+        };
+
+        // Go to Peak and then Recovery
+        gesture.process_state_machine(50.0, &config, false); // Peak
+        gesture.process_state_machine(50.0, &config, false); // Recovery
+
+        // Distance stays low (below rearm threshold of 110)
+        gesture.process_state_machine(50.0, &config, false); // min = 50
+
+        // Wait for hangover but NOT safety valve
+        std::thread::sleep(Duration::from_millis(60));
+        let result = gesture.process_state_machine(50.0, &config, false);
+        assert_eq!(gesture.recognition_state(), RecognitionState::Recovery);
+
+        // Wait for safety valve
+        std::thread::sleep(Duration::from_millis(50)); // Total ~110ms > 100ms
+
+        let result = gesture.process_state_machine(50.0, &config, false);
+        assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
+        assert!(result.transition.is_some());
+        let t = result.transition.unwrap();
+        assert_eq!(t.to_state, RecognitionState::Idle);
+        assert_eq!(t.reason, "safety_valve_timeout");
+    }
+
+    #[test]
+    fn test_global_cooldown_blocks_building_entry() {
+        // Test that global cooldown (NMS) blocks Idle→Building entry
+        let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
+        let config = RecognitionConfig::default();
+
+        // Distance below threshold but global cooldown active → stay in Idle
+        let result = gesture.process_state_machine(50.0, &config, true); // in_global_cooldown=true
+        assert!(!result.should_fire);
+        assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
+        assert!(result.transition.is_none()); // No transition — suppressed by NMS
+
+        // Same distance without global cooldown → enters Building
+        let result = gesture.process_state_machine(40.0, &config, false); // in_global_cooldown=false
+        assert!(!result.should_fire);
+        assert_eq!(gesture.recognition_state(), RecognitionState::Building);
     }
 
     #[test]
@@ -1136,22 +1229,22 @@ mod tests {
         let config = RecognitionConfig::default();
 
         // Start with high distance, build some history
-        gesture.process_state_machine(150.0, &config);
-        gesture.process_state_machine(150.0, &config);
-        gesture.process_state_machine(150.0, &config);
+        gesture.process_state_machine(150.0, &config, false);
+        gesture.process_state_machine(150.0, &config, false);
+        gesture.process_state_machine(150.0, &config, false);
         assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
 
         // Drop to below threshold but flat (same value) - should NOT enter Building
         // because distance is not falling
-        gesture.process_state_machine(50.0, &config); // First below threshold
+        gesture.process_state_machine(50.0, &config, false); // First below threshold
         // This puts 50.0 in history, but prior was 150.0, so slope is negative (falling)
         // So this will actually enter Building because 50 < 150 means falling
 
         // Let me test with truly flat: distance stays at same low value
         let mut gesture2 = GestureState::new(2, "wave2", "/gesture/2", 100.0);
-        gesture2.process_state_machine(50.0, &config); // History: [50]
-        gesture2.process_state_machine(50.0, &config); // History: [50, 50]
-        gesture2.process_state_machine(50.0, &config); // History: [50, 50, 50]
+        gesture2.process_state_machine(50.0, &config, false); // History: [50]
+        gesture2.process_state_machine(50.0, &config, false); // History: [50, 50]
+        gesture2.process_state_machine(50.0, &config, false); // History: [50, 50, 50]
 
         // Now distance is flat at 50 (below threshold)
         // Current = 50, prev = 50, slope = 0 which is < 0.05*50 = 2.5
@@ -1160,8 +1253,8 @@ mod tests {
 
         // Test rising: distance starts below threshold but rises slightly
         let mut gesture3 = GestureState::new(3, "wave3", "/gesture/3", 100.0);
-        gesture3.process_state_machine(40.0, &config); // History: [40]
-        gesture3.process_state_machine(45.0, &config); // History: [40, 45] - rising 12.5%
+        gesture3.process_state_machine(40.0, &config, false); // History: [40]
+        gesture3.process_state_machine(45.0, &config, false); // History: [40, 45] - rising 12.5%
         // slope = 45-40 = 5, threshold = 0.05*45 = 2.25
         // 5 > 2.25, so this is rising and should NOT enter Building
         // Actually let me check: the first 40 enters Building because it's falling from infinity
@@ -1178,9 +1271,9 @@ mod tests {
         let config = RecognitionConfig::default();
 
         // Start with high distance, build some history
-        gesture.process_state_machine(150.0, &config);
-        gesture.process_state_machine(120.0, &config); // Falling
-        gesture.process_state_machine(90.0, &config);  // Falling, below threshold
+        gesture.process_state_machine(150.0, &config, false);
+        gesture.process_state_machine(120.0, &config, false); // Falling
+        gesture.process_state_machine(90.0, &config, false);  // Falling, below threshold
 
         // Should have entered Building when distance dropped below threshold while falling
         // Check: 90 < 100 (threshold) and 90 < 120 (prev) so slope is negative

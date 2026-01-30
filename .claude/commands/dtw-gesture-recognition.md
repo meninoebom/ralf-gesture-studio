@@ -373,53 +373,39 @@ Distance scale depends on:
 ```rust
 struct GestureTemplate {
     examples: Vec<Sequence>,
-    best_template: Sequence,  // Example with lowest avg distance to others
-    training_mu: f32,         // Mean distance during training
-    training_sigma: f32,      // Std dev of distances during training
+    training_mu: f32,         // Mean pairwise distance during training
+    training_sigma: f32,      // Std dev of pairwise distances during training
     threshold: f32,           // mu + sigma * coefficient
 }
 
 fn compute_threshold(examples: &[Sequence], null_rejection_coeff: f32) -> ThresholdStats {
     // 1. Compute all pairwise DTW distances
-    let mut all_distances: Vec<Vec<f32>> = Vec::new();
-    for (i, ex_i) in examples.iter().enumerate() {
-        let distances: Vec<f32> = examples.iter()
-            .enumerate()
-            .filter(|(j, _)| *j != i)
-            .map(|(_, ex_j)| dtw_distance(ex_i, ex_j))
-            .collect();
-        all_distances.push(distances);
+    let mut all_distances: Vec<f32> = Vec::new();
+    for i in 0..examples.len() {
+        for j in (i + 1)..examples.len() {
+            let dist = dtw_distance(&examples[i], &examples[j]);
+            if dist.is_finite() {
+                all_distances.push(dist);
+            }
+        }
     }
 
-    // 2. Find best template (lowest average distance to others)
-    let avg_distances: Vec<f32> = all_distances.iter()
-        .map(|d| d.iter().sum::<f32>() / d.len() as f32)
-        .collect();
-    let best_idx = avg_distances.iter()
-        .enumerate()
-        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-        .map(|(i, _)| i)
-        .unwrap();
-
-    // 3. Compute mu and sigma from distances to best template
-    let distances_to_best: Vec<f32> = examples.iter()
-        .enumerate()
-        .filter(|(i, _)| *i != best_idx)
-        .map(|(_, ex)| dtw_distance(&examples[best_idx], ex))
-        .collect();
-
-    let mu = distances_to_best.iter().sum::<f32>() / distances_to_best.len() as f32;
-    let variance = distances_to_best.iter()
+    // 2. Compute mu and sigma from all pairwise distances
+    let n = all_distances.len() as f32;
+    let mu = all_distances.iter().sum::<f32>() / n;
+    let variance = all_distances.iter()
         .map(|d| (d - mu).powi(2))
-        .sum::<f32>() / distances_to_best.len() as f32;
+        .sum::<f32>() / n;
     let sigma = variance.sqrt();
 
-    // 4. Compute threshold
+    // 3. Compute threshold
     let threshold = mu + sigma * null_rejection_coeff;
 
-    ThresholdStats { best_template: examples[best_idx].clone(), mu, sigma, threshold }
+    ThresholdStats { mu, sigma, threshold }
 }
 ```
+
+> **Note (v0.7.0)**: An earlier version selected a "best template" (example with lowest average distance to others) and computed statistics relative to it. A/B testing showed this was strictly worse than using all examples — 30% fewer gestures detected. The best template approach was removed in v0.7.0.
 
 **Parameters**:
 
@@ -449,9 +435,11 @@ fn classify_with_likelihood(
     window: &Sequence,
     gestures: &[GestureTemplate],
 ) -> Option<usize> {
-    // 1. Compute distances to all gestures
+    // 1. Compute distances to all gestures (minimum across all examples)
     let distances: Vec<f32> = gestures.iter()
-        .map(|g| dtw_distance(window, &g.best_template))
+        .map(|g| g.examples.iter()
+            .map(|ex| dtw_distance(window, ex))
+            .fold(f32::INFINITY, f32::min))
         .collect();
 
     // 2. Find best match
@@ -527,9 +515,7 @@ GestureState (runtime)
 | Downsample | 4 | Compare ~30 frame sequences |
 | Per-gesture cooldown | 500ms | Minimum between same-gesture hits |
 | Global cooldown (NMS) | 1500ms | Block all gestures after any hit |
-| Hangover | 300ms | Minimum recovery time |
 | Safety valve | 5000ms | Force re-arm timeout |
-| Rearm safety factor | 1.1 | Schmitt trigger: 110% of threshold |
 | Frames to fire | 3 | ~200ms confirmation at 15Hz DTW |
 | Sakoe-Chiba band | 0.15 | 15% warping constraint |
 | Threshold | AUTO (μ+σ×2.0) | 6+ examples recommended |
@@ -572,7 +558,7 @@ GestureState (runtime)
 
 ### The Solution: VAD-Style State Machine
 
-A state machine with **frame accumulation** for confirmation and **time-based hangover** for echo prevention.
+A state machine with **frame accumulation** for confirmation and **time-based recovery** (safety valve + global cooldown) for echo prevention.
 
 ```
                     ┌─────────────┐
@@ -601,48 +587,39 @@ A state machine with **frame accumulation** for confirmation and **time-based ha
                           ▼                           │
                    ┌─────────────┐                    │
                    │  RECOVERY   │                    │
-                   │ (hangover)  │────────────────────┘
+                   │(safety valve)│───────────────────┘
                    └─────────────┘
-                   after hangover_ms (300ms)
+                   after max_recovery_ms (5000ms)
 ```
 
-### ⚠️ CRITICAL INSIGHT: Three-Layer Echo Defense
+### ⚠️ CRITICAL INSIGHT: Two-Layer Echo Defense (v0.7.0)
 
-**The #1 learning**: A single mechanism cannot prevent all echo types. Three layers are needed:
+**The #1 learning**: A single mechanism cannot prevent all echo types. Two layers are needed:
 
 | Layer | Mechanism | What It Prevents |
 |-------|-----------|-----------------|
-| **1. Schmitt Trigger** | Track `min_distance` in Recovery, re-arm when min > threshold×1.1 | Same-gesture re-trigger from noise spikes |
-| **2. Safety Valve** | Force re-arm after `max_recovery_ms` (5s) | Stuck recovery when resting distance < threshold |
-| **3. Global Cooldown (NMS)** | Block ALL gestures for 1500ms after ANY hit | Cross-gesture round-robin echoes |
+| **1. Safety Valve** | Force re-arm after `max_recovery_ms` (5s) | Stuck recovery when resting distance < threshold |
+| **2. Global Cooldown (NMS)** | Block ALL gestures for 1500ms after ANY hit | Cross-gesture round-robin echoes |
 
 **Why distance-based recovery alone fails**:
 - With body tracking, resting distance is often permanently below threshold
 - Example: jump threshold=53, resting distance=15. Distance NEVER clears above threshold.
-- The safety valve (time-based) handles this case; the Schmitt trigger handles the case where distance does clear.
+- The safety valve (time-based) handles this — timer-based recovery is essential for body tracking.
 
-**What works** (Schmitt trigger + safety valve + global NMS):
+**What works** (safety valve + global NMS):
 ```rust
 RecognitionState::Recovery => {
-    // Track minimum distance (not instantaneous) - prevents noise spike faking clearance
-    self.min_distance_in_recovery = self.min_distance_in_recovery.min(distance);
-    let elapsed = self.recovery_start.map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
+    let elapsed = self.recovery_start
+        .map(|t| t.elapsed())
+        .unwrap_or(Duration::ZERO);
+    let max_recovery = Duration::from_millis(config.max_recovery_ms);
 
-    let rearm_threshold = self.threshold * config.rearm_safety_factor; // 1.1
-    let distance_cleared = self.min_distance_in_recovery > rearm_threshold;
-
-    let can_rearm = if distance_cleared && elapsed >= min_hangover {
-        true  // Normal: distance consistently above threshold
-    } else if elapsed >= max_recovery {
-        true  // Safety valve: force re-arm after 5s
-    } else {
-        false
-    };
-
-    if can_rearm {
+    if elapsed >= max_recovery {
         self.reset_to_idle();
+        (false, Some(RecognitionState::Idle), "safety_valve_timeout")
+    } else {
+        (false, None, "")
     }
-    false
 }
 
 // In process_frame, BEFORE the per-gesture loop:
@@ -657,7 +634,7 @@ if in_global_cooldown {
 }
 ```
 
-**Real-world finding (2026-01-29)**: In testing with 3 gestures × 6 examples, `hysteresis_cleared` never triggered — all 41 Recovery→Idle transitions used `safety_valve_timeout`. Resting distances are permanently below threshold for all gestures. The global cooldown is the primary echo prevention mechanism. Design defenses in layers so each handles a different failure mode.
+**History**: An earlier version (v0.6.0) included a third layer — Schmitt trigger hysteresis — that tracked `min_distance` in Recovery and re-armed when consistently above `threshold × 1.1`. Across 55+ hits in two production sessions, the hysteresis path never fired; all Recovery→Idle transitions used the safety valve timeout. Resting distances run at 4-8% of threshold, permanently below the re-arm point. The Schmitt trigger was removed in v0.7.0 as provably dead code.
 
 ### Why This Works
 
@@ -665,21 +642,17 @@ if in_global_cooldown {
 |-----------|---------|--------------|
 | **Frame accumulation** | Prevents noise spikes from firing | 3 frames = ~200ms of consistent low distance |
 | **Distance slope check** | Prevents entry during noise/flat sections | Only enter Building when distance is falling |
-| **Schmitt trigger** | Prevents same-gesture re-trigger | Track min_distance; noise spikes can't fake clearance |
 | **Safety valve timeout** | Prevents stuck recovery | Force re-arm after 5s even if distance stays low |
 | **Global cooldown (NMS)** | Prevents cross-gesture echoes | Block ALL gestures for 1.5s after ANY hit |
 | **Sakoe-Chiba band** | Prevents pathological DTW warping | Better distances + 85% fewer cells computed |
 
-### Production Configuration
+### Production Configuration (v0.7.0)
 
 ```rust
 pub struct RecognitionConfig {
     pub cooldown_ms: 500,              // Per-gesture minimum between hits
     pub threshold_high_factor: 1.0,    // Entry at 100% of threshold
     pub frames_to_fire: 3,             // ~200ms confirmation at 15Hz DTW
-    pub hangover_ms: 300,              // Minimum recovery time
-    // Schmitt trigger hysteresis
-    pub rearm_safety_factor: 1.1,      // Re-arm when min_distance > threshold × 1.1
     pub max_recovery_ms: 5000,         // Safety valve: force re-arm after 5s
     // Global non-maximum suppression
     pub global_cooldown_ms: 1500,      // Block ALL gestures after ANY hit
@@ -688,24 +661,31 @@ pub struct RecognitionConfig {
 }
 ```
 
-### Real-World Results (2026-01-29, v0.6.0)
+### Real-World Results
 
-Testing with 3 gestures (wave, jump, spin), 6 examples each:
+**Session 1 (2026-01-29, v0.6.0)** — 3 gestures, 6 examples each:
 - **43 HITs, 0 echoes (0.0% echo rate)**
 - Previous: 60 HITs, 38 echoes (63.3% echo rate)
-- All Recovery→Idle via safety valve timeout (hysteresis never clears — resting < threshold)
+- All Recovery→Idle via safety valve timeout
 - Cross-gesture minimum gap: 2029ms (global cooldown prevents round-robin)
 - 45 Building entries, 44 Peak fires, 0 aborted (100% Building→Peak conversion)
 
+**Session 2 (2026-01-30, v0.7.0)** — 3 gestures, 38 examples total (12/17/9):
+- **12 HITs, 0 echoes (0.0% echo rate)**
+- All Recovery→Idle via safety valve timeout
+- Hit margins: 94-97% below threshold (massive headroom)
+- More training examples = more consistent detection
+
 **Threshold values (AUTO, coefficient=2.0):**
 
-| Gesture | μ | σ | Threshold | Resting Distance |
-|---------|---|---|-----------|-----------------|
-| wave | 28.7 | 15.6 | 59.8 | 12-54 |
-| jump | 24.6 | 14.0 | 52.7 | 9-18 |
-| spin | 17.5 | 7.8 | 33.0 | 7-14 |
+| Gesture | Examples | μ | σ | Threshold |
+|---------|----------|---|---|-----------|
+| wave (Session 1) | 6 | 28.7 | 15.6 | 59.8 |
+| wave (Session 2) | 12 | ~107 | ~55 | 216.3 |
+| jump (Session 2) | 17 | ~148 | ~93 | 334.1 |
+| spin (Session 2) | 9 | ~108 | ~64 | 236.9 |
 
-**Known issue:** Resting distances are permanently below threshold for all gestures. The safety valve handles this, but jump has long recovery times (up to 42.8s) because it stays in Recovery while other gestures are "best match." Future fix: per-gesture coefficients or resting baseline calibration.
+**Key observation:** Resting distances run at 4-8% of threshold for all gestures. The system is fundamentally a rate-limiting system on an always-triggered signal. The safety valve handles this cleanly.
 
 ### Log Pattern for Successful Recognition
 
@@ -718,11 +698,11 @@ timestamp,REC,frame,buffer,window,wings:14:27:1
 timestamp,REC,frame,buffer,window,wings:14:27:1  # Building (3 frames)
 timestamp,HIT,frame,wings,14.2,27.0,47%          # FIRE!
 timestamp,REC,frame,buffer,window,wings:15:27:0:in_cooldown  # Recovery
-# ... 300ms later ...
+# ... 5000ms later (safety valve) ...
 timestamp,REC,frame,buffer,window,wings:68:27:1  # Re-armed, ready
 ```
 
-### Implementation (from recognizer.rs, v0.6.0)
+### Implementation (from recognizer.rs, v0.7.0)
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -730,7 +710,7 @@ pub enum RecognitionState {
     Idle,      // Waiting for gesture, ready to detect
     Building,  // Distance below threshold, accumulating frames
     Peak,      // Gesture detected, fire OSC
-    Recovery,  // Hangover period, blocking new detections
+    Recovery,  // Safety valve period, blocking new detections
 }
 
 fn process_state_machine(
@@ -740,7 +720,6 @@ fn process_state_machine(
     in_global_cooldown: bool,  // NMS: true if ANY gesture fired recently
 ) -> StateMachineResult {
     let entry_threshold = self.threshold * config.threshold_high_factor;
-    let hangover = Duration::from_millis(config.hangover_ms);
     let max_recovery = Duration::from_millis(config.max_recovery_ms);
 
     match self.state {
@@ -779,30 +758,21 @@ fn process_state_machine(
         RecognitionState::Peak => {
             self.state = RecognitionState::Recovery;
             self.recovery_start = Some(Instant::now());
-            self.min_distance_in_recovery = f32::MAX;
             (false, Some(RecognitionState::Recovery))
         }
 
         RecognitionState::Recovery => {
-            // Schmitt trigger: track MINIMUM distance (not instantaneous)
-            self.min_distance_in_recovery = self.min_distance_in_recovery.min(distance);
-            let elapsed = self.recovery_start.map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
+            // Safety valve: force re-arm after max_recovery_ms
+            let elapsed = self.recovery_start
+                .map(|t| t.elapsed())
+                .unwrap_or(Duration::ZERO);
 
-            let rearm_threshold = self.threshold * config.rearm_safety_factor;
-            let distance_cleared = self.min_distance_in_recovery > rearm_threshold;
-
-            let can_rearm = if distance_cleared && elapsed >= hangover {
-                true  // Hysteresis cleared: distance consistently above threshold
-            } else if elapsed >= max_recovery {
-                true  // Safety valve: force re-arm after max_recovery_ms
-            } else {
-                false
-            };
-
-            if can_rearm {
+            if elapsed >= max_recovery {
                 self.reset_to_idle();
+                (false, Some(RecognitionState::Idle), "safety_valve_timeout")
+            } else {
+                (false, None, "")
             }
-            (false, if can_rearm { Some(RecognitionState::Idle) } else { None })
         }
     }
 }
@@ -820,17 +790,20 @@ self.last_any_hit_time = Some(Instant::now());
 
 ### What We Removed (Simplification)
 
-| Removed | Why |
-|---------|-----|
-| `AdaptiveThreshold` | Computed from wrong data, over-complicated |
-| Motion gate | Blocked recognition when it shouldn't |
-| Calibration step | Not needed with statistical threshold |
-| Armed/disarmed tracking | State machine handles this implicitly |
-| Peak detection (local minima) | Frame accumulation is simpler and works |
-| Simple distance-based re-arming | Fails when resting distance ≈ threshold; replaced with Schmitt trigger + safety valve |
-| Spatial resampling | Destroys velocity info critical for dance |
+| Removed | Version | Why |
+|---------|---------|-----|
+| `AdaptiveThreshold` | v0.5.0 | Computed from wrong data, over-complicated |
+| Motion gate | v0.5.0 | Blocked recognition when it shouldn't |
+| Calibration step | v0.5.0 | Not needed with statistical threshold |
+| Armed/disarmed tracking | v0.5.0 | State machine handles this implicitly |
+| Peak detection (local minima) | v0.5.0 | Frame accumulation is simpler and works |
+| Simple distance-based re-arming | v0.5.0 | Fails when resting distance ≈ threshold; replaced with safety valve |
+| Spatial resampling | v0.5.0 | Destroys velocity info critical for dance |
+| Schmitt trigger hysteresis | v0.7.0 | Never fired in 55+ hits across 2 sessions; resting distance always below re-arm threshold |
+| Best template comparison | v0.7.0 | Lost A/B test by 30% detection rate vs all-examples comparison |
+| `hangover_ms` | v0.7.0 | Only used by Schmitt trigger path; became dead code when hysteresis removed |
 
-**Result**: ~500 lines → ~400 lines, 0% echo rate (from 63.3%).
+**Result**: ~500 lines → ~350 lines, 0% echo rate (from 63.3%).
 
 ---
 
@@ -965,7 +938,7 @@ When recognition isn't working well:
 
 ### Key Metrics
 
-| Metric | Target | Achieved (v0.6.0) | How to Measure |
+| Metric | Target | Achieved (v0.7.0) | How to Measure |
 |--------|--------|-------------------|----------------|
 | Latency | <200ms | ~200ms | Time from distance dip to HIT (3 frames × 67ms) |
 | Echo rate | 0% | 0% (0/43) | HITs within 2s of previous same-gesture HIT |

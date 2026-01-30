@@ -3,7 +3,6 @@
 //! Based on research from GRT, Wekinator, and speech recognition (VAD):
 //!
 //! **Key patterns from speech recognition**:
-//! - Hysteresis: Entry threshold ≠ exit threshold (prevents stuck state)
 //! - Frame accumulation: Require N consecutive frames (prevents noise spikes)
 //! - Hangover: Stay in recovery state for M ms (prevents echo)
 //!
@@ -54,17 +53,6 @@ pub struct RecognitionConfig {
     /// (at ~15Hz DTW rate, 3 frames = ~200ms of confirmation)
     pub frames_to_fire: usize,
 
-    /// Hangover time in ms after firing (Recovery state duration)
-    /// Blocks new detections to prevent echo
-    pub hangover_ms: u64,
-
-    // --- Schmitt trigger hysteresis (echo guard) ---
-    /// Safety factor for Schmitt trigger re-arming.
-    /// After firing, distance must *consistently* exceed threshold × this factor to re-arm.
-    /// Uses min_distance tracking (not max) to prevent flickering on noise spikes.
-    /// Example: 1.1 means distance must stay 10% above threshold.
-    pub rearm_safety_factor: f32,
-
     /// Maximum time in Recovery before forcing re-arm (safety valve, ms).
     /// Prevents permanent stuck state when resting distance < threshold (e.g., jump).
     pub max_recovery_ms: u64,
@@ -92,10 +80,6 @@ impl Default for RecognitionConfig {
             threshold_high_factor: 1.0,
             // Frame accumulation: require 3 consecutive frames (~200ms at 15Hz DTW)
             frames_to_fire: 3,
-            // Hangover: block new detections for 300ms after firing
-            hangover_ms: 300,
-            // Schmitt trigger: distance must stay 10% above threshold to re-arm
-            rearm_safety_factor: 1.1,
             // Safety valve: force re-arm after 5s (prevents stuck state for jump)
             max_recovery_ms: 5000,
             // Global cooldown: 1500ms after any gesture fires, block all from Building
@@ -181,12 +165,6 @@ pub struct GestureState {
     pub current_distance: Option<f32>,
     pub last_hit_time: Option<Instant>,
 
-    // --- GRT-style best template selection ---
-    /// Index of the best template (example with lowest average distance to others)
-    /// Used during recognition to compare only against this representative example.
-    /// Falls back to comparing all examples if None or fewer than 3 examples.
-    best_template_index: Option<usize>,
-
     // --- VAD state machine ---
     /// Current state in the recognition state machine
     state: RecognitionState,
@@ -194,9 +172,6 @@ pub struct GestureState {
     frames_below_threshold: usize,
     /// When we entered Recovery state (for hangover timing)
     recovery_start: Option<Instant>,
-    /// Minimum distance seen during Recovery state (for Schmitt trigger re-arming).
-    /// Tracking min ensures distance was *consistently* above threshold, not just spiked once.
-    min_distance_in_recovery: f32,
     /// History of recent distance values (for slope detection)
     distance_history: VecDeque<f32>,
 }
@@ -212,20 +187,12 @@ impl GestureState {
             lb_envelopes: Vec::new(),
             current_distance: None,
             last_hit_time: None,
-            // GRT-style best template selection
-            best_template_index: None,
             // VAD state machine
             state: RecognitionState::Idle,
             frames_below_threshold: 0,
             recovery_start: None,
-            min_distance_in_recovery: f32::MAX,
             distance_history: VecDeque::with_capacity(DISTANCE_HISTORY_SIZE),
         }
-    }
-
-    /// Set the best template index (computed during training)
-    pub fn set_best_template_index(&mut self, index: Option<usize>) {
-        self.best_template_index = index;
     }
 
     pub fn add_example(&mut self, example: Sequence) {
@@ -285,7 +252,6 @@ impl GestureState {
         self.state = RecognitionState::Idle;
         self.frames_below_threshold = 0;
         self.recovery_start = None;
-        self.min_distance_in_recovery = f32::MAX;
         // Note: We don't clear distance_history here - it's useful for the next detection
     }
 
@@ -395,44 +361,15 @@ impl GestureState {
             }
 
             RecognitionState::Recovery => {
-                // Schmitt trigger: track min distance (for consistent above-threshold check)
-                self.min_distance_in_recovery = self.min_distance_in_recovery.min(distance);
-
                 let elapsed = self
                     .recovery_start
                     .map(|t| t.elapsed())
                     .unwrap_or(Duration::ZERO);
-
-                let min_hangover = Duration::from_millis(config.hangover_ms);
                 let max_recovery = Duration::from_millis(config.max_recovery_ms);
-                let rearm_threshold = self.threshold * config.rearm_safety_factor;
 
-                // Schmitt trigger hysteresis:
-                // Re-arm when min_distance (not max!) consistently exceeds threshold.
-                // min_distance means the distance STAYED above threshold during recovery,
-                // not just spiked briefly due to noise.
-                let distance_cleared = self.min_distance_in_recovery > rearm_threshold;
-
-                let can_rearm = if distance_cleared && elapsed >= min_hangover {
-                    // Normal re-arm: distance consistently above threshold + minimum hangover
-                    true
-                } else if elapsed >= max_recovery {
-                    // Safety valve: force re-arm after max recovery time
-                    // (prevents permanent stuck state for gestures like jump
-                    //  where resting distance is below threshold)
-                    true
-                } else {
-                    false
-                };
-
-                if can_rearm {
-                    let reason = if distance_cleared {
-                        "hysteresis_cleared"
-                    } else {
-                        "safety_valve_timeout"
-                    };
+                if elapsed >= max_recovery {
                     self.reset_to_idle();
-                    (false, Some(RecognitionState::Idle), reason)
+                    (false, Some(RecognitionState::Idle), "safety_valve_timeout")
                 } else {
                     (false, None, "")
                 }
@@ -519,10 +456,6 @@ pub struct Recognizer {
     dtw_skip: usize,
     /// Downsample factor for DTW (compare at 15fps instead of 60fps)
     downsample: usize,
-    /// Whether to use GRT-style best template selection (Phase 3)
-    /// When true: Compare only to best template for gestures with 3+ examples
-    /// When false: Compare to ALL examples (Wekinator-style)
-    use_best_template: bool,
     /// Pending state transitions to be logged (cleared after retrieval)
     pending_transitions: Vec<GestureStateTransition>,
     /// When any gesture last fired (for global cooldown / NMS)
@@ -543,9 +476,8 @@ impl Recognizer {
             active: false,
             window_size,
             frame_count: 0,
-            dtw_skip: 4,              // Compute DTW every 4th frame (15Hz @ 60fps input)
-            downsample: 4,            // Compare at 15fps
-            use_best_template: false, // Default: compare ALL examples (Wekinator-style, more responsive)
+            dtw_skip: 4,   // Compute DTW every 4th frame (15Hz @ 60fps input)
+            downsample: 4, // Compare at 15fps
             pending_transitions: Vec::new(),
             last_any_hit_time: None,
         }
@@ -620,18 +552,6 @@ impl Recognizer {
 
     pub fn set_cooldown_ms(&mut self, ms: u64) {
         self.config.cooldown_ms = ms;
-    }
-
-    /// Set whether to use GRT-style best template selection (Phase 3)
-    /// When true: Compare only to best template for gestures with 3+ examples
-    /// When false: Compare to ALL examples (Wekinator-style, pre-Phase 3)
-    pub fn set_use_best_template(&mut self, use_it: bool) {
-        self.use_best_template = use_it;
-    }
-
-    /// Get whether using best template selection
-    pub fn use_best_template(&self) -> bool {
-        self.use_best_template
     }
 
     pub fn add_gesture(&mut self, id: u32, name: &str, osc_address: &str, threshold: f32) {
@@ -710,26 +630,7 @@ impl Recognizer {
                 continue;
             }
 
-            let (examples, envelopes) = if self.use_best_template && gesture.examples().len() >= 3 {
-                // GRT-style: compare only to best template (most representative example)
-                if let Some(best_idx) = gesture.best_template_index {
-                    if best_idx < gesture.examples().len() {
-                        let envelope_slice = if best_idx < gesture.lb_envelopes().len() {
-                            &gesture.lb_envelopes()[best_idx..=best_idx]
-                        } else {
-                            &[] as &[LBEnvelope]
-                        };
-                        (&gesture.examples()[best_idx..=best_idx], envelope_slice)
-                    } else {
-                        (gesture.examples(), gesture.lb_envelopes())
-                    }
-                } else {
-                    (gesture.examples(), gesture.lb_envelopes())
-                }
-            } else {
-                // Wekinator-style: compare against ALL examples
-                (gesture.examples(), gesture.lb_envelopes())
-            };
+            let (examples, envelopes) = (gesture.examples(), gesture.lb_envelopes());
 
             let dist = Self::find_best_distance(
                 window,
@@ -1078,88 +979,12 @@ mod tests {
     }
 
     #[test]
-    fn test_state_machine_recovery_schmitt_trigger_hysteresis_cleared() {
-        // Test Schmitt trigger: distance consistently above threshold → re-arm after hangover
-        let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
-        let config = RecognitionConfig {
-            frames_to_fire: 1,
-            hangover_ms: 50,
-            rearm_safety_factor: 1.1, // rearm_threshold = 110
-            max_recovery_ms: 5000,
-            ..Default::default()
-        };
-
-        // Go to Peak and then Recovery
-        gesture.process_state_machine(50.0, &config, false); // Peak
-        gesture.process_state_machine(50.0, &config, false); // Recovery
-
-        // Distance consistently above rearm threshold (110)
-        // min_distance_in_recovery tracks the minimum, so all values must exceed 110
-        gesture.process_state_machine(150.0, &config, false); // min = 150
-        gesture.process_state_machine(120.0, &config, false); // min = 120
-
-        // Wait for standard hangover (50ms)
-        std::thread::sleep(Duration::from_millis(60));
-
-        // Should exit via hysteresis_cleared (min_distance 120 > 110)
-        let result = gesture.process_state_machine(130.0, &config, false);
-        assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
-        assert!(result.transition.is_some());
-        let t = result.transition.unwrap();
-        assert_eq!(t.to_state, RecognitionState::Idle);
-        assert_eq!(t.reason, "hysteresis_cleared");
-    }
-
-    #[test]
-    fn test_state_machine_recovery_schmitt_trigger_blocked_by_dip() {
-        // Test Schmitt trigger: if distance dips below threshold even once, don't re-arm via hysteresis
-        let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
-        let config = RecognitionConfig {
-            frames_to_fire: 1,
-            hangover_ms: 50,
-            rearm_safety_factor: 1.1, // rearm_threshold = 110
-            max_recovery_ms: 200,     // Short safety valve for test
-            ..Default::default()
-        };
-
-        // Go to Peak and then Recovery
-        gesture.process_state_machine(50.0, &config, false); // Peak
-        gesture.process_state_machine(50.0, &config, false); // Recovery
-
-        // Distance goes high but dips once below rearm threshold
-        gesture.process_state_machine(150.0, &config, false); // min = 150
-        gesture.process_state_machine(90.0, &config, false); // min = 90 (below 110!)
-        gesture.process_state_machine(150.0, &config, false); // min stays 90
-
-        // Wait for hangover
-        std::thread::sleep(Duration::from_millis(60));
-
-        // Should NOT re-arm via hysteresis (min_distance 90 < 110)
-        let result = gesture.process_state_machine(150.0, &config, false);
-        assert_eq!(gesture.recognition_state(), RecognitionState::Recovery);
-        assert!(result.transition.is_none());
-
-        // Wait for safety valve (200ms total)
-        std::thread::sleep(Duration::from_millis(200));
-
-        // Safety valve forces re-arm
-        let result = gesture.process_state_machine(150.0, &config, false);
-        assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
-        assert!(result.transition.is_some());
-        let t = result.transition.unwrap();
-        assert_eq!(t.to_state, RecognitionState::Idle);
-        assert_eq!(t.reason, "safety_valve_timeout");
-    }
-
-    #[test]
     fn test_state_machine_recovery_safety_valve_timeout() {
-        // Test safety valve: distance never clears threshold → forced re-arm after max_recovery_ms
+        // Test safety valve: forced re-arm after max_recovery_ms
         let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
         let config = RecognitionConfig {
             frames_to_fire: 1,
-            hangover_ms: 50,
-            rearm_safety_factor: 1.1, // rearm_threshold = 110
-            max_recovery_ms: 100,     // Short safety valve for test
+            max_recovery_ms: 100, // Short safety valve for test
             ..Default::default()
         };
 
@@ -1167,10 +992,10 @@ mod tests {
         gesture.process_state_machine(50.0, &config, false); // Peak
         gesture.process_state_machine(50.0, &config, false); // Recovery
 
-        // Distance stays low (below rearm threshold of 110)
-        gesture.process_state_machine(50.0, &config, false); // min = 50
+        // Distance stays low
+        gesture.process_state_machine(50.0, &config, false);
 
-        // Wait for hangover but NOT safety valve
+        // Wait less than safety valve
         std::thread::sleep(Duration::from_millis(60));
         gesture.process_state_machine(50.0, &config, false);
         assert_eq!(gesture.recognition_state(), RecognitionState::Recovery);

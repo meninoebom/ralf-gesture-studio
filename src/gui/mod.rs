@@ -100,10 +100,8 @@ impl AppState {
     /// Sync recognizer with vocabulary
     fn sync_recognizer(&mut self) {
         let was_active = self.recognizer.is_active();
-        let use_best_template = self.recognizer.use_best_template();
 
         self.recognizer = Recognizer::with_config(600, 180, self.recognition_config.clone());
-        self.recognizer.set_use_best_template(use_best_template);
 
         for gesture in &self.vocabulary.gestures {
             self.recognizer.add_gesture(
@@ -116,11 +114,6 @@ impl AppState {
             for example in &gesture.examples {
                 self.recognizer
                     .add_example(gesture.id, example.frames.clone());
-            }
-
-            // Set best template index for GRT-style recognition (loaded from vocabulary)
-            if let Some(recognizer_gesture) = self.recognizer.get_gesture_mut(gesture.id) {
-                recognizer_gesture.set_best_template_index(gesture.best_template_index);
             }
         }
 
@@ -176,13 +169,8 @@ impl AppState {
 
         if let Some(stats) = compute_threshold_stats(&examples, coefficient) {
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
-                gesture.update_statistics(stats.mean, stats.std, stats.best_template_index);
+                gesture.update_statistics(stats.mean, stats.std);
                 self.recognizer.set_threshold(gesture_id, gesture.threshold);
-
-                // Set best template index on recognizer for GRT-style recognition
-                if let Some(recognizer_gesture) = self.recognizer.get_gesture_mut(gesture_id) {
-                    recognizer_gesture.set_best_template_index(stats.best_template_index);
-                }
 
                 // Log training completion
                 if self.diagnostic_logger.is_enabled() {
@@ -906,24 +894,8 @@ pub fn set_cooldown(state: State<Arc<Mutex<AppState>>>, ms: u64) -> Result<(), S
     Ok(())
 }
 
-/// Toggle between best template (Phase 3) and all examples (Wekinator-style) comparison
-/// Used for A/B testing Phase 3 changes
-#[tauri::command]
-pub fn toggle_best_template_mode(state: State<Arc<Mutex<AppState>>>) -> Result<bool, String> {
-    let mut app = state.lock().map_err(|e| e.to_string())?;
-    let new_value = !app.recognizer.use_best_template();
-    app.recognizer.set_use_best_template(new_value);
-    Ok(new_value)
-}
-
-/// Get current comparison mode
-#[tauri::command]
-pub fn get_best_template_mode(state: State<Arc<Mutex<AppState>>>) -> Result<bool, String> {
-    let app = state.lock().map_err(|e| e.to_string())?;
-    Ok(app.recognizer.use_best_template())
-}
-
 // Motion gate commands removed in Phase 1 simplification
+// Best template commands removed — A/B test showed All Examples wins by 30%
 // The simple Wekinator-style approach doesn't need motion gating
 
 #[tauri::command]

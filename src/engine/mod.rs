@@ -2,7 +2,7 @@
 //!
 //! This module contains the core algorithms for gesture recognition,
 //! using a Wekinator-style DTW approach with VAD-style state machine
-//! and three-layer echo defense.
+//! and two-layer echo defense (safety valve + global cooldown).
 //!
 //! ## Architecture
 //!

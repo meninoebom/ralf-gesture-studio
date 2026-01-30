@@ -39,8 +39,6 @@ fn main() {
             gui::set_threshold,
             gui::toggle_threshold_mode,
             gui::set_cooldown,
-            gui::toggle_best_template_mode,
-            gui::get_best_template_mode,
             gui::enable_diagnostics,
             gui::disable_diagnostics,
             gui::is_diagnostics_enabled,

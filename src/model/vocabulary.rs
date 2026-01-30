@@ -104,13 +104,6 @@ pub struct Gesture {
     /// Coefficient for statistical threshold: threshold = μ + σ×coefficient (default 2.0)
     #[serde(default = "default_threshold_coefficient")]
     pub threshold_coefficient: f32,
-
-    // --- GRT-style Best Template Selection ---
-    /// Index of the best template (example with lowest average distance to others)
-    /// Used during recognition to compare only against this representative example.
-    /// Falls back to comparing all examples if None or only 1-2 examples.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub best_template_index: Option<usize>,
 }
 
 impl Gesture {
@@ -128,7 +121,6 @@ impl Gesture {
             distance_std: None,
             threshold_manual_override: false,
             threshold_coefficient: default_threshold_coefficient(),
-            best_template_index: None,
         }
     }
 
@@ -148,10 +140,9 @@ impl Gesture {
 
     /// Update the statistical threshold values and recalculate threshold.
     /// This should be called after training when new examples are added.
-    pub fn update_statistics(&mut self, mean: f32, std: f32, best_template_index: Option<usize>) {
+    pub fn update_statistics(&mut self, mean: f32, std: f32) {
         self.distance_mean = Some(mean);
         self.distance_std = Some(std);
-        self.best_template_index = best_template_index;
         // Update the threshold field if not in manual override mode
         if !self.threshold_manual_override {
             self.threshold = mean + std * self.threshold_coefficient;
@@ -163,7 +154,6 @@ impl Gesture {
     pub fn clear_statistics(&mut self) {
         self.distance_mean = None;
         self.distance_std = None;
-        self.best_template_index = None;
     }
 
     /// Check if this gesture has valid statistical threshold data

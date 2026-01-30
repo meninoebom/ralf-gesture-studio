@@ -100,9 +100,9 @@ pub struct Vocabulary {
 
 **Migration**: v1.0 files are automatically upgraded when loaded (UUID generated, defaults applied).
 
-## Recognition Algorithm (VAD-Style State Machine + Three-Layer Echo Defense)
+## Recognition Algorithm (VAD-Style State Machine + Two-Layer Echo Defense)
 
-The recognizer uses a DTW approach combined with a VAD (Voice Activity Detection) style state machine, borrowing patterns from speech recognition systems like CMU Sphinx, Kaldi, and WebRTC VAD. Echo prevention uses a three-layer defense: Schmitt trigger hysteresis, safety valve timeout, and global non-maximum suppression.
+The recognizer uses a DTW approach combined with a VAD (Voice Activity Detection) style state machine, borrowing patterns from speech recognition systems like CMU Sphinx, Kaldi, and WebRTC VAD. Echo prevention uses two layers: safety valve timeout and global non-maximum suppression.
 
 **References**:
 - Wekinator: `fiebrink1/wekinator` - `src/wekimini/learning/dtw/DtwModel.java`
@@ -112,7 +112,7 @@ The recognizer uses a DTW approach combined with a VAD (Voice Activity Detection
 
 ### Breakthrough (2026-01-29)
 
-**VAD-style state machine with three-layer echo defense** - After multiple complex approaches failed (peak detection, hysteresis, distance-based re-arming), this state machine with layered defenses works reliably:
+**VAD-style state machine with two-layer echo defense** - After multiple complex approaches failed (peak detection, hysteresis, distance-based re-arming), this state machine with layered defenses works reliably:
 
 ```
 IDLE → BUILDING → PEAK (fire!) → RECOVERY → IDLE
@@ -121,7 +121,6 @@ IDLE → BUILDING → PEAK (fire!) → RECOVERY → IDLE
 Key success factors:
 - **Frame accumulation**: 3 consecutive frames below threshold (~200ms confirmation)
 - **Distance slope check**: Only enter Building when distance is falling (not flat/rising)
-- **Schmitt trigger recovery**: Track min_distance_in_recovery, re-arm when consistently above threshold×1.1
 - **Safety valve timeout**: Force re-arm after 5000ms regardless of distance
 - **Global cooldown (NMS)**: Block ALL gestures for 1500ms after ANY gesture fires
 
@@ -129,13 +128,12 @@ Key success factors:
 
 1. **Fixed Window**: Window size = first training example's length
 2. **Compare Against All Examples**: For each gesture, compare against every training example
-3. **State Machine**: VAD-style states with three-layer echo defense
+3. **State Machine**: VAD-style states with two-layer echo defense
 4. **Frame Accumulation**: Require 3 frames below threshold before firing
 5. **Distance Slope Check**: Only enter Building when distance is falling
-6. **Schmitt Trigger Recovery**: Track min_distance; re-arm when consistently cleared
-7. **Safety Valve**: Force re-arm after 5s (handles "always-on" gestures)
-8. **Global Cooldown (NMS)**: Block all gestures for 1.5s after any hit
-9. **DTW Optimizations**: Sakoe-Chiba band (15%), early abandoning, LB_Keogh pruning
+6. **Safety Valve**: Force re-arm after 5s (handles "always-on" gestures)
+7. **Global Cooldown (NMS)**: Block all gestures for 1.5s after any hit
+8. **DTW Optimizations**: Sakoe-Chiba band (15%), early abandoning, LB_Keogh pruning
 
 ### State Machine Flow
 
@@ -166,38 +164,34 @@ Key success factors:
                           ▼                           │
                    ┌─────────────┐                    │
                    │  RECOVERY   │                    │
-                   │ (hangover)  │────────────────────┘
+                   │(safety valve)│───────────────────┘
                    └─────────────┘
-                   after hangover_ms (300ms)
+                   after max_recovery_ms (5000ms)
 ```
 
-### ⚠️ Critical Learning: Three-Layer Echo Defense
+### ⚠️ Critical Learning: Two-Layer Echo Defense
 
-**A single mechanism cannot prevent all echo types.** Three layers are needed:
+**Two layers prevent all echo types:**
 
 | Layer | Mechanism | What It Prevents |
 |-------|-----------|-----------------|
-| Schmitt Trigger | Track `min_distance` in Recovery, re-arm when min > threshold×1.1 | Same-gesture noise spikes faking clearance |
 | Safety Valve | Force re-arm after 5000ms | Stuck recovery (resting distance < threshold) |
 | Global Cooldown | Block ALL gestures for 1500ms after ANY hit | Cross-gesture round-robin echoes |
 
-**Why distance-based recovery alone fails:**
-- With body tracking, resting distance is often permanently below threshold
-- Example: jump threshold=53, resting distance=15 — distance NEVER clears
-- Safety valve handles this; Schmitt trigger handles cases where distance does clear
+**Why distance-based recovery doesn't work for body tracking:**
+- Resting distance is permanently at 4-8% of threshold (always deeply below)
+- Example: jump threshold=334, resting distance=10 — distance NEVER clears
+- Timer-based recovery (safety valve) is the only viable mechanism
 
-**Real-world finding:** In testing, `hysteresis_cleared` never triggers — all Recovery→Idle transitions use `safety_valve_timeout`. The global cooldown is the primary echo prevention mechanism.
+**History:** v0.6.0 included a Schmitt trigger hysteresis layer (re-arm when `min_distance > threshold×1.1`). Across 55+ hits in two production sessions, it never triggered — all Recovery→Idle transitions used `safety_valve_timeout`. Removed in v0.7.0 as dead code.
 
-### Configuration (v0.6.0 Production)
+### Configuration (v0.7.0 Production)
 
 ```rust
 RecognitionConfig {
     cooldown_ms: 500,              // Per-gesture minimum between hits
     threshold_high_factor: 1.0,    // Entry at 100% of threshold
     frames_to_fire: 3,             // ~200ms confirmation at 15Hz DTW
-    hangover_ms: 300,              // Minimum recovery time
-    // Schmitt trigger hysteresis
-    rearm_safety_factor: 1.1,      // Re-arm when min_distance > threshold × 1.1
     max_recovery_ms: 5000,         // Safety valve: force re-arm after 5s
     // Global non-maximum suppression
     global_cooldown_ms: 1500,      // Block ALL gestures after ANY hit
@@ -206,23 +200,32 @@ RecognitionConfig {
 }
 ```
 
-### Real-World Results (2026-01-29, v0.6.0)
+### Real-World Results
 
-Testing with 3 gestures (wave, jump, spin), 6 examples each:
+**Session 2 (2026-01-30, v0.7.0)** — 3 gestures, 38 examples (12 wave, 17 jump, 9 spin):
+- **12 HITs, 0 echoes (0.0% echo rate)**
+- Average hit margin: ~95% (distances at 3-14% of threshold)
+- Minimum inter-hit gap: 2439ms (global cooldown working)
+- 100% Building→Peak conversion (0 aborted)
+
+**Session 1 (2026-01-29, v0.6.0)** — 3 gestures, 6 examples each:
 - **43 HITs, 0 echoes (0.0% echo rate)** — down from 63.3%
 - All Recovery→Idle via safety valve timeout
-- Cross-gesture minimum gap: 2029ms (global cooldown working)
+- Cross-gesture minimum gap: 2029ms
 - 45 Building entries, 44 Peak fires, 0 aborted (98% conversion)
 
-### Key Learnings (2026-01-29)
+### Key Learnings
 
-1. **VAD patterns from speech recognition work** - frame accumulation + hangover
-2. **Layer echo defenses** - Schmitt trigger + safety valve + global cooldown
-3. **Timer-based > distance-based** for body tracking where resting distance < threshold
-4. **Global cooldown (NMS) is the primary mechanism** - prevents cross-gesture round-robin
-5. **6+ training examples** - stabilize μ+σ thresholds (n=4 is statistically fragile)
-6. **Sakoe-Chiba band is "faster AND better"** - prevents pathological DTW warping
-7. **Do NOT spatially resample** - destroys velocity info critical for dance
+1. **VAD patterns from speech recognition work** - frame accumulation + state machine
+2. **Timer-based recovery > distance-based** for body tracking where resting distance < threshold
+3. **Global cooldown (NMS) is the primary echo prevention** - prevents cross-gesture round-robin
+4. **Safety valve is the only recovery mechanism needed** - Schmitt trigger hysteresis never fires with body tracking (resting distance permanently at 4-8% of threshold)
+5. **More training examples improve consistency, not just accuracy** - 17 examples gives tighter distance spread than 9
+6. **6+ training examples** - stabilize μ+σ thresholds (n=4 is statistically fragile)
+7. **Sakoe-Chiba band is "faster AND better"** - prevents pathological DTW warping
+8. **Do NOT spatially resample** - destroys velocity info critical for dance
+9. **All Examples comparison wins decisively** - 30% better detection rate than Best Template (removed in v0.7.0)
+10. **Auto threshold (μ+σ×2) has massive headroom** - hit distances run at 3-14% of threshold
 
 ### A/B Test: Best Template vs All Examples (2026-01-29)
 
@@ -234,7 +237,7 @@ Tested GRT-style "best template" (single most representative example) vs Wekinat
 | Echoes | 5 | 5 | Tie |
 | Detection Rate | 6.8/min | 9.5/min | **All Examples** |
 
-**Decision**: Default to "All Examples" comparison mode.
+**Decision**: All Examples is the only comparison mode. Best Template code removed in v0.7.0.
 
 **Why All Examples wins for body tracking**:
 - Takes minimum distance across ALL training examples
@@ -245,8 +248,6 @@ Tested GRT-style "best template" (single most representative example) vs Wekinat
 - Single template can't represent gesture variability
 - May pick a template closer to resting pose
 - Results in narrower "hit zone" that misses valid gestures
-
-**Note**: Toggle available in Performance mode UI for future A/B testing.
 
 #### Diagnostic Logging
 
@@ -293,11 +294,19 @@ See `.llm/active-plan.md` for detailed algorithm documentation and Wekinator sou
 
 ## Implementation Status
 
-**v0.6.0 COMPLETE** - Three-layer echo defense + DTW optimizations (2026-01-29):
+**v0.7.0 COMPLETE** - Dead code removal based on production diagnostics (2026-01-30):
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| Schmitt Trigger Recovery | ✅ | Track min_distance, re-arm when cleared above threshold×1.1 |
+| Remove Schmitt Trigger | ✅ | Never fired in 55+ hits; safety valve is the only recovery mechanism |
+| Remove Best Template | ✅ | Lost A/B test by 30%; All Examples is strictly better |
+| Remove hangover_ms | ✅ | Was only used by Schmitt trigger path |
+| Simplified Recovery | ✅ | Recovery → Idle via safety valve timeout only |
+
+**v0.6.0 COMPLETE** - Echo defense + DTW optimizations (2026-01-29):
+
+| Feature | Status | Description |
+|---------|--------|-------------|
 | Safety Valve Timeout | ✅ | Force re-arm after 5000ms |
 | Global Cooldown (NMS) | ✅ | Block all gestures for 1500ms after any hit |
 | Distance Slope Check | ✅ | Only enter Building when distance is falling |
@@ -312,7 +321,7 @@ See `.llm/active-plan.md` for detailed algorithm documentation and Wekinator sou
 |---------|--------|-------------|
 | State Machine | ✅ | Idle → Building → Peak → Recovery → Idle |
 | Frame Accumulation | ✅ | 3 frames below threshold to fire (~200ms) |
-| Time-Based Hangover | ✅ | 300ms recovery blocks new detections |
+| Safety Valve Recovery | ✅ | 5000ms timer-based re-arm |
 | Simplification | ✅ | Removed motion gate, adaptive threshold, peak detection |
 
 **v0.3.0 COMPLETE** - Statistical threshold (μ+σ approach):

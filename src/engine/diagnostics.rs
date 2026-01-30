@@ -33,7 +33,7 @@ pub enum DiagnosticEvent {
         distance: f32,
         threshold: f32,
         margin_pct: f32,
-        reason: String, // Why it didn't fire
+        reason: &'static str, // Why it didn't fire
     },
     /// State machine transition
     StateChange {
@@ -44,7 +44,7 @@ pub enum DiagnosticEvent {
         threshold: f32,
         margin_pct: f32,
         frames_in_state: usize,
-        reason: String, // Why the transition happened
+        reason: &'static str, // Why the transition happened
     },
     /// Training completed
     TrainingComplete {

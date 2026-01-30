@@ -297,7 +297,7 @@ impl AppState {
 
         // Collect gesture diagnostics
         let mut gestures: Vec<GestureDiag> = Vec::new();
-        let mut near_misses: Vec<(String, f32, f32, String)> = Vec::new();
+        let mut near_misses: Vec<(String, f32, f32, &'static str)> = Vec::new();
 
         for (id, name, distance, threshold) in self.recognizer.current_distances() {
             let gesture = self.recognizer.get_gesture(id);
@@ -317,9 +317,9 @@ impl AppState {
             if let Some(dist) = distance {
                 // Near miss: within threshold + margin%, but didn't fire
                 if dist < threshold * (1.0 + near_miss_pct / 100.0) && dist >= threshold {
-                    near_misses.push((name.clone(), dist, threshold, "above_threshold".to_string()));
+                    near_misses.push((name.clone(), dist, threshold, "above_threshold"));
                 } else if dist < threshold && in_cooldown {
-                    near_misses.push((name.clone(), dist, threshold, "in_cooldown".to_string()));
+                    near_misses.push((name.clone(), dist, threshold, "in_cooldown"));
                 }
             }
         }

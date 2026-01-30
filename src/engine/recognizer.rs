@@ -30,6 +30,11 @@ use super::dtw::{
 /// Number of distance samples to keep for slope checking
 const DISTANCE_HISTORY_SIZE: usize = 3;
 
+/// Slope tolerance for entry detection (fraction of current distance).
+/// A slope below this threshold is considered "falling" or "flat minimum".
+/// 0.05 = 5% tolerance (e.g., if distance is 1000, slope up to 50 is allowed).
+const SLOPE_TOLERANCE: f32 = 0.05;
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -128,7 +133,7 @@ pub struct StateTransition {
     pub from_state: RecognitionState,
     pub to_state: RecognitionState,
     pub frames_in_prev_state: usize,
-    pub reason: String,
+    pub reason: &'static str,
 }
 
 /// Result of processing a frame through the state machine
@@ -228,7 +233,7 @@ impl GestureState {
     }
 
     /// Get the best template index
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn best_template_index(&self) -> Option<usize> {
         self.best_template_index
     }
@@ -256,7 +261,7 @@ impl GestureState {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn has_examples(&self) -> bool {
         !self.examples.is_empty()
     }
@@ -309,8 +314,7 @@ impl GestureState {
         let slope = current - prev;
 
         // Require negative slope (falling) or very small positive (flat minimum)
-        // Allow 5% tolerance for noise
-        slope < 0.05 * current
+        slope < SLOPE_TOLERANCE * current
     }
 
     /// Record a distance value in history (for slope detection)
@@ -441,7 +445,7 @@ impl GestureState {
             from_state: prev_state,
             to_state,
             frames_in_prev_state: prev_frames,
-            reason: reason.to_string(),
+            reason,
         });
 
         StateMachineResult {
@@ -527,7 +531,7 @@ pub struct Recognizer {
 }
 
 impl Recognizer {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(buffer_size: usize, window_size: usize) -> Self {
         Self::with_config(buffer_size, window_size, RecognitionConfig::default())
     }
@@ -619,7 +623,7 @@ impl Recognizer {
         best
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn config(&self) -> &RecognitionConfig {
         &self.config
     }
@@ -652,7 +656,7 @@ impl Recognizer {
         self.gestures.iter().find(|g| g.id == id)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn gestures(&self) -> &[GestureState] {
         &self.gestures
     }
@@ -701,12 +705,130 @@ impl Recognizer {
         self.active
     }
 
+    /// Compute DTW distances for all gestures against the current window.
+    ///
+    /// Uses LB_Keogh pruning and early abandoning across gestures for efficiency.
+    /// Returns a Vec of (gesture_index, best_distance) for gestures with examples.
+    fn compute_distances(&self, window: &Sequence) -> Vec<(usize, f32)> {
+        let mut distances = Vec::new();
+        let mut best_so_far = f32::MAX;
+        let sakoe_chiba_band = self.config.sakoe_chiba_band;
+
+        for (idx, gesture) in self.gestures.iter().enumerate() {
+            if gesture.examples().is_empty() {
+                continue;
+            }
+
+            let (examples, envelopes) = if self.use_best_template && gesture.examples().len() >= 3 {
+                // GRT-style: compare only to best template (most representative example)
+                if let Some(best_idx) = gesture.best_template_index {
+                    if best_idx < gesture.examples().len() {
+                        let envelope_slice = if best_idx < gesture.lb_envelopes().len() {
+                            &gesture.lb_envelopes()[best_idx..=best_idx]
+                        } else {
+                            &[] as &[LBEnvelope]
+                        };
+                        (&gesture.examples()[best_idx..=best_idx], envelope_slice)
+                    } else {
+                        (gesture.examples(), gesture.lb_envelopes())
+                    }
+                } else {
+                    (gesture.examples(), gesture.lb_envelopes())
+                }
+            } else {
+                // Wekinator-style: compare against ALL examples
+                (gesture.examples(), gesture.lb_envelopes())
+            };
+
+            let dist = Self::find_best_distance(
+                window, examples, envelopes, self.downsample, sakoe_chiba_band, best_so_far,
+            );
+            if dist < best_so_far {
+                best_so_far = dist;
+            }
+            distances.push((idx, dist));
+        }
+
+        distances
+    }
+
+    /// Run state machines for all gestures and detect hits.
+    ///
+    /// Updates gesture distances (for UI), processes the best-matching gesture's
+    /// state machine, resets non-best gestures, and returns a hit if one fired.
+    fn run_state_machines(&mut self, distances: &[(usize, f32)]) -> Option<RecognitionResult> {
+        // Check global cooldown (NMS: suppress all detections after any hit)
+        let in_global_cooldown = self.last_any_hit_time
+            .map(|t| t.elapsed() < Duration::from_millis(self.config.global_cooldown_ms))
+            .unwrap_or(false);
+
+        // Find the best-matching gesture index
+        let best_idx = distances.iter()
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| *i);
+
+        let mut hit_result: Option<(u32, String, f32)> = None;
+
+        for (idx, gesture) in self.gestures.iter_mut().enumerate() {
+            // Find this gesture's distance
+            let distance = distances.iter()
+                .find(|(i, _)| *i == idx)
+                .map(|(_, d)| *d);
+
+            gesture.current_distance = distance;
+
+            if let Some(dist) = distance {
+                if Some(idx) == best_idx {
+                    // Best-matching gesture: run its state machine
+                    let result = gesture.process_state_machine(dist, &self.config, in_global_cooldown);
+
+                    if let Some(transition) = result.transition {
+                        self.pending_transitions.push(GestureStateTransition {
+                            gesture_name: gesture.name.clone(),
+                            transition,
+                            distance: dist,
+                            threshold: gesture.threshold,
+                        });
+                    }
+
+                    if result.should_fire {
+                        hit_result = Some((gesture.id, gesture.name.clone(), dist));
+                    }
+                } else if gesture.state == RecognitionState::Building {
+                    // Non-best gestures: reset Building to prevent multiple simultaneous builds
+                    gesture.reset_to_idle();
+                }
+            }
+        }
+
+        if let Some((id, name, distance)) = hit_result {
+            // Set global cooldown timestamp (NMS: suppress all gestures)
+            self.last_any_hit_time = Some(Instant::now());
+            Some(RecognitionResult {
+                gesture_id: Some(id),
+                gesture_name: Some(name),
+                distance,
+            })
+        } else {
+            let best_distance = distances.iter()
+                .map(|(_, d)| *d)
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(f32::MAX);
+
+            Some(RecognitionResult {
+                gesture_id: None,
+                gesture_name: None,
+                distance: best_distance,
+            })
+        }
+    }
+
     /// Process a frame through the VAD-style state machine.
     ///
     /// **Algorithm**:
-    /// 1. Compute DTW distance to all examples
-    /// 2. Find best matching gesture
-    /// 3. Run distance through state machine for that gesture
+    /// 1. Buffer frame, skip if not a DTW frame
+    /// 2. Compute DTW distance to all gestures
+    /// 3. Run state machines (only best-matching gesture advances)
     /// 4. Fire if state machine transitions to Peak
     pub fn process_frame(&mut self, frame: Frame) -> Option<RecognitionResult> {
         self.buffer.push(frame);
@@ -734,148 +856,8 @@ impl Recognizer {
         let window_full = self.buffer.recent(self.window_size);
         let window = Self::downsample_seq(&window_full, self.downsample);
 
-        // Compute distances for all gestures with early abandoning
-        // Track best_so_far across all gestures for maximum pruning efficiency
-        let mut distances: Vec<(usize, f32)> = Vec::new();
-        let mut best_so_far = f32::MAX;
-        let sakoe_chiba_band = self.config.sakoe_chiba_band;
-
-        for (idx, gesture) in self.gestures.iter().enumerate() {
-            if gesture.examples().is_empty() {
-                continue;
-            }
-
-            let examples = gesture.examples();
-            let envelopes = gesture.lb_envelopes();
-
-            let best_for_gesture = if self.use_best_template && examples.len() >= 3 {
-                // GRT-style (Phase 3): Compare only to best template (most representative example)
-                if let Some(best_idx) = gesture.best_template_index {
-                    if best_idx < examples.len() {
-                        // LB_Keogh pruning for single template
-                        if let Some(envelope) = envelopes.get(best_idx) {
-                            let lb = lb_keogh(&window, envelope);
-                            if lb >= best_so_far {
-                                f32::MAX // Pruned by lower bound
-                            } else {
-                                let example_ds = Self::downsample_seq(&examples[best_idx], self.downsample);
-                                if sakoe_chiba_band > 0.0 {
-                                    let max_len = window.len().max(example_ds.len());
-                                    let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
-                                    dtw_distance_with_abandon(&window, &example_ds, band_width, best_so_far).unwrap_or(f32::MAX)
-                                } else {
-                                    dtw_distance(&window, &example_ds)
-                                }
-                            }
-                        } else {
-                            // No envelope, compute DTW directly
-                            let example_ds = Self::downsample_seq(&examples[best_idx], self.downsample);
-                            if sakoe_chiba_band > 0.0 {
-                                let max_len = window.len().max(example_ds.len());
-                                let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
-                                dtw_distance_with_abandon(&window, &example_ds, band_width, best_so_far).unwrap_or(f32::MAX)
-                            } else {
-                                dtw_distance(&window, &example_ds)
-                            }
-                        }
-                    } else {
-                        // Invalid index, fall back to all examples
-                        Self::find_best_distance(&window, examples, envelopes, self.downsample, sakoe_chiba_band, best_so_far)
-                    }
-                } else {
-                    // No best template computed, fall back to all examples
-                    Self::find_best_distance(&window, examples, envelopes, self.downsample, sakoe_chiba_band, best_so_far)
-                }
-            } else {
-                // Wekinator-style (pre-Phase 3): compare against ALL examples
-                Self::find_best_distance(&window, examples, envelopes, self.downsample, sakoe_chiba_band, best_so_far)
-            };
-
-            // Update best_so_far for subsequent gestures
-            if best_for_gesture < best_so_far {
-                best_so_far = best_for_gesture;
-            }
-
-            distances.push((idx, best_for_gesture));
-        }
-
-        // Check global cooldown (NMS: suppress all detections after any hit)
-        let in_global_cooldown = self.last_any_hit_time
-            .map(|t| t.elapsed() < Duration::from_millis(self.config.global_cooldown_ms))
-            .unwrap_or(false);
-
-        // Update gesture distances for UI and run state machines
-        let mut hit_result: Option<(u32, String, f32)> = None;
-
-        for (idx, gesture) in self.gestures.iter_mut().enumerate() {
-            // Find this gesture's distance
-            let distance = distances.iter()
-                .find(|(i, _)| *i == idx)
-                .map(|(_, d)| *d);
-
-            gesture.current_distance = distance;
-
-            // Run state machine if we have a distance
-            if let Some(dist) = distance {
-                // Only process the best-matching gesture's state machine
-                // (prevents multiple gestures firing simultaneously)
-                let is_best = distances.iter()
-                    .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(i, _)| *i == idx)
-                    .unwrap_or(false);
-
-                if is_best {
-                    let result = gesture.process_state_machine(dist, &self.config, in_global_cooldown);
-
-                    // Collect state transition for logging
-                    if let Some(transition) = result.transition {
-                        self.pending_transitions.push(GestureStateTransition {
-                            gesture_name: gesture.name.clone(),
-                            transition,
-                            distance: dist,
-                            threshold: gesture.threshold,
-                        });
-                    }
-
-                    if result.should_fire {
-                        hit_result = Some((
-                            gesture.id,
-                            gesture.name.clone(),
-                            dist,
-                        ));
-                    }
-                } else {
-                    // Non-best gestures: reset to Idle if they were Building
-                    // (prevents multiple gestures building simultaneously)
-                    if gesture.state == RecognitionState::Building {
-                        gesture.reset_to_idle();
-                    }
-                }
-            }
-        }
-
-        // Return hit if we fired
-        if let Some((id, name, distance)) = hit_result {
-            // Set global cooldown timestamp (NMS: suppress all gestures)
-            self.last_any_hit_time = Some(Instant::now());
-            return Some(RecognitionResult {
-                gesture_id: Some(id),
-                gesture_name: Some(name),
-                distance,
-            });
-        }
-
-        // No hit - return current best distance
-        let best_distance = distances.iter()
-            .map(|(_, d)| *d)
-            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap_or(f32::MAX);
-
-        Some(RecognitionResult {
-            gesture_id: None,
-            gesture_name: None,
-            distance: best_distance,
-        })
+        let distances = self.compute_distances(&window);
+        self.run_state_machines(&distances)
     }
 
     pub fn current_distances(&self) -> Vec<(u32, String, Option<f32>, f32)> {
@@ -928,29 +910,29 @@ pub struct HitLogEntry {
 /// Rolling log of recent hits
 #[derive(Debug)]
 pub struct HitLog {
-    entries: Vec<HitLogEntry>,
+    entries: VecDeque<HitLogEntry>,
     max_entries: usize,
 }
 
 impl HitLog {
     pub fn new(max_entries: usize) -> Self {
         Self {
-            entries: Vec::new(),
+            entries: VecDeque::with_capacity(max_entries),
             max_entries,
         }
     }
 
     pub fn record(&mut self, gesture_id: u32, gesture_name: &str, distance: f32, osc_address: &str) {
-        self.entries.push(HitLogEntry {
+        if self.entries.len() >= self.max_entries {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(HitLogEntry {
             timestamp: Instant::now(),
             gesture_id,
             gesture_name: gesture_name.to_string(),
             distance,
             osc_address: osc_address.to_string(),
         });
-        if self.entries.len() > self.max_entries {
-            self.entries.remove(0);
-        }
     }
 
     pub fn recent(&self, count: usize) -> Vec<&HitLogEntry> {

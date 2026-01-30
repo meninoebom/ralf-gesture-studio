@@ -1,12 +1,18 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::model::{Vocabulary, Example};
-use crate::model::{save_vocabulary as model_save_vocabulary, load_vocabulary as model_load_vocabulary, default_vocabulary_dir};
-use crate::osc::{OscReceiverHandle, ConnectionStatus, OscSender, SenderStatus};
-use crate::engine::{Recognizer, HitLog, TrainingSession, TrainingConfig, SessionState, RecognitionConfig, compute_threshold_stats, DiagnosticLogger, DiagnosticEvent, GestureDiag};
+use crate::engine::{
+    compute_threshold_stats, DiagnosticEvent, DiagnosticLogger, GestureDiag, HitLog,
+    RecognitionConfig, Recognizer, SessionState, TrainingConfig, TrainingSession,
+};
+use crate::model::{
+    default_vocabulary_dir, load_vocabulary as model_load_vocabulary,
+    save_vocabulary as model_save_vocabulary,
+};
+use crate::model::{Example, Vocabulary};
+use crate::osc::{ConnectionStatus, OscReceiverHandle, OscSender, SenderStatus};
 
 /// The two modes of the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,7 +114,8 @@ impl AppState {
             );
 
             for example in &gesture.examples {
-                self.recognizer.add_example(gesture.id, example.frames.clone());
+                self.recognizer
+                    .add_example(gesture.id, example.frames.clone());
             }
 
             // Set best template index for GRT-style recognition (loaded from vocabulary)
@@ -151,7 +158,8 @@ impl AppState {
 
     /// Compute threshold statistics for a gesture
     fn compute_gesture_statistics(&mut self, gesture_id: u32) {
-        let examples: Vec<Vec<Vec<f32>>> = self.vocabulary
+        let examples: Vec<Vec<Vec<f32>>> = self
+            .vocabulary
             .get_gesture(gesture_id)
             .map(|g| g.examples.iter().map(|e| e.frames.clone()).collect())
             .unwrap_or_default();
@@ -160,7 +168,8 @@ impl AppState {
             return;
         }
 
-        let coefficient = self.vocabulary
+        let coefficient = self
+            .vocabulary
             .get_gesture(gesture_id)
             .map(|g| g.threshold_coefficient)
             .unwrap_or(2.0);
@@ -177,13 +186,14 @@ impl AppState {
 
                 // Log training completion
                 if self.diagnostic_logger.is_enabled() {
-                    self.diagnostic_logger.log(DiagnosticEvent::TrainingComplete {
-                        gesture_name: gesture.name.clone(),
-                        example_count: gesture.examples.len(),
-                        mean: gesture.distance_mean,
-                        std: gesture.distance_std,
-                        threshold: gesture.threshold,
-                    });
+                    self.diagnostic_logger
+                        .log(DiagnosticEvent::TrainingComplete {
+                            gesture_name: gesture.name.clone(),
+                            example_count: gesture.examples.len(),
+                            mean: gesture.distance_mean,
+                            std: gesture.distance_std,
+                            threshold: gesture.threshold,
+                        });
                 }
             }
         }
@@ -232,7 +242,9 @@ impl AppState {
                 // Log state transitions if diagnostics enabled
                 if self.diagnostic_logger.is_enabled() && self.mode == AppMode::Performance {
                     for transition in self.recognizer.take_transitions() {
-                        let margin_pct = ((transition.threshold - transition.distance) / transition.threshold) * 100.0;
+                        let margin_pct = ((transition.threshold - transition.distance)
+                            / transition.threshold)
+                            * 100.0;
                         self.diagnostic_logger.log(DiagnosticEvent::StateChange {
                             gesture_name: transition.gesture_name,
                             from_state: format!("{}", transition.transition.from_state),
@@ -252,14 +264,19 @@ impl AppState {
                 }
 
                 if let (Some(id), Some(name)) = (result.gesture_id, result.gesture_name.clone()) {
-                    let osc_address = self.recognizer
+                    let osc_address = self
+                        .recognizer
                         .get_gesture(id)
                         .map(|g| g.osc_address.clone())
                         .unwrap_or_else(|| format!("/gesture/{}", id));
 
                     // Log hit
                     if self.diagnostic_logger.is_enabled() {
-                        let threshold = self.recognizer.get_gesture(id).map(|g| g.threshold).unwrap_or(0.0);
+                        let threshold = self
+                            .recognizer
+                            .get_gesture(id)
+                            .map(|g| g.threshold)
+                            .unwrap_or(0.0);
                         let margin_pct = ((threshold - result.distance) / threshold) * 100.0;
                         self.diagnostic_logger.log(DiagnosticEvent::Hit {
                             frame_num,
@@ -270,7 +287,8 @@ impl AppState {
                         });
                     }
 
-                    self.hit_log.record(id, &name, result.distance, &osc_address);
+                    self.hit_log
+                        .record(id, &name, result.distance, &osc_address);
                     let _ = self.osc_sender.send_hit(&osc_address);
                 }
             }
@@ -297,7 +315,7 @@ impl AppState {
 
         // Collect gesture diagnostics
         let mut gestures: Vec<GestureDiag> = Vec::new();
-        let mut near_misses: Vec<(String, f32, f32, String)> = Vec::new();
+        let mut near_misses: Vec<(String, f32, f32, &'static str)> = Vec::new();
 
         for (id, name, distance, threshold) in self.recognizer.current_distances() {
             let gesture = self.recognizer.get_gesture(id);
@@ -317,9 +335,9 @@ impl AppState {
             if let Some(dist) = distance {
                 // Near miss: within threshold + margin%, but didn't fire
                 if dist < threshold * (1.0 + near_miss_pct / 100.0) && dist >= threshold {
-                    near_misses.push((name.clone(), dist, threshold, "above_threshold".to_string()));
+                    near_misses.push((name.clone(), dist, threshold, "above_threshold"));
                 } else if dist < threshold && in_cooldown {
-                    near_misses.push((name.clone(), dist, threshold, "in_cooldown".to_string()));
+                    near_misses.push((name.clone(), dist, threshold, "in_cooldown"));
                 }
             }
         }
@@ -461,15 +479,24 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
     // Build response
     let vocabulary = VocabularyDto {
         name: app.vocabulary.name.clone(),
-        gestures: app.vocabulary.gestures.iter().map(|g| GestureDto {
-            id: g.id,
-            name: g.name.clone(),
-            osc_address: g.osc_address.clone(),
-            threshold: g.threshold,
-            examples: g.examples.iter().map(|e| ExampleDto {
-                frame_count: e.frames.len(),
-            }).collect(),
-        }).collect(),
+        gestures: app
+            .vocabulary
+            .gestures
+            .iter()
+            .map(|g| GestureDto {
+                id: g.id,
+                name: g.name.clone(),
+                osc_address: g.osc_address.clone(),
+                threshold: g.threshold,
+                examples: g
+                    .examples
+                    .iter()
+                    .map(|e| ExampleDto {
+                        frame_count: e.frames.len(),
+                    })
+                    .collect(),
+            })
+            .collect(),
     };
 
     let input_status = match app.osc_receiver.state.status {
@@ -522,7 +549,8 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
 
     let distances = app.recognizer.current_distances();
     let recent_hits = app.hit_log.recent(1);
-    let recent_hit_name = recent_hits.first()
+    let recent_hit_name = recent_hits
+        .first()
         .filter(|h| h.timestamp.elapsed().as_millis() < 300)
         .map(|h| h.gesture_name.clone());
 
@@ -531,38 +559,48 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
         buffer_len: app.recognizer.buffer.len(),
         window_size: app.recognizer.window_size(),
         total_examples: app.recognizer.total_example_count(),
-        gestures: distances.iter().map(|(id, name, dist, thresh)| {
-            let gesture = app.vocabulary.get_gesture(*id);
-            let auto_mode = gesture.map(|g| !g.threshold_manual_override).unwrap_or(false);
-            let recent_hit = recent_hit_name.as_ref().map(|n| n == name).unwrap_or(false);
-            let (distance_mean, distance_std, threshold_coefficient) = gesture
-                .map(|g| (g.distance_mean, g.distance_std, g.threshold_coefficient))
-                .unwrap_or((None, None, 2.0));
+        gestures: distances
+            .iter()
+            .map(|(id, name, dist, thresh)| {
+                let gesture = app.vocabulary.get_gesture(*id);
+                let auto_mode = gesture
+                    .map(|g| !g.threshold_manual_override)
+                    .unwrap_or(false);
+                let recent_hit = recent_hit_name.as_ref().map(|n| n == name).unwrap_or(false);
+                let (distance_mean, distance_std, threshold_coefficient) = gesture
+                    .map(|g| (g.distance_mean, g.distance_std, g.threshold_coefficient))
+                    .unwrap_or((None, None, 2.0));
 
-            GestureMonitorDto {
-                id: *id,
-                name: name.clone(),
-                example_count: app.recognizer.example_count(*id),
-                distance: *dist,
-                threshold: *thresh,
-                auto_mode,
-                recent_hit,
-                distance_mean,
-                distance_std,
-                threshold_coefficient,
-            }
-        }).collect(),
+                GestureMonitorDto {
+                    id: *id,
+                    name: name.clone(),
+                    example_count: app.recognizer.example_count(*id),
+                    distance: *dist,
+                    threshold: *thresh,
+                    auto_mode,
+                    recent_hit,
+                    distance_mean,
+                    distance_std,
+                    threshold_coefficient,
+                }
+            })
+            .collect(),
         recent_hit: recent_hit_name,
     };
 
-    let hit_entries: Vec<HitEntryDto> = app.hit_log.recent(10).iter().map(|e| {
-        let ms_ago = e.timestamp.elapsed().as_millis() as u64;
-        HitEntryDto {
-            name: e.gesture_name.clone(),
-            ms_ago,
-            recent: ms_ago < 2000,
-        }
-    }).collect();
+    let hit_entries: Vec<HitEntryDto> = app
+        .hit_log
+        .recent(10)
+        .iter()
+        .map(|e| {
+            let ms_ago = e.timestamp.elapsed().as_millis() as u64;
+            HitEntryDto {
+                name: e.gesture_name.clone(),
+                ms_ago,
+                recent: ms_ago < 2000,
+            }
+        })
+        .collect();
 
     let hit_log = HitLogDto {
         total: app.hit_log.len(),
@@ -634,10 +672,8 @@ pub fn open_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String>
                 app.selected_gesture_id = app.vocabulary.gestures.first().map(|g| g.id);
                 app.sync_recognizer();
 
-                app.osc_sender = OscSender::new(
-                    &app.vocabulary.output.host,
-                    app.vocabulary.output.port,
-                );
+                app.osc_sender =
+                    OscSender::new(&app.vocabulary.output.host, app.vocabulary.output.port);
             }
             Err(e) => {
                 return Err(format!("Failed to open vocabulary: {}", e));
@@ -686,7 +722,9 @@ pub fn save_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String>
 #[tauri::command]
 pub fn send_test_hit(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> {
     let mut app = state.lock().map_err(|e| e.to_string())?;
-    app.osc_sender.send_hit("/test/hit").map_err(|e| e.to_string())?;
+    app.osc_sender
+        .send_hit("/test/hit")
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -698,12 +736,14 @@ pub fn add_gesture(state: State<Arc<Mutex<AppState>>>) -> Result<u32, String> {
     let new_id = app.vocabulary.add_gesture(&name);
 
     // Get gesture data before mutable borrow of recognizer
-    let gesture_data = app.vocabulary.get_gesture(new_id).map(|g| {
-        (g.id, g.name.clone(), g.osc_address.clone(), g.threshold)
-    });
+    let gesture_data = app
+        .vocabulary
+        .get_gesture(new_id)
+        .map(|g| (g.id, g.name.clone(), g.osc_address.clone(), g.threshold));
 
     if let Some((id, name, osc_address, threshold)) = gesture_data {
-        app.recognizer.add_gesture(id, &name, &osc_address, threshold);
+        app.recognizer
+            .add_gesture(id, &name, &osc_address, threshold);
     }
 
     app.selected_gesture_id = Some(new_id);
@@ -720,7 +760,11 @@ pub fn select_gesture(state: State<Arc<Mutex<AppState>>>, gesture_id: u32) -> Re
 }
 
 #[tauri::command]
-pub fn rename_gesture(state: State<Arc<Mutex<AppState>>>, gesture_id: u32, name: String) -> Result<(), String> {
+pub fn rename_gesture(
+    state: State<Arc<Mutex<AppState>>>,
+    gesture_id: u32,
+    name: String,
+) -> Result<(), String> {
     let mut app = state.lock().map_err(|e| e.to_string())?;
 
     if let Some(gesture) = app.vocabulary.get_gesture_mut(gesture_id) {
@@ -759,7 +803,10 @@ pub fn start_training(
     let mut app = state.lock().map_err(|e| e.to_string())?;
 
     // Get gesture name before mutable operations
-    let gesture_name = app.vocabulary.get_gesture(gesture_id).map(|g| g.name.clone());
+    let gesture_name = app
+        .vocabulary
+        .get_gesture(gesture_id)
+        .map(|g| g.name.clone());
 
     if let Some(name) = gesture_name {
         let config = TrainingConfig {
@@ -805,7 +852,10 @@ pub fn set_threshold(
 }
 
 #[tauri::command]
-pub fn toggle_threshold_mode(state: State<Arc<Mutex<AppState>>>, gesture_id: u32) -> Result<(), String> {
+pub fn toggle_threshold_mode(
+    state: State<Arc<Mutex<AppState>>>,
+    gesture_id: u32,
+) -> Result<(), String> {
     let mut app = state.lock().map_err(|e| e.to_string())?;
 
     // Calculate new threshold if switching to auto mode
@@ -890,7 +940,8 @@ pub fn enable_diagnostics(state: State<Arc<Mutex<AppState>>>) -> Result<String, 
     let filename = format!("ralf-diagnostics-{}.log", timestamp);
     let path = ralf_dir.join(filename);
 
-    app.diagnostic_logger.enable(path.clone())
+    app.diagnostic_logger
+        .enable(path.clone())
         .map_err(|e| format!("Failed to enable diagnostics: {}", e))?;
 
     Ok(path.display().to_string())

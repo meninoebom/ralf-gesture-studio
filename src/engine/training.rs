@@ -5,8 +5,8 @@
 
 use std::time::{Duration, Instant};
 
-use rodio::{OutputStream, Sink};
 use rodio::source::{SineWave, Source};
+use rodio::{OutputStream, Sink};
 
 /// Training session states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +40,7 @@ impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             reps: 5,
-            duration_secs: 2.0,  // Reduced from 3.0 for quicker training
+            duration_secs: 2.0, // Reduced from 3.0 for quicker training
             rest_secs: 2.0,
             countdown_secs: 2.0, // Reduced from 3.0 for quicker count-in
         }
@@ -265,7 +265,8 @@ impl TrainingSession {
 
         // Save the captured frames
         if !self.current_frames.is_empty() {
-            self.completed_examples.push(std::mem::take(&mut self.current_frames));
+            self.completed_examples
+                .push(std::mem::take(&mut self.current_frames));
         }
         self.completed_reps += 1;
 
@@ -291,7 +292,10 @@ impl TrainingSession {
     /// Check if session is active (not idle or complete)
     #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
-        matches!(self.state, SessionState::Countdown | SessionState::Capturing | SessionState::Resting)
+        matches!(
+            self.state,
+            SessionState::Countdown | SessionState::Capturing | SessionState::Resting
+        )
     }
 
     /// Take the completed examples (consumes them)

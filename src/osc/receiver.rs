@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use rosc::{OscMessage, OscPacket, OscType};
 use tokio::net::UdpSocket;
 
@@ -90,7 +90,9 @@ impl OscReceiverHandle {
 
     /// Get time since last frame in milliseconds
     pub fn ms_since_last_frame(&self) -> Option<u64> {
-        self.state.last_frame_time.map(|t| t.elapsed().as_millis() as u64)
+        self.state
+            .last_frame_time
+            .map(|t| t.elapsed().as_millis() as u64)
     }
 
     /// Signal the receiver to shut down
@@ -136,11 +138,16 @@ impl OscReceiver {
         let bind_addr = format!("0.0.0.0:{}", self.port);
         let socket = match UdpSocket::bind(&bind_addr).await {
             Ok(s) => {
-                let _ = self.event_tx.send(ReceiverEvent::StatusChanged(ConnectionStatus::Listening));
+                let _ = self
+                    .event_tx
+                    .send(ReceiverEvent::StatusChanged(ConnectionStatus::Listening));
                 s
             }
             Err(e) => {
-                let _ = self.event_tx.send(ReceiverEvent::Error(format!("Failed to bind to {}: {}", bind_addr, e)));
+                let _ = self.event_tx.send(ReceiverEvent::Error(format!(
+                    "Failed to bind to {}: {}",
+                    bind_addr, e
+                )));
                 return;
             }
         };
@@ -156,8 +163,9 @@ impl OscReceiver {
             // Receive with timeout so we can check shutdown periodically
             let recv_result = tokio::time::timeout(
                 tokio::time::Duration::from_millis(100),
-                socket.recv_from(&mut buf)
-            ).await;
+                socket.recv_from(&mut buf),
+            )
+            .await;
 
             match recv_result {
                 Ok(Ok((size, _addr))) => {
@@ -167,7 +175,9 @@ impl OscReceiver {
                     }
                 }
                 Ok(Err(e)) => {
-                    let _ = self.event_tx.send(ReceiverEvent::Error(format!("Receive error: {}", e)));
+                    let _ = self
+                        .event_tx
+                        .send(ReceiverEvent::Error(format!("Receive error: {}", e)));
                 }
                 Err(_) => {
                     // Timeout, just continue to check shutdown flag
@@ -175,7 +185,9 @@ impl OscReceiver {
             }
         }
 
-        let _ = self.event_tx.send(ReceiverEvent::StatusChanged(ConnectionStatus::Stopped));
+        let _ = self
+            .event_tx
+            .send(ReceiverEvent::StatusChanged(ConnectionStatus::Stopped));
     }
 
     fn handle_packet(&self, packet: &OscPacket) {
@@ -232,7 +244,10 @@ mod tests {
         let (receiver, mut handle) = OscReceiver::new(6448, "/wek/inputs");
 
         // Simulate sending an event
-        receiver.event_tx.send(ReceiverEvent::StatusChanged(ConnectionStatus::Listening)).unwrap();
+        receiver
+            .event_tx
+            .send(ReceiverEvent::StatusChanged(ConnectionStatus::Listening))
+            .unwrap();
 
         // Poll should update state
         handle.poll();
@@ -244,8 +259,14 @@ mod tests {
         let (receiver, mut handle) = OscReceiver::new(6448, "/wek/inputs");
 
         // Simulate receiving frames
-        receiver.event_tx.send(ReceiverEvent::Frame(vec![1.0, 2.0, 3.0])).unwrap();
-        receiver.event_tx.send(ReceiverEvent::Frame(vec![4.0, 5.0, 6.0])).unwrap();
+        receiver
+            .event_tx
+            .send(ReceiverEvent::Frame(vec![1.0, 2.0, 3.0]))
+            .unwrap();
+        receiver
+            .event_tx
+            .send(ReceiverEvent::Frame(vec![4.0, 5.0, 6.0]))
+            .unwrap();
 
         handle.poll();
         assert_eq!(handle.state.frame_count, 2);

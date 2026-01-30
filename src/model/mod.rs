@@ -1,8 +1,8 @@
-mod vocabulary;
 mod persistence;
+mod vocabulary;
 
-pub use vocabulary::{Vocabulary, Example};
-pub use persistence::{save_vocabulary, load_vocabulary, default_vocabulary_dir};
+pub use persistence::{default_vocabulary_dir, load_vocabulary, save_vocabulary};
+pub use vocabulary::{Example, Vocabulary};
 
 // Re-export for potential external consumers
 #[allow(unused_imports)]

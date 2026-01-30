@@ -248,7 +248,10 @@ pub struct Vocabulary {
     #[serde(default = "default_tags", skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     /// Extensibility hook for future metadata without schema changes
-    #[serde(default = "default_extensions", skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default = "default_extensions",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
     pub extensions: HashMap<String, serde_json::Value>,
 
     /// Baseline frames (deprecated - kept for file compatibility)
@@ -333,12 +336,6 @@ impl Vocabulary {
     /// Recalculate next_gesture_id after loading from file
     #[allow(dead_code)]
     pub fn recalculate_next_id(&mut self) {
-        self.next_gesture_id = self
-            .gestures
-            .iter()
-            .map(|g| g.id)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        self.next_gesture_id = self.gestures.iter().map(|g| g.id).max().unwrap_or(0) + 1;
     }
 }

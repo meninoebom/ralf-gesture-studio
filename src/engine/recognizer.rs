@@ -30,6 +30,11 @@ use super::dtw::{
 /// Number of distance samples to keep for slope checking
 const DISTANCE_HISTORY_SIZE: usize = 3;
 
+/// Slope tolerance for entry detection (fraction of current distance).
+/// A slope below this threshold is considered "falling" or "flat minimum".
+/// 0.05 = 5% tolerance (e.g., if distance is 1000, slope up to 50 is allowed).
+const SLOPE_TOLERANCE: f32 = 0.05;
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -41,7 +46,6 @@ pub struct RecognitionConfig {
     pub cooldown_ms: u64,
 
     // --- VAD-style parameters ---
-
     /// Hysteresis factor for entry (1.0 = trained threshold)
     /// Distance must be below threshold × threshold_high_factor to enter Building
     pub threshold_high_factor: f32,
@@ -55,7 +59,6 @@ pub struct RecognitionConfig {
     pub hangover_ms: u64,
 
     // --- Schmitt trigger hysteresis (echo guard) ---
-
     /// Safety factor for Schmitt trigger re-arming.
     /// After firing, distance must *consistently* exceed threshold × this factor to re-arm.
     /// Uses min_distance tracking (not max) to prevent flickering on noise spikes.
@@ -67,7 +70,6 @@ pub struct RecognitionConfig {
     pub max_recovery_ms: u64,
 
     // --- Global echo suppression (NMS) ---
-
     /// Global cooldown after ANY gesture fires (ms).
     /// Blocks all gestures from entering Building during this period.
     /// Prevents cross-gesture round-robin echo chains.
@@ -75,7 +77,6 @@ pub struct RecognitionConfig {
     pub global_cooldown_ms: u64,
 
     // --- DTW optimization ---
-
     /// Sakoe-Chiba band as fraction of sequence length (e.g., 0.15 = 15%)
     /// Limits warping path to diagonal band, reducing O(N²) to O(N×B)
     /// Also prevents pathological warping (unrealistic time stretching)
@@ -128,7 +129,7 @@ pub struct StateTransition {
     pub from_state: RecognitionState,
     pub to_state: RecognitionState,
     pub frames_in_prev_state: usize,
-    pub reason: String,
+    pub reason: &'static str,
 }
 
 /// Result of processing a frame through the state machine
@@ -161,7 +162,6 @@ pub struct RecognitionResult {
     pub gesture_id: Option<u32>,
     pub gesture_name: Option<String>,
     pub distance: f32,
-    pub threshold: f32,
 }
 
 // ============================================================================
@@ -228,12 +228,6 @@ impl GestureState {
         self.best_template_index = index;
     }
 
-    /// Get the best template index
-    #[allow(dead_code)]
-    pub fn best_template_index(&self) -> Option<usize> {
-        self.best_template_index
-    }
-
     pub fn add_example(&mut self, example: Sequence) {
         self.examples.push(example);
         // Clear envelopes - they'll be recomputed on start()
@@ -257,7 +251,7 @@ impl GestureState {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn has_examples(&self) -> bool {
         !self.examples.is_empty()
     }
@@ -281,6 +275,7 @@ impl GestureState {
     }
 
     /// Get current recognition state
+    #[cfg(test)]
     pub fn recognition_state(&self) -> RecognitionState {
         self.state
     }
@@ -309,8 +304,7 @@ impl GestureState {
         let slope = current - prev;
 
         // Require negative slope (falling) or very small positive (flat minimum)
-        // Allow 5% tolerance for noise
-        slope < 0.05 * current
+        slope < SLOPE_TOLERANCE * current
     }
 
     /// Record a distance value in history (for slope detection)
@@ -352,9 +346,17 @@ impl GestureState {
                     if self.frames_below_threshold >= config.frames_to_fire {
                         self.state = RecognitionState::Peak;
                         self.record_hit();
-                        (true, Some(RecognitionState::Peak), "below_threshold_instant_fire")
+                        (
+                            true,
+                            Some(RecognitionState::Peak),
+                            "below_threshold_instant_fire",
+                        )
                     } else {
-                        (false, Some(RecognitionState::Building), "below_threshold_falling")
+                        (
+                            false,
+                            Some(RecognitionState::Building),
+                            "below_threshold_falling",
+                        )
                     }
                 } else if distance < entry_threshold {
                     // Below threshold but not falling - likely noise/echo
@@ -396,7 +398,8 @@ impl GestureState {
                 // Schmitt trigger: track min distance (for consistent above-threshold check)
                 self.min_distance_in_recovery = self.min_distance_in_recovery.min(distance);
 
-                let elapsed = self.recovery_start
+                let elapsed = self
+                    .recovery_start
                     .map(|t| t.elapsed())
                     .unwrap_or(Duration::ZERO);
 
@@ -441,7 +444,7 @@ impl GestureState {
             from_state: prev_state,
             to_state,
             frames_in_prev_state: prev_frames,
-            reason: reason.to_string(),
+            reason,
         });
 
         StateMachineResult {
@@ -527,16 +530,12 @@ pub struct Recognizer {
 }
 
 impl Recognizer {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(buffer_size: usize, window_size: usize) -> Self {
         Self::with_config(buffer_size, window_size, RecognitionConfig::default())
     }
 
-    pub fn with_config(
-        buffer_size: usize,
-        window_size: usize,
-        config: RecognitionConfig,
-    ) -> Self {
+    pub fn with_config(buffer_size: usize, window_size: usize, config: RecognitionConfig) -> Self {
         Self {
             buffer: FrameBuffer::new(buffer_size),
             gestures: Vec::new(),
@@ -544,8 +543,8 @@ impl Recognizer {
             active: false,
             window_size,
             frame_count: 0,
-            dtw_skip: 4,      // Compute DTW every 4th frame (15Hz @ 60fps input)
-            downsample: 4,    // Compare at 15fps
+            dtw_skip: 4,              // Compute DTW every 4th frame (15Hz @ 60fps input)
+            downsample: 4,            // Compare at 15fps
             use_best_template: false, // Default: compare ALL examples (Wekinator-style, more responsive)
             pending_transitions: Vec::new(),
             last_any_hit_time: None,
@@ -619,11 +618,6 @@ impl Recognizer {
         best
     }
 
-    #[allow(dead_code)]
-    pub fn config(&self) -> &RecognitionConfig {
-        &self.config
-    }
-
     pub fn set_cooldown_ms(&mut self, ms: u64) {
         self.config.cooldown_ms = ms;
     }
@@ -641,7 +635,8 @@ impl Recognizer {
     }
 
     pub fn add_gesture(&mut self, id: u32, name: &str, osc_address: &str, threshold: f32) {
-        self.gestures.push(GestureState::new(id, name, osc_address, threshold));
+        self.gestures
+            .push(GestureState::new(id, name, osc_address, threshold));
     }
 
     pub fn get_gesture_mut(&mut self, id: u32) -> Option<&mut GestureState> {
@@ -652,7 +647,7 @@ impl Recognizer {
         self.gestures.iter().find(|g| g.id == id)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn gestures(&self) -> &[GestureState] {
         &self.gestures
     }
@@ -701,12 +696,137 @@ impl Recognizer {
         self.active
     }
 
+    /// Compute DTW distances for all gestures against the current window.
+    ///
+    /// Uses LB_Keogh pruning and early abandoning across gestures for efficiency.
+    /// Returns a Vec of (gesture_index, best_distance) for gestures with examples.
+    fn compute_distances(&self, window: &Sequence) -> Vec<(usize, f32)> {
+        let mut distances = Vec::new();
+        let mut best_so_far = f32::MAX;
+        let sakoe_chiba_band = self.config.sakoe_chiba_band;
+
+        for (idx, gesture) in self.gestures.iter().enumerate() {
+            if gesture.examples().is_empty() {
+                continue;
+            }
+
+            let (examples, envelopes) = if self.use_best_template && gesture.examples().len() >= 3 {
+                // GRT-style: compare only to best template (most representative example)
+                if let Some(best_idx) = gesture.best_template_index {
+                    if best_idx < gesture.examples().len() {
+                        let envelope_slice = if best_idx < gesture.lb_envelopes().len() {
+                            &gesture.lb_envelopes()[best_idx..=best_idx]
+                        } else {
+                            &[] as &[LBEnvelope]
+                        };
+                        (&gesture.examples()[best_idx..=best_idx], envelope_slice)
+                    } else {
+                        (gesture.examples(), gesture.lb_envelopes())
+                    }
+                } else {
+                    (gesture.examples(), gesture.lb_envelopes())
+                }
+            } else {
+                // Wekinator-style: compare against ALL examples
+                (gesture.examples(), gesture.lb_envelopes())
+            };
+
+            let dist = Self::find_best_distance(
+                window,
+                examples,
+                envelopes,
+                self.downsample,
+                sakoe_chiba_band,
+                best_so_far,
+            );
+            if dist < best_so_far {
+                best_so_far = dist;
+            }
+            distances.push((idx, dist));
+        }
+
+        distances
+    }
+
+    /// Run state machines for all gestures and detect hits.
+    ///
+    /// Updates gesture distances (for UI), processes the best-matching gesture's
+    /// state machine, resets non-best gestures, and returns a hit if one fired.
+    fn run_state_machines(&mut self, distances: &[(usize, f32)]) -> Option<RecognitionResult> {
+        // Check global cooldown (NMS: suppress all detections after any hit)
+        let in_global_cooldown = self
+            .last_any_hit_time
+            .map(|t| t.elapsed() < Duration::from_millis(self.config.global_cooldown_ms))
+            .unwrap_or(false);
+
+        // Find the best-matching gesture index
+        let best_idx = distances
+            .iter()
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| *i);
+
+        let mut hit_result: Option<(u32, String, f32)> = None;
+
+        for (idx, gesture) in self.gestures.iter_mut().enumerate() {
+            // Find this gesture's distance
+            let distance = distances.iter().find(|(i, _)| *i == idx).map(|(_, d)| *d);
+
+            gesture.current_distance = distance;
+
+            if let Some(dist) = distance {
+                if Some(idx) == best_idx {
+                    // Best-matching gesture: run its state machine
+                    let result =
+                        gesture.process_state_machine(dist, &self.config, in_global_cooldown);
+
+                    if let Some(transition) = result.transition {
+                        self.pending_transitions.push(GestureStateTransition {
+                            gesture_name: gesture.name.clone(),
+                            transition,
+                            distance: dist,
+                            threshold: gesture.threshold,
+                        });
+                    }
+
+                    if result.should_fire {
+                        hit_result = Some((gesture.id, gesture.name.clone(), dist));
+                    }
+                } else if gesture.state == RecognitionState::Building {
+                    // Non-best gestures: reset Building to prevent multiple simultaneous builds
+                    gesture.reset_to_idle();
+                }
+            }
+        }
+
+        if let Some((id, name, distance)) = hit_result {
+            // Set global cooldown timestamp (NMS: suppress all gestures)
+            self.last_any_hit_time = Some(Instant::now());
+            Some(RecognitionResult {
+                gesture_id: Some(id),
+                gesture_name: Some(name),
+                distance,
+            })
+        } else {
+            let best_distance = distances
+                .iter()
+                .map(|(_, d)| *d)
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(f32::MAX);
+
+            Some(RecognitionResult {
+                gesture_id: None,
+                gesture_name: None,
+                distance: best_distance,
+            })
+        }
+    }
+
     /// Process a frame through the VAD-style state machine.
     ///
     /// **Algorithm**:
-    /// 1. Compute DTW distance to all examples
-    /// 2. Find best matching gesture
-    /// 3. Run distance through state machine for that gesture
+    /// 1. Buffer frame, skip if not a DTW frame
+    /// 2. Compute DTW distance to all gestures
+    /// 3. Run state machines (only best-matching gesture advances)
     /// 4. Fire if state machine transitions to Peak
     pub fn process_frame(&mut self, frame: Frame) -> Option<RecognitionResult> {
         self.buffer.push(frame);
@@ -727,7 +847,6 @@ impl Recognizer {
                 gesture_id: None,
                 gesture_name: None,
                 distance: f32::MAX,
-                threshold: 0.0,
             });
         }
 
@@ -735,151 +854,8 @@ impl Recognizer {
         let window_full = self.buffer.recent(self.window_size);
         let window = Self::downsample_seq(&window_full, self.downsample);
 
-        // Compute distances for all gestures with early abandoning
-        // Track best_so_far across all gestures for maximum pruning efficiency
-        let mut distances: Vec<(usize, f32)> = Vec::new();
-        let mut best_so_far = f32::MAX;
-        let sakoe_chiba_band = self.config.sakoe_chiba_band;
-
-        for (idx, gesture) in self.gestures.iter().enumerate() {
-            if gesture.examples().is_empty() {
-                continue;
-            }
-
-            let examples = gesture.examples();
-            let envelopes = gesture.lb_envelopes();
-
-            let best_for_gesture = if self.use_best_template && examples.len() >= 3 {
-                // GRT-style (Phase 3): Compare only to best template (most representative example)
-                if let Some(best_idx) = gesture.best_template_index {
-                    if best_idx < examples.len() {
-                        // LB_Keogh pruning for single template
-                        if let Some(envelope) = envelopes.get(best_idx) {
-                            let lb = lb_keogh(&window, envelope);
-                            if lb >= best_so_far {
-                                f32::MAX // Pruned by lower bound
-                            } else {
-                                let example_ds = Self::downsample_seq(&examples[best_idx], self.downsample);
-                                if sakoe_chiba_band > 0.0 {
-                                    let max_len = window.len().max(example_ds.len());
-                                    let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
-                                    dtw_distance_with_abandon(&window, &example_ds, band_width, best_so_far).unwrap_or(f32::MAX)
-                                } else {
-                                    dtw_distance(&window, &example_ds)
-                                }
-                            }
-                        } else {
-                            // No envelope, compute DTW directly
-                            let example_ds = Self::downsample_seq(&examples[best_idx], self.downsample);
-                            if sakoe_chiba_band > 0.0 {
-                                let max_len = window.len().max(example_ds.len());
-                                let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
-                                dtw_distance_with_abandon(&window, &example_ds, band_width, best_so_far).unwrap_or(f32::MAX)
-                            } else {
-                                dtw_distance(&window, &example_ds)
-                            }
-                        }
-                    } else {
-                        // Invalid index, fall back to all examples
-                        Self::find_best_distance(&window, examples, envelopes, self.downsample, sakoe_chiba_band, best_so_far)
-                    }
-                } else {
-                    // No best template computed, fall back to all examples
-                    Self::find_best_distance(&window, examples, envelopes, self.downsample, sakoe_chiba_band, best_so_far)
-                }
-            } else {
-                // Wekinator-style (pre-Phase 3): compare against ALL examples
-                Self::find_best_distance(&window, examples, envelopes, self.downsample, sakoe_chiba_band, best_so_far)
-            };
-
-            // Update best_so_far for subsequent gestures
-            if best_for_gesture < best_so_far {
-                best_so_far = best_for_gesture;
-            }
-
-            distances.push((idx, best_for_gesture));
-        }
-
-        // Check global cooldown (NMS: suppress all detections after any hit)
-        let in_global_cooldown = self.last_any_hit_time
-            .map(|t| t.elapsed() < Duration::from_millis(self.config.global_cooldown_ms))
-            .unwrap_or(false);
-
-        // Update gesture distances for UI and run state machines
-        let mut hit_result: Option<(u32, String, f32, f32)> = None;
-
-        for (idx, gesture) in self.gestures.iter_mut().enumerate() {
-            // Find this gesture's distance
-            let distance = distances.iter()
-                .find(|(i, _)| *i == idx)
-                .map(|(_, d)| *d);
-
-            gesture.current_distance = distance;
-
-            // Run state machine if we have a distance
-            if let Some(dist) = distance {
-                // Only process the best-matching gesture's state machine
-                // (prevents multiple gestures firing simultaneously)
-                let is_best = distances.iter()
-                    .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(i, _)| *i == idx)
-                    .unwrap_or(false);
-
-                if is_best {
-                    let result = gesture.process_state_machine(dist, &self.config, in_global_cooldown);
-
-                    // Collect state transition for logging
-                    if let Some(transition) = result.transition {
-                        self.pending_transitions.push(GestureStateTransition {
-                            gesture_name: gesture.name.clone(),
-                            transition,
-                            distance: dist,
-                            threshold: gesture.threshold,
-                        });
-                    }
-
-                    if result.should_fire {
-                        hit_result = Some((
-                            gesture.id,
-                            gesture.name.clone(),
-                            dist,
-                            gesture.threshold,
-                        ));
-                    }
-                } else {
-                    // Non-best gestures: reset to Idle if they were Building
-                    // (prevents multiple gestures building simultaneously)
-                    if gesture.state == RecognitionState::Building {
-                        gesture.reset_to_idle();
-                    }
-                }
-            }
-        }
-
-        // Return hit if we fired
-        if let Some((id, name, distance, threshold)) = hit_result {
-            // Set global cooldown timestamp (NMS: suppress all gestures)
-            self.last_any_hit_time = Some(Instant::now());
-            return Some(RecognitionResult {
-                gesture_id: Some(id),
-                gesture_name: Some(name),
-                distance,
-                threshold,
-            });
-        }
-
-        // No hit - return current best distance
-        let best = distances.iter()
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        Some(RecognitionResult {
-            gesture_id: None,
-            gesture_name: None,
-            distance: best.map(|(_, d)| *d).unwrap_or(f32::MAX),
-            threshold: best
-                .map(|(idx, _)| self.gestures[*idx].threshold)
-                .unwrap_or(0.0),
-        })
+        let distances = self.compute_distances(&window);
+        self.run_state_machines(&distances)
     }
 
     pub fn current_distances(&self) -> Vec<(u32, String, Option<f32>, f32)> {
@@ -932,29 +908,35 @@ pub struct HitLogEntry {
 /// Rolling log of recent hits
 #[derive(Debug)]
 pub struct HitLog {
-    entries: Vec<HitLogEntry>,
+    entries: VecDeque<HitLogEntry>,
     max_entries: usize,
 }
 
 impl HitLog {
     pub fn new(max_entries: usize) -> Self {
         Self {
-            entries: Vec::new(),
+            entries: VecDeque::with_capacity(max_entries),
             max_entries,
         }
     }
 
-    pub fn record(&mut self, gesture_id: u32, gesture_name: &str, distance: f32, osc_address: &str) {
-        self.entries.push(HitLogEntry {
+    pub fn record(
+        &mut self,
+        gesture_id: u32,
+        gesture_name: &str,
+        distance: f32,
+        osc_address: &str,
+    ) {
+        if self.entries.len() >= self.max_entries {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(HitLogEntry {
             timestamp: Instant::now(),
             gesture_id,
             gesture_name: gesture_name.to_string(),
             distance,
             osc_address: osc_address.to_string(),
         });
-        if self.entries.len() > self.max_entries {
-            self.entries.remove(0);
-        }
     }
 
     pub fn recent(&self, count: usize) -> Vec<&HitLogEntry> {
@@ -1102,7 +1084,7 @@ mod tests {
         let config = RecognitionConfig {
             frames_to_fire: 1,
             hangover_ms: 50,
-            rearm_safety_factor: 1.1,  // rearm_threshold = 110
+            rearm_safety_factor: 1.1, // rearm_threshold = 110
             max_recovery_ms: 5000,
             ..Default::default()
         };
@@ -1135,8 +1117,8 @@ mod tests {
         let config = RecognitionConfig {
             frames_to_fire: 1,
             hangover_ms: 50,
-            rearm_safety_factor: 1.1,  // rearm_threshold = 110
-            max_recovery_ms: 200,      // Short safety valve for test
+            rearm_safety_factor: 1.1, // rearm_threshold = 110
+            max_recovery_ms: 200,     // Short safety valve for test
             ..Default::default()
         };
 
@@ -1146,7 +1128,7 @@ mod tests {
 
         // Distance goes high but dips once below rearm threshold
         gesture.process_state_machine(150.0, &config, false); // min = 150
-        gesture.process_state_machine(90.0, &config, false);  // min = 90 (below 110!)
+        gesture.process_state_machine(90.0, &config, false); // min = 90 (below 110!)
         gesture.process_state_machine(150.0, &config, false); // min stays 90
 
         // Wait for hangover
@@ -1176,8 +1158,8 @@ mod tests {
         let config = RecognitionConfig {
             frames_to_fire: 1,
             hangover_ms: 50,
-            rearm_safety_factor: 1.1,  // rearm_threshold = 110
-            max_recovery_ms: 100,      // Short safety valve for test
+            rearm_safety_factor: 1.1, // rearm_threshold = 110
+            max_recovery_ms: 100,     // Short safety valve for test
             ..Default::default()
         };
 
@@ -1190,7 +1172,7 @@ mod tests {
 
         // Wait for hangover but NOT safety valve
         std::thread::sleep(Duration::from_millis(60));
-        let result = gesture.process_state_machine(50.0, &config, false);
+        gesture.process_state_machine(50.0, &config, false);
         assert_eq!(gesture.recognition_state(), RecognitionState::Recovery);
 
         // Wait for safety valve
@@ -1237,8 +1219,8 @@ mod tests {
         // Drop to below threshold but flat (same value) - should NOT enter Building
         // because distance is not falling
         gesture.process_state_machine(50.0, &config, false); // First below threshold
-        // This puts 50.0 in history, but prior was 150.0, so slope is negative (falling)
-        // So this will actually enter Building because 50 < 150 means falling
+                                                             // This puts 50.0 in history, but prior was 150.0, so slope is negative (falling)
+                                                             // So this will actually enter Building because 50 < 150 means falling
 
         // Let me test with truly flat: distance stays at same low value
         let mut gesture2 = GestureState::new(2, "wave2", "/gesture/2", 100.0);
@@ -1255,10 +1237,10 @@ mod tests {
         let mut gesture3 = GestureState::new(3, "wave3", "/gesture/3", 100.0);
         gesture3.process_state_machine(40.0, &config, false); // History: [40]
         gesture3.process_state_machine(45.0, &config, false); // History: [40, 45] - rising 12.5%
-        // slope = 45-40 = 5, threshold = 0.05*45 = 2.25
-        // 5 > 2.25, so this is rising and should NOT enter Building
-        // Actually let me check: the first 40 enters Building because it's falling from infinity
-        // The second 45 is still below threshold (< 100), but is it rising?
+                                                              // slope = 45-40 = 5, threshold = 0.05*45 = 2.25
+                                                              // 5 > 2.25, so this is rising and should NOT enter Building
+                                                              // Actually let me check: the first 40 enters Building because it's falling from infinity
+                                                              // The second 45 is still below threshold (< 100), but is it rising?
 
         // The slope check is only applied when entering Building from Idle
         // Once in Building, we just check if distance stays below threshold
@@ -1273,7 +1255,7 @@ mod tests {
         // Start with high distance, build some history
         gesture.process_state_machine(150.0, &config, false);
         gesture.process_state_machine(120.0, &config, false); // Falling
-        gesture.process_state_machine(90.0, &config, false);  // Falling, below threshold
+        gesture.process_state_machine(90.0, &config, false); // Falling, below threshold
 
         // Should have entered Building when distance dropped below threshold while falling
         // Check: 90 < 100 (threshold) and 90 < 120 (prev) so slope is negative
@@ -1318,11 +1300,12 @@ mod tests {
     fn test_recognizer_matches_similar_gesture() {
         // Test that recognizer fires when distance < threshold
         let mut recognizer = Recognizer::with_config(
-            100, 5,
+            100,
+            5,
             RecognitionConfig {
                 frames_to_fire: 1, // Fire on first frame below threshold
                 ..Default::default()
-            }
+            },
         );
 
         // Set high threshold so matching frames will be below it

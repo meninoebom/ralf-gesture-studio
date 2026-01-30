@@ -299,16 +299,16 @@ pub fn lb_keogh(candidate: &Sequence, envelope: &LBEnvelope) -> f32 {
         return f32::INFINITY;
     }
 
-    let len = candidate.len().min(envelope.upper.len());
     let mut lb_sum = 0.0;
 
-    for i in 0..len {
-        let dim = candidate[i].len().min(envelope.upper[i].len());
-        for k in 0..dim {
-            if candidate[i][k] > envelope.upper[i][k] {
-                lb_sum += (candidate[i][k] - envelope.upper[i][k]).powi(2);
-            } else if candidate[i][k] < envelope.lower[i][k] {
-                lb_sum += (envelope.lower[i][k] - candidate[i][k]).powi(2);
+    for (cand_frame, (upper_frame, lower_frame)) in candidate.iter().zip(
+        envelope.upper.iter().zip(envelope.lower.iter()),
+    ) {
+        for ((&c, &u), &l) in cand_frame.iter().zip(upper_frame).zip(lower_frame) {
+            if c > u {
+                lb_sum += (c - u).powi(2);
+            } else if c < l {
+                lb_sum += (l - c).powi(2);
             }
             // If within envelope, contributes 0 to lower bound
         }

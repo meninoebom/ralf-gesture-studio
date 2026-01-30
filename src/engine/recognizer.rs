@@ -161,7 +161,6 @@ pub struct RecognitionResult {
     pub gesture_id: Option<u32>,
     pub gesture_name: Option<String>,
     pub distance: f32,
-    pub threshold: f32,
 }
 
 // ============================================================================
@@ -281,6 +280,7 @@ impl GestureState {
     }
 
     /// Get current recognition state
+    #[cfg(test)]
     pub fn recognition_state(&self) -> RecognitionState {
         self.state
     }
@@ -727,7 +727,6 @@ impl Recognizer {
                 gesture_id: None,
                 gesture_name: None,
                 distance: f32::MAX,
-                threshold: 0.0,
             });
         }
 
@@ -806,7 +805,7 @@ impl Recognizer {
             .unwrap_or(false);
 
         // Update gesture distances for UI and run state machines
-        let mut hit_result: Option<(u32, String, f32, f32)> = None;
+        let mut hit_result: Option<(u32, String, f32)> = None;
 
         for (idx, gesture) in self.gestures.iter_mut().enumerate() {
             // Find this gesture's distance
@@ -843,7 +842,6 @@ impl Recognizer {
                             gesture.id,
                             gesture.name.clone(),
                             dist,
-                            gesture.threshold,
                         ));
                     }
                 } else {
@@ -857,28 +855,26 @@ impl Recognizer {
         }
 
         // Return hit if we fired
-        if let Some((id, name, distance, threshold)) = hit_result {
+        if let Some((id, name, distance)) = hit_result {
             // Set global cooldown timestamp (NMS: suppress all gestures)
             self.last_any_hit_time = Some(Instant::now());
             return Some(RecognitionResult {
                 gesture_id: Some(id),
                 gesture_name: Some(name),
                 distance,
-                threshold,
             });
         }
 
         // No hit - return current best distance
-        let best = distances.iter()
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let best_distance = distances.iter()
+            .map(|(_, d)| *d)
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(f32::MAX);
 
         Some(RecognitionResult {
             gesture_id: None,
             gesture_name: None,
-            distance: best.map(|(_, d)| *d).unwrap_or(f32::MAX),
-            threshold: best
-                .map(|(idx, _)| self.gestures[*idx].threshold)
-                .unwrap_or(0.0),
+            distance: best_distance,
         })
     }
 

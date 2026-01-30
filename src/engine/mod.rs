@@ -7,14 +7,12 @@
 //! ## Architecture
 //!
 //! - `dtw` - Dynamic Time Warping with Sakoe-Chiba band, early abandoning, LB_Keogh
-//! - `buffer` - Circular frame buffer for sliding window
 //! - `recognizer` - Real-time recognition state machine
 //! - `training` - Training session with audio cues
 //! - `statistics` - Statistical threshold computation (μ+σ)
 //! - `diagnostics` - Diagnostic logging for analysis
 
 pub mod dtw;
-pub mod buffer;
 pub mod recognizer;
 pub mod training;
 pub mod statistics;

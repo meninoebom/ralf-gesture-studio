@@ -1,11 +1,11 @@
-mod model;
-mod gui;
-mod osc;
 mod engine;
+mod gui;
+mod model;
+mod osc;
 
-use std::sync::{Arc, Mutex};
 use gui::AppState;
 use osc::OscReceiver;
+use std::sync::{Arc, Mutex};
 
 fn main() {
     // Create the OSC receiver and get the handle for the app
@@ -55,7 +55,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{Vocabulary, Example, load_vocabulary, save_vocabulary};
+    use crate::model::{load_vocabulary, save_vocabulary, Example, Vocabulary};
     use tempfile::tempdir;
 
     #[test]

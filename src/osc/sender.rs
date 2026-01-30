@@ -1,7 +1,7 @@
 use std::net::UdpSocket;
 use std::time::Instant;
 
-use rosc::{OscMessage, OscPacket, OscType, encoder};
+use rosc::{encoder, OscMessage, OscPacket, OscType};
 
 /// Status of the OSC sender
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +114,9 @@ impl OscSender {
 
     /// Get time since last send in milliseconds
     pub fn ms_since_last_send(&self) -> Option<u64> {
-        self.state.last_send_time.map(|t| t.elapsed().as_millis() as u64)
+        self.state
+            .last_send_time
+            .map(|t| t.elapsed().as_millis() as u64)
     }
 
     /// Update the target host

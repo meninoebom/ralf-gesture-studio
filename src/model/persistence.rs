@@ -89,7 +89,10 @@ pub fn load_vocabulary(path: &Path) -> Result<Vocabulary, PersistenceError> {
         v => {
             // Unknown version - try to parse anyway (forward compatibility)
             // If parsing fails, it will return an error
-            eprintln!("Warning: Unknown vocabulary version '{}', attempting to load anyway", v);
+            eprintln!(
+                "Warning: Unknown vocabulary version '{}', attempting to load anyway",
+                v
+            );
             serde_json::from_str(&json)?
         }
     };

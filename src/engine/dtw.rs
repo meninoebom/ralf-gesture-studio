@@ -21,10 +21,7 @@ pub type Sequence = Vec<Frame>;
 pub fn euclidean_distance(a: &Frame, b: &Frame) -> f32 {
     assert_eq!(a.len(), b.len(), "Frames must have the same dimensions");
 
-    let sum_sq: f32 = a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).powi(2))
-        .sum();
+    let sum_sq: f32 = a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum();
 
     sum_sq.sqrt()
 }
@@ -73,9 +70,7 @@ pub fn dtw_distance(seq1: &Sequence, seq2: &Sequence) -> f32 {
             // - cost[i-1][j-1]: match (diagonal)
             // - cost[i-1][j]: insertion (vertical)
             // - cost[i][j-1]: deletion (horizontal)
-            let min_prev = cost[i - 1][j - 1]
-                .min(cost[i - 1][j])
-                .min(cost[i][j - 1]);
+            let min_prev = cost[i - 1][j - 1].min(cost[i - 1][j]).min(cost[i][j - 1]);
 
             cost[i][j] = dist + min_prev;
         }
@@ -129,9 +124,7 @@ pub fn dtw_distance_constrained(seq1: &Sequence, seq2: &Sequence, band_width: us
             let dist = euclidean_distance(&seq1[i - 1], &seq2[j - 1]);
 
             // Minimum of three possible moves (if within band):
-            let min_prev = cost[i - 1][j - 1]
-                .min(cost[i - 1][j])
-                .min(cost[i][j - 1]);
+            let min_prev = cost[i - 1][j - 1].min(cost[i - 1][j]).min(cost[i][j - 1]);
 
             cost[i][j] = dist + min_prev;
         }
@@ -192,9 +185,7 @@ pub fn dtw_distance_with_abandon(
             let dist = euclidean_distance(&seq1[i - 1], &seq2[j - 1]);
 
             // Minimum of three possible moves (if within band)
-            let min_prev = prev_row[j - 1]
-                .min(prev_row[j])
-                .min(curr_row[j - 1]);
+            let min_prev = prev_row[j - 1].min(prev_row[j]).min(curr_row[j - 1]);
 
             curr_row[j] = dist + min_prev;
             row_min = row_min.min(curr_row[j]);
@@ -211,7 +202,6 @@ pub fn dtw_distance_with_abandon(
 
     Some(prev_row[m])
 }
-
 
 // =========================================================================
 // LB_Keogh Lower Bound
@@ -301,9 +291,10 @@ pub fn lb_keogh(candidate: &Sequence, envelope: &LBEnvelope) -> f32 {
 
     let mut lb_sum = 0.0;
 
-    for (cand_frame, (upper_frame, lower_frame)) in candidate.iter().zip(
-        envelope.upper.iter().zip(envelope.lower.iter()),
-    ) {
+    for (cand_frame, (upper_frame, lower_frame)) in candidate
+        .iter()
+        .zip(envelope.upper.iter().zip(envelope.lower.iter()))
+    {
         for ((&c, &u), &l) in cand_frame.iter().zip(upper_frame).zip(lower_frame) {
             if c > u {
                 lb_sum += (c - u).powi(2);
@@ -316,7 +307,6 @@ pub fn lb_keogh(candidate: &Sequence, envelope: &LBEnvelope) -> f32 {
 
     lb_sum.sqrt()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -370,11 +360,7 @@ mod tests {
 
     #[test]
     fn test_dtw_identical_sequences() {
-        let seq = vec![
-            vec![1.0, 2.0],
-            vec![3.0, 4.0],
-            vec![5.0, 6.0],
-        ];
+        let seq = vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
         let distance = dtw_distance(&seq, &seq);
         assert_eq!(distance, 0.0);
     }
@@ -400,41 +386,31 @@ mod tests {
     #[test]
     fn test_dtw_time_warping_slower() {
         // Same pattern, but one is "slower" (repeated frames)
-        let fast = vec![
-            vec![0.0],
-            vec![1.0],
-        ];
-        let slow = vec![
-            vec![0.0],
-            vec![0.0],
-            vec![1.0],
-            vec![1.0],
-        ];
+        let fast = vec![vec![0.0], vec![1.0]];
+        let slow = vec![vec![0.0], vec![0.0], vec![1.0], vec![1.0]];
 
         let distance = dtw_distance(&fast, &slow);
         // DTW should align these well - distance should be low
-        assert!(distance < 1.0, "DTW should handle time warping, got {}", distance);
+        assert!(
+            distance < 1.0,
+            "DTW should handle time warping, got {}",
+            distance
+        );
     }
 
     #[test]
     fn test_dtw_time_warping_faster() {
         // One sequence is compressed
-        let slow = vec![
-            vec![0.0],
-            vec![0.5],
-            vec![1.0],
-            vec![1.5],
-            vec![2.0],
-        ];
-        let fast = vec![
-            vec![0.0],
-            vec![1.0],
-            vec![2.0],
-        ];
+        let slow = vec![vec![0.0], vec![0.5], vec![1.0], vec![1.5], vec![2.0]];
+        let fast = vec![vec![0.0], vec![1.0], vec![2.0]];
 
         let distance = dtw_distance(&slow, &fast);
         // Should still match reasonably well
-        assert!(distance < 2.0, "DTW should handle speed differences, got {}", distance);
+        assert!(
+            distance < 2.0,
+            "DTW should handle speed differences, got {}",
+            distance
+        );
     }
 
     #[test]
@@ -444,7 +420,11 @@ mod tests {
 
         let distance = dtw_distance(&seq1, &seq2);
         // Distance should be large (sqrt(100^2 + 100^2) ≈ 141.4)
-        assert!(distance > 100.0, "Different sequences should have large distance, got {}", distance);
+        assert!(
+            distance > 100.0,
+            "Different sequences should have large distance, got {}",
+            distance
+        );
     }
 
     #[test]
@@ -477,10 +457,7 @@ mod tests {
     #[test]
     fn test_dtw_multi_dimensional() {
         // Test with 4-dimensional frames (like 2 joints × XY)
-        let seq1 = vec![
-            vec![0.0, 0.0, 1.0, 1.0],
-            vec![1.0, 1.0, 2.0, 2.0],
-        ];
+        let seq1 = vec![vec![0.0, 0.0, 1.0, 1.0], vec![1.0, 1.0, 2.0, 2.0]];
         let seq2 = vec![
             vec![0.0, 0.0, 1.0, 1.0],
             vec![0.5, 0.5, 1.5, 1.5],
@@ -489,7 +466,11 @@ mod tests {
 
         let distance = dtw_distance(&seq1, &seq2);
         // Should be relatively small since the patterns are similar
-        assert!(distance < 2.0, "Similar multi-dim sequences should match well, got {}", distance);
+        assert!(
+            distance < 2.0,
+            "Similar multi-dim sequences should match well, got {}",
+            distance
+        );
     }
 
     // =========================================================================
@@ -525,11 +506,22 @@ mod tests {
     fn test_dtw_constrained_handles_warping() {
         // Same pattern, different speeds
         let fast = vec![vec![0.0], vec![1.0], vec![2.0]];
-        let slow = vec![vec![0.0], vec![0.0], vec![1.0], vec![1.0], vec![2.0], vec![2.0]];
+        let slow = vec![
+            vec![0.0],
+            vec![0.0],
+            vec![1.0],
+            vec![1.0],
+            vec![2.0],
+            vec![2.0],
+        ];
 
         // With sufficient band width, should still match well
         let distance = dtw_distance_constrained(&fast, &slow, 3);
-        assert!(distance < 1.0, "Should handle time warping, got {}", distance);
+        assert!(
+            distance < 1.0,
+            "Should handle time warping, got {}",
+            distance
+        );
     }
 
     #[test]
@@ -555,7 +547,10 @@ mod tests {
 
         // Verify result matches constrained DTW
         let expected = dtw_distance_constrained(&seq1, &seq2, 3);
-        assert!((result.unwrap() - expected).abs() < 0.01, "Should match constrained DTW");
+        assert!(
+            (result.unwrap() - expected).abs() < 0.01,
+            "Should match constrained DTW"
+        );
     }
 
     #[test]
@@ -566,7 +561,10 @@ mod tests {
 
         // With low best_so_far, should abandon
         let result = dtw_distance_with_abandon(&seq1, &seq2, 3, 1.0);
-        assert!(result.is_none(), "Should abandon when distance exceeds best_so_far");
+        assert!(
+            result.is_none(),
+            "Should abandon when distance exceeds best_so_far"
+        );
     }
 
     #[test]
@@ -673,7 +671,15 @@ mod tests {
         let envelope = compute_lb_envelope(&seq, 1);
 
         assert_eq!(lb_keogh(&empty, &envelope), f32::INFINITY);
-        assert_eq!(lb_keogh(&seq, &LBEnvelope { upper: vec![], lower: vec![] }), f32::INFINITY);
+        assert_eq!(
+            lb_keogh(
+                &seq,
+                &LBEnvelope {
+                    upper: vec![],
+                    lower: vec![]
+                }
+            ),
+            f32::INFINITY
+        );
     }
-
 }

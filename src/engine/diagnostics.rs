@@ -110,10 +110,19 @@ impl DiagnosticLogger {
         writeln!(writer, "#")?;
         writeln!(writer, "# Event types:")?;
         writeln!(writer, "#   REC: Recognition cycle - frame,buffer,window,gesture:dist:thresh:armed:cooldown,...")?;
-        writeln!(writer, "#   HIT: Hit fired - frame,gesture,distance,threshold,margin%")?;
-        writeln!(writer, "#   NEAR: Near miss - frame,gesture,distance,threshold,margin%,reason")?;
+        writeln!(
+            writer,
+            "#   HIT: Hit fired - frame,gesture,distance,threshold,margin%"
+        )?;
+        writeln!(
+            writer,
+            "#   NEAR: Near miss - frame,gesture,distance,threshold,margin%,reason"
+        )?;
         writeln!(writer, "#   STATE: State transition - gesture,from,to,distance,threshold,margin%,frames_in_state,reason")?;
-        writeln!(writer, "#   TRAIN: Training complete - gesture,examples,mean,std,threshold")?;
+        writeln!(
+            writer,
+            "#   TRAIN: Training complete - gesture,examples,mean,std,threshold"
+        )?;
         writeln!(writer, "#")?;
         writer.flush()?;
 
@@ -128,7 +137,11 @@ impl DiagnosticLogger {
     pub fn disable(&mut self) {
         if let Some(ref writer) = self.writer {
             if let Ok(mut w) = writer.lock() {
-                let _ = writeln!(w, "# Logging disabled at {}ms", self.start_time.elapsed().as_millis());
+                let _ = writeln!(
+                    w,
+                    "# Logging disabled at {}ms",
+                    self.start_time.elapsed().as_millis()
+                );
                 let _ = w.flush();
             }
         }
@@ -150,44 +163,117 @@ impl DiagnosticLogger {
         let timestamp = self.start_time.elapsed().as_millis();
 
         // Check if this is an important event that needs flushing
-        let needs_flush = matches!(&event,
-            DiagnosticEvent::Hit { .. } |
-            DiagnosticEvent::NearMiss { .. } |
-            DiagnosticEvent::StateChange { .. } |
-            DiagnosticEvent::TrainingComplete { .. }
+        let needs_flush = matches!(
+            &event,
+            DiagnosticEvent::Hit { .. }
+                | DiagnosticEvent::NearMiss { .. }
+                | DiagnosticEvent::StateChange { .. }
+                | DiagnosticEvent::TrainingComplete { .. }
         );
 
         let line = match event {
-            DiagnosticEvent::Recognition { frame_num, buffer_len, window_size, gestures } => {
+            DiagnosticEvent::Recognition {
+                frame_num,
+                buffer_len,
+                window_size,
+                gestures,
+            } => {
                 self.frame_count += 1;
                 // Only log every Nth cycle
                 if !self.frame_count.is_multiple_of(self.log_interval) {
                     return;
                 }
 
-                let gesture_data: Vec<String> = gestures.iter().map(|g| {
-                    let dist = g.distance.map(|d| format!("{:.0}", d)).unwrap_or_else(|| "-".to_string());
-                    let armed = if g.armed { "A" } else { "-" };
-                    let cooldown = if g.in_cooldown { "C" } else { "-" };
-                    format!("{}:{}:{:.0}:{}:{}", g.name, dist, g.threshold, armed, cooldown)
-                }).collect();
+                let gesture_data: Vec<String> = gestures
+                    .iter()
+                    .map(|g| {
+                        let dist = g
+                            .distance
+                            .map(|d| format!("{:.0}", d))
+                            .unwrap_or_else(|| "-".to_string());
+                        let armed = if g.armed { "A" } else { "-" };
+                        let cooldown = if g.in_cooldown { "C" } else { "-" };
+                        format!(
+                            "{}:{}:{:.0}:{}:{}",
+                            g.name, dist, g.threshold, armed, cooldown
+                        )
+                    })
+                    .collect();
 
-                format!("{},REC,{},{},{},{}", timestamp, frame_num, buffer_len, window_size, gesture_data.join(","))
+                format!(
+                    "{},REC,{},{},{},{}",
+                    timestamp,
+                    frame_num,
+                    buffer_len,
+                    window_size,
+                    gesture_data.join(",")
+                )
             }
-            DiagnosticEvent::Hit { frame_num, gesture_name, distance, threshold, margin_pct } => {
-                format!("{},HIT,{},{},{:.0},{:.0},{:.1}%", timestamp, frame_num, gesture_name, distance, threshold, margin_pct)
+            DiagnosticEvent::Hit {
+                frame_num,
+                gesture_name,
+                distance,
+                threshold,
+                margin_pct,
+            } => {
+                format!(
+                    "{},HIT,{},{},{:.0},{:.0},{:.1}%",
+                    timestamp, frame_num, gesture_name, distance, threshold, margin_pct
+                )
             }
-            DiagnosticEvent::NearMiss { frame_num, gesture_name, distance, threshold, margin_pct, reason } => {
-                format!("{},NEAR,{},{},{:.0},{:.0},{:.1}%,{}", timestamp, frame_num, gesture_name, distance, threshold, margin_pct, reason)
+            DiagnosticEvent::NearMiss {
+                frame_num,
+                gesture_name,
+                distance,
+                threshold,
+                margin_pct,
+                reason,
+            } => {
+                format!(
+                    "{},NEAR,{},{},{:.0},{:.0},{:.1}%,{}",
+                    timestamp, frame_num, gesture_name, distance, threshold, margin_pct, reason
+                )
             }
-            DiagnosticEvent::StateChange { gesture_name, from_state, to_state, distance, threshold, margin_pct, frames_in_state, reason } => {
-                format!("{},STATE,{},{},{},{:.0},{:.0},{:.1}%,{},{}",
-                    timestamp, gesture_name, from_state, to_state, distance, threshold, margin_pct, frames_in_state, reason)
+            DiagnosticEvent::StateChange {
+                gesture_name,
+                from_state,
+                to_state,
+                distance,
+                threshold,
+                margin_pct,
+                frames_in_state,
+                reason,
+            } => {
+                format!(
+                    "{},STATE,{},{},{},{:.0},{:.0},{:.1}%,{},{}",
+                    timestamp,
+                    gesture_name,
+                    from_state,
+                    to_state,
+                    distance,
+                    threshold,
+                    margin_pct,
+                    frames_in_state,
+                    reason
+                )
             }
-            DiagnosticEvent::TrainingComplete { gesture_name, example_count, mean, std, threshold } => {
-                let mean_str = mean.map(|m| format!("{:.0}", m)).unwrap_or_else(|| "-".to_string());
-                let std_str = std.map(|s| format!("{:.0}", s)).unwrap_or_else(|| "-".to_string());
-                format!("{},TRAIN,{},{},{},{},{:.0}", timestamp, gesture_name, example_count, mean_str, std_str, threshold)
+            DiagnosticEvent::TrainingComplete {
+                gesture_name,
+                example_count,
+                mean,
+                std,
+                threshold,
+            } => {
+                let mean_str = mean
+                    .map(|m| format!("{:.0}", m))
+                    .unwrap_or_else(|| "-".to_string());
+                let std_str = std
+                    .map(|s| format!("{:.0}", s))
+                    .unwrap_or_else(|| "-".to_string());
+                format!(
+                    "{},TRAIN,{},{},{},{},{:.0}",
+                    timestamp, gesture_name, example_count, mean_str, std_str, threshold
+                )
             }
         };
 

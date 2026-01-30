@@ -12,14 +12,14 @@
 //! - `statistics` - Statistical threshold computation (μ+σ)
 //! - `diagnostics` - Diagnostic logging for analysis
 
+pub mod diagnostics;
 pub mod dtw;
 pub mod recognizer;
-pub mod training;
 pub mod statistics;
-pub mod diagnostics;
+pub mod training;
 
 // Core types used by the app
-pub use recognizer::{Recognizer, HitLog, RecognitionConfig};
-pub use training::{TrainingSession, TrainingConfig, SessionState};
+pub use diagnostics::{DiagnosticEvent, DiagnosticLogger, GestureDiag};
+pub use recognizer::{HitLog, RecognitionConfig, Recognizer};
 pub use statistics::compute_threshold_stats;
-pub use diagnostics::{DiagnosticLogger, DiagnosticEvent, GestureDiag};
+pub use training::{SessionState, TrainingConfig, TrainingSession};

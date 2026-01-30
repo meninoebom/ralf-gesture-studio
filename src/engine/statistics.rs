@@ -95,7 +95,11 @@ pub fn compute_threshold_stats(examples: &[Sequence], coefficient: f32) -> Optio
     let mean = all_distances.iter().sum::<f32>() / n;
 
     // Compute standard deviation
-    let variance = all_distances.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / n;
+    let variance = all_distances
+        .iter()
+        .map(|d| (d - mean).powi(2))
+        .sum::<f32>()
+        / n;
     let std = variance.sqrt();
 
     // Compute threshold: μ + σ × coefficient
@@ -295,10 +299,7 @@ mod tests {
     #[test]
     fn test_best_template_index_with_2_examples() {
         // With only 2 examples, should default to index 0
-        let examples = vec![
-            make_sequence(&[1.0, 2.0]),
-            make_sequence(&[1.5, 2.5]),
-        ];
+        let examples = vec![make_sequence(&[1.0, 2.0]), make_sequence(&[1.5, 2.5])];
 
         let stats = compute_threshold_stats(&examples, 2.0).unwrap();
         assert_eq!(stats.best_template_index, Some(0));
@@ -315,7 +316,7 @@ mod tests {
             make_sequence(&[1.0]),
             make_sequence(&[1.1]),
             make_sequence(&[1.05]),
-            make_sequence(&[5.0]),  // outlier
+            make_sequence(&[5.0]), // outlier
         ];
 
         let stats = compute_threshold_stats(&examples, 2.0).unwrap();

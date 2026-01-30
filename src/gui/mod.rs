@@ -89,8 +89,7 @@ impl AppState {
             recognizer,
             hit_log: HitLog::new(100),
             selected_gesture_id,
-            // Use with_audio(false) to avoid Send/Sync issues with Tauri state
-            training_session: TrainingSession::with_audio(false),
+            training_session: TrainingSession::new(),
             training_config: TrainingConfig::default(),
             recognition_config,
             diagnostic_logger: DiagnosticLogger::new(),

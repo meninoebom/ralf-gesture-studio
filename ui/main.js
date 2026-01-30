@@ -361,7 +361,7 @@ function updateTrainingState(training) {
             elements.trainingPanel.classList.add('training-capturing');
             elements.trainingDisplay.innerHTML = `
                 <span class="capture-indicator">███ CAPTURING ███</span>
-                <span style="font-size: 48px; font-weight: 700; color: var(--red);">${training.remaining.toFixed(1)}s</span>
+                <span style="font-size: 48px; font-weight: 700; color: var(--red);">${Math.ceil(training.remaining)}s</span>
                 <progress value="${training.progress}" max="1" style="width: 80%; height: 8px;"></progress>
                 <p>${training.frame_count} frames captured</p>
                 <p class="dim">Press [Esc] to cancel</p>
@@ -374,7 +374,7 @@ function updateTrainingState(training) {
             elements.trainingPanel.classList.add('training-resting');
             elements.trainingDisplay.innerHTML = `
                 <span class="rest-indicator">REST</span>
-                <span style="font-size: 32px;">${training.remaining.toFixed(1)}s</span>
+                <span style="font-size: 32px;">${Math.ceil(training.remaining)}s</span>
                 <p class="green">Completed ${training.completed_reps} of ${training.total_reps} reps</p>
                 <p class="dim">Press [Esc] to cancel</p>
             `;

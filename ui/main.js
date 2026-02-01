@@ -57,6 +57,8 @@ function cacheElements() {
     elements.popoverOutputHost = document.getElementById('popover-output-host');
     elements.popoverOutputPort = document.getElementById('popover-output-port');
     elements.popoverOutputTime = document.getElementById('popover-output-time');
+    elements.dimensionMismatch = document.getElementById('dimension-mismatch');
+    elements.popoverDimDetail = document.getElementById('popover-dim-detail');
 
     elements.gestureList = document.getElementById('gesture-list');
     elements.btnAddGesture = document.getElementById('btn-add-gesture');
@@ -221,7 +223,19 @@ function updateConnectionStatus(status) {
         'Error': ['red', 'ERROR'],
     };
 
-    const [dotClass, statusText] = inputColors[status.input_status] || ['gray', 'UNKNOWN'];
+    let [dotClass, statusText] = inputColors[status.input_status] || ['gray', 'UNKNOWN'];
+
+    // Override with dimension mismatch warning
+    if (status.dimension_mismatch_expected != null) {
+        dotClass = 'red';
+        statusText = 'DIM MISMATCH';
+        elements.dimensionMismatch.classList.remove('hidden');
+        elements.popoverDimDetail.textContent =
+            `Expected ${status.dimension_mismatch_expected}, receiving ${status.dimension_mismatch_actual}`;
+    } else {
+        elements.dimensionMismatch.classList.add('hidden');
+    }
+
     elements.inputStatusDot.className = `status-dot ${dotClass}`;
     elements.inputStatus.textContent = statusText;
     elements.inputStatus.className = dotClass;

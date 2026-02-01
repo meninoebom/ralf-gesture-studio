@@ -50,6 +50,8 @@ pub struct AppState {
     recognition_config: RecognitionConfig,
     /// Diagnostic logger for recognition analysis
     diagnostic_logger: DiagnosticLogger,
+    /// Tracks frame dimension mismatch for UI feedback (None = OK)
+    dimension_mismatch: Option<(usize, usize)>,
 }
 
 impl AppState {
@@ -93,6 +95,7 @@ impl AppState {
             training_config: TrainingConfig::default(),
             recognition_config,
             diagnostic_logger: DiagnosticLogger::new(),
+            dimension_mismatch: None,
         }
     }
 
@@ -215,8 +218,31 @@ impl AppState {
         }
 
         let cooldown_ms = self.recognition_config.cooldown_ms;
+        let expected_dims = self.vocabulary.input.dimensions;
 
         for frame in frames {
+            // Validate frame dimensions against vocabulary config
+            if frame.len() != expected_dims {
+                if self.dimension_mismatch.map(|(_, a)| a) != Some(frame.len()) {
+                    eprintln!(
+                        "Frame dimension mismatch: expected {} dimensions, got {}. Frame dropped.",
+                        expected_dims,
+                        frame.len()
+                    );
+                }
+                self.dimension_mismatch = Some((expected_dims, frame.len()));
+                continue;
+            }
+
+            // Clear mismatch on successful frame
+            if self.dimension_mismatch.is_some() {
+                eprintln!(
+                    "Frame dimensions now match expected {}. Resuming normal operation.",
+                    expected_dims
+                );
+                self.dimension_mismatch = None;
+            }
+
             // If training, add frames to session
             if self.training_session.state == SessionState::Capturing {
                 self.training_session.add_frame(frame.clone());
@@ -399,6 +425,8 @@ pub struct OscStatusDto {
     ms_since_last_send: u64,
     output_error: Option<String>,
     send_count: u64,
+    dimension_mismatch_expected: Option<usize>,
+    dimension_mismatch_actual: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -508,6 +536,8 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
         ms_since_last_send: app.osc_sender.ms_since_last_send().unwrap_or(0),
         output_error: app.osc_sender.state.error_message.clone(),
         send_count: app.osc_sender.state.send_count,
+        dimension_mismatch_expected: app.dimension_mismatch.map(|(e, _)| e),
+        dimension_mismatch_actual: app.dimension_mismatch.map(|(_, a)| a),
     };
 
     let training_state = match app.training_session.state {
@@ -631,6 +661,7 @@ pub fn new_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> 
     app.file_path = None;
     app.dirty = false;
     app.selected_gesture_id = None;
+    app.dimension_mismatch = None;
     app.sync_recognizer();
 
     Ok(())
@@ -657,6 +688,7 @@ pub fn open_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String>
                 app.file_path = Some(path);
                 app.dirty = false;
                 app.selected_gesture_id = app.vocabulary.gestures.first().map(|g| g.id);
+                app.dimension_mismatch = None;
                 app.sync_recognizer();
 
                 app.osc_sender =

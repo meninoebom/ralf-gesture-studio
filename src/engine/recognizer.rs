@@ -421,6 +421,11 @@ impl FrameBuffer {
         self.frames.len()
     }
 
+    /// Returns the dimension count of frames in the buffer, or None if empty.
+    pub fn frame_dimensions(&self) -> Option<usize> {
+        self.frames.front().map(|f| f.len())
+    }
+
     /// Get the most recent N frames as a sequence
     pub fn recent(&self, n: usize) -> Sequence {
         let start = self.frames.len().saturating_sub(n);
@@ -730,6 +735,14 @@ impl Recognizer {
     /// 3. Run state machines (only best-matching gesture advances)
     /// 4. Fire if state machine transitions to Peak
     pub fn process_frame(&mut self, frame: Frame) -> Option<RecognitionResult> {
+        // Defense-in-depth: skip frames with mismatched dimensions.
+        // Primary validation is in AppState::process_frames().
+        if let Some(expected) = self.buffer.frame_dimensions() {
+            if frame.len() != expected {
+                return None;
+            }
+        }
+
         self.buffer.push(frame);
         self.frame_count += 1;
 

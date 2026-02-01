@@ -73,8 +73,9 @@ pub fn load_vocabulary(path: &Path) -> Result<Vocabulary, PersistenceError> {
 
     let mut vocabulary = match version_check.version.as_str() {
         "1.0" => {
-            // v1.0 -> v1.1 migration: serde defaults handle new fields
-            // UUID will be generated, metadata fields get defaults
+            // v1.0 -> v1.2 migration: serde defaults handle new fields
+            // UUID will be generated, metadata fields get defaults,
+            // preprocessing defaults to all OFF (preserving raw behavior)
             let mut vocab: Vocabulary = serde_json::from_str(&json)?;
             // Generate a new UUID for migrated files (they didn't have one)
             vocab.uuid = Uuid::new_v4();
@@ -83,6 +84,13 @@ pub fn load_vocabulary(path: &Path) -> Result<Vocabulary, PersistenceError> {
             vocab
         }
         "1.1" => {
+            // v1.1 -> v1.2 migration: serde defaults handle preprocessing field
+            // preprocessing defaults to all OFF via #[serde(default)]
+            let mut vocab: Vocabulary = serde_json::from_str(&json)?;
+            vocab.version = Vocabulary::CURRENT_VERSION.to_string();
+            vocab
+        }
+        "1.2" => {
             // Current version, parse directly
             serde_json::from_str(&json)?
         }

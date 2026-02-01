@@ -5,7 +5,8 @@ use tauri::State;
 
 use crate::engine::{
     compute_threshold_stats, DiagnosticEvent, DiagnosticLogger, GestureDiag, HitLog,
-    RecognitionConfig, Recognizer, SessionState, TrainingConfig, TrainingSession,
+    Preprocessor, RecognitionConfig, Recognizer, SessionState, TrainingConfig,
+    TrainingSession,
 };
 use crate::model::{
     default_vocabulary_dir, load_vocabulary as model_load_vocabulary,
@@ -52,6 +53,8 @@ pub struct AppState {
     diagnostic_logger: DiagnosticLogger,
     /// Tracks frame dimension mismatch for UI feedback (None = OK)
     dimension_mismatch: Option<(usize, usize)>,
+    /// Frame preprocessor (hip centering, scale normalization, velocity features)
+    preprocessor: Preprocessor,
 }
 
 impl AppState {
@@ -81,6 +84,11 @@ impl AppState {
 
         let selected_gesture_id = vocabulary.gestures.first().map(|g| g.id);
 
+        let preprocessor = Preprocessor::new(
+            vocabulary.preprocessing.clone(),
+            &vocabulary.tracking_system,
+        );
+
         Self {
             vocabulary,
             file_path: None,
@@ -96,6 +104,7 @@ impl AppState {
             recognition_config,
             diagnostic_logger: DiagnosticLogger::new(),
             dimension_mismatch: None,
+            preprocessor,
         }
     }
 
@@ -104,6 +113,7 @@ impl AppState {
         let was_active = self.recognizer.is_active();
 
         self.recognizer = Recognizer::with_config(600, 180, self.recognition_config.clone());
+        self.preprocessor.reset();
 
         for gesture in &self.vocabulary.gestures {
             self.recognizer.add_gesture(
@@ -114,8 +124,9 @@ impl AppState {
             );
 
             for example in &gesture.examples {
-                self.recognizer
-                    .add_example(gesture.id, example.frames.clone());
+                // Preprocess stored raw frames before adding to recognizer
+                let processed = self.preprocessor.process_sequence(&example.frames);
+                self.recognizer.add_example(gesture.id, processed);
             }
         }
 
@@ -135,13 +146,16 @@ impl AppState {
             }
 
             let frame_count = frames.len();
+            // Store RAW frames in the vocabulary (preprocessing applied at comparison time)
             let example = Example::new(frames.clone(), frame_count as u64);
 
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
                 gesture.add_example(example);
             }
 
-            self.recognizer.add_example(gesture_id, frames);
+            // Add PREPROCESSED frames to recognizer
+            let processed = self.preprocessor.process_sequence(&frames);
+            self.recognizer.add_example(gesture_id, processed);
         }
 
         // Compute statistical threshold
@@ -153,10 +167,16 @@ impl AppState {
 
     /// Compute threshold statistics for a gesture
     fn compute_gesture_statistics(&mut self, gesture_id: u32) {
+        // Preprocess raw stored examples before computing pairwise DTW distances
         let examples: Vec<Vec<Vec<f32>>> = self
             .vocabulary
             .get_gesture(gesture_id)
-            .map(|g| g.examples.iter().map(|e| e.frames.clone()).collect())
+            .map(|g| {
+                g.examples
+                    .iter()
+                    .map(|e| self.preprocessor.process_sequence(&e.frames))
+                    .collect()
+            })
             .unwrap_or_default();
 
         if examples.len() < 2 {
@@ -243,13 +263,16 @@ impl AppState {
                 self.dimension_mismatch = None;
             }
 
-            // If training, add frames to session
+            // If training, add RAW frames to session (stored unprocessed in .ralf files)
             if self.training_session.state == SessionState::Capturing {
                 self.training_session.add_frame(frame.clone());
             }
 
-            // Feed to recognizer
-            if let Some(result) = self.recognizer.process_frame(frame.clone()) {
+            // Preprocess frame before recognition
+            let processed = self.preprocessor.process_frame(&frame);
+
+            // Feed preprocessed frame to recognizer
+            if let Some(result) = self.recognizer.process_frame(processed) {
                 let frame_num = self.osc_receiver.state.frame_count as usize;
 
                 // Log state transitions if diagnostics enabled
@@ -662,6 +685,10 @@ pub fn new_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> 
     app.dirty = false;
     app.selected_gesture_id = None;
     app.dimension_mismatch = None;
+    app.preprocessor = Preprocessor::new(
+        app.vocabulary.preprocessing.clone(),
+        &app.vocabulary.tracking_system,
+    );
     app.sync_recognizer();
 
     Ok(())
@@ -689,6 +716,10 @@ pub fn open_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String>
                 app.dirty = false;
                 app.selected_gesture_id = app.vocabulary.gestures.first().map(|g| g.id);
                 app.dimension_mismatch = None;
+                app.preprocessor = Preprocessor::new(
+                    app.vocabulary.preprocessing.clone(),
+                    &app.vocabulary.tracking_system,
+                );
                 app.sync_recognizer();
 
                 app.osc_sender =

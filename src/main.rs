@@ -192,6 +192,61 @@ mod tests {
     }
 
     #[test]
+    fn test_preprocessing_config_defaults_off() {
+        let vocab = Vocabulary::new("Test");
+        assert!(!vocab.preprocessing.hip_normalize);
+        assert!(!vocab.preprocessing.scale_normalize);
+        assert!(!vocab.preprocessing.velocity_features);
+    }
+
+    #[test]
+    fn test_preprocessing_config_roundtrip() {
+        use crate::engine::preprocess::PreprocessingConfig;
+
+        let mut vocab = Vocabulary::new("Test Preprocessing");
+        vocab.preprocessing = PreprocessingConfig {
+            hip_normalize: true,
+            scale_normalize: true,
+            velocity_features: false,
+        };
+        vocab.add_gesture("wave");
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("preprocess.ralf");
+        save_vocabulary(&vocab, &path).unwrap();
+
+        let loaded = load_vocabulary(&path).unwrap();
+        assert!(loaded.preprocessing.hip_normalize);
+        assert!(loaded.preprocessing.scale_normalize);
+        assert!(!loaded.preprocessing.velocity_features);
+        assert_eq!(loaded.version, "1.2");
+    }
+
+    #[test]
+    fn test_passthrough_preprocessing_matches_raw() {
+        use crate::engine::preprocess::{PreprocessingConfig, Preprocessor};
+
+        // With all preprocessing OFF, output should equal input
+        let config = PreprocessingConfig::default();
+        let preprocessor = Preprocessor::new(config, "mediapipe-pose-33-xy");
+
+        let raw_frames: Vec<Vec<f32>> = vec![
+            vec![0.1; 66],
+            vec![0.2; 66],
+            vec![0.3; 66],
+        ];
+
+        let processed = preprocessor.process_sequence(&raw_frames);
+        assert_eq!(processed.len(), raw_frames.len());
+        for (raw, proc) in raw_frames.iter().zip(processed.iter()) {
+            assert_eq!(raw.len(), proc.len());
+            for (r, p) in raw.iter().zip(proc.iter()) {
+                assert!((r - p).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
     fn test_gesture_ids_continue_after_load() {
         let mut vocab = Vocabulary::new("Test");
         vocab.add_gesture("one");

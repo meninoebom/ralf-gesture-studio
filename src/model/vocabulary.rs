@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::engine::preprocess::PreprocessingConfig;
+
 /// Default coefficient for statistical threshold (μ + σ×coefficient)
 fn default_threshold_coefficient() -> f32 {
     2.0
@@ -244,6 +246,12 @@ pub struct Vocabulary {
     )]
     pub extensions: HashMap<String, serde_json::Value>,
 
+    // --- Preprocessing pipeline (v1.2) ---
+    /// Configuration for the frame preprocessing pipeline.
+    /// Controls hip centering, scale normalization, and velocity features.
+    #[serde(default)]
+    pub preprocessing: PreprocessingConfig,
+
     /// Baseline frames (deprecated - kept for file compatibility)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Vec<Vec<f32>>>,
@@ -256,7 +264,7 @@ pub struct Vocabulary {
 
 impl Vocabulary {
     /// Current file format version
-    pub const CURRENT_VERSION: &'static str = "1.1";
+    pub const CURRENT_VERSION: &'static str = "1.2";
 
     /// Create a new empty vocabulary with the given name
     pub fn new(name: &str) -> Self {
@@ -277,6 +285,8 @@ impl Vocabulary {
             creator: None,
             tags: Vec::new(),
             extensions: HashMap::new(),
+            // Preprocessing pipeline (defaults to all OFF for new vocabularies)
+            preprocessing: PreprocessingConfig::default(),
             // Legacy/internal fields
             baseline: None,
             gestures: Vec::new(),

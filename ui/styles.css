@@ -219,10 +219,12 @@ header h1 {
 
 #btn-training.active {
     border-right-color: var(--blue);
+    color: var(--blue);
 }
 
 #btn-performance.active {
     border-right-color: var(--cyan);
+    color: var(--cyan);
 }
 
 #mode-content {

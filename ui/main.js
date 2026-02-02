@@ -14,6 +14,7 @@ let state = {
     lastTrainingHash: null, // Track training state changes
     diagnosticsEnabled: false,
     diagnosticsPath: null,
+    expandedGestures: new Set(), // Track which gesture example lists are expanded
 };
 
 // DOM Elements
@@ -294,10 +295,12 @@ function renderGestures(gestures) {
         return;
     }
 
-    // Create a hash of the gesture data + selected ID to detect changes
+    // Create a hash of the gesture data + selected ID + expanded state to detect changes
     const currentHash = JSON.stringify({
         gestures: gestures.map(g => ({ id: g.id, name: g.name, examples: g.examples.length, osc_address: g.osc_address })),
-        selectedId: state.selectedGestureId
+        selectedId: state.selectedGestureId,
+        expanded: [...state.expandedGestures],
+        trainingActive: state.trainingState !== 'idle',
     });
 
     // Skip re-render if nothing changed
@@ -308,7 +311,13 @@ function renderGestures(gestures) {
 
     elements.gestureList.innerHTML = '';
 
+    const isTrainingActive = state.trainingState !== 'idle';
+
     for (const gesture of gestures) {
+        const isExpanded = state.expandedGestures.has(gesture.id);
+        const container = document.createElement('div');
+        container.className = 'gesture-container';
+
         const row = document.createElement('div');
         row.className = 'gesture-row';
         row.innerHTML = `
@@ -319,7 +328,9 @@ function renderGestures(gestures) {
             </span>
             <span class="name col-name ${state.selectedGestureId === gesture.id ? 'selected' : ''}"
                   data-id="${gesture.id}">${gesture.name}</span>
-            <span class="examples col-examples">${gesture.examples.length}</span>
+            <span class="examples col-examples clickable ${isExpanded ? 'expanded' : ''}"
+                  data-id="${gesture.id}"
+                  title="${gesture.examples.length > 0 ? 'Click to expand examples' : ''}">${gesture.examples.length}${gesture.examples.length > 0 ? (isExpanded ? ' ▾' : ' ▸') : ''}</span>
             <span class="address col-address">${gesture.osc_address}</span>
             <span class="actions col-actions">
                 <button class="btn-select" data-id="${gesture.id}">
@@ -334,6 +345,16 @@ function renderGestures(gestures) {
             e.stopPropagation();
             renameGesture(gesture.id, nameEl);
         });
+
+        // Toggle example list on example count click
+        const examplesEl = row.querySelector('.examples');
+        if (gesture.examples.length > 0) {
+            examplesEl.addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleExampleList(gesture.id);
+            });
+        }
+
         row.querySelector('.btn-select').addEventListener('click', (e) => {
             e.stopPropagation();
             selectGesture(gesture.id);
@@ -343,7 +364,32 @@ function renderGestures(gestures) {
             deleteGesture(gesture.id);
         });
 
-        elements.gestureList.appendChild(row);
+        container.appendChild(row);
+
+        // Render expanded example list
+        if (isExpanded && gesture.examples.length > 0) {
+            const exList = document.createElement('div');
+            exList.className = 'example-list';
+            gesture.examples.forEach((ex, idx) => {
+                const time = new Date(ex.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                const durationSec = (ex.duration_ms / 1000).toFixed(1);
+                const item = document.createElement('div');
+                item.className = 'example-item';
+                item.innerHTML = `
+                    <span class="example-info dim">${time} · ${durationSec}s · ${ex.frame_count} frames</span>
+                    <button class="example-delete-btn" data-gesture-id="${gesture.id}" data-index="${idx}"
+                            ${isTrainingActive ? 'disabled' : ''}>×</button>
+                `;
+                item.querySelector('.example-delete-btn').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteExample(gesture.id, idx, gesture.name);
+                });
+                exList.appendChild(item);
+            });
+            container.appendChild(exList);
+        }
+
+        elements.gestureList.appendChild(container);
     }
 
     // Update selected gesture name in training panel
@@ -392,7 +438,7 @@ function updateTrainingState(training) {
             elements.trainingDisplay.innerHTML = `
                 <span class="countdown-number">${training.countdown}</span>
                 <p>Get ready for rep ${training.current_rep} of ${training.total_reps}</p>
-                <p class="dim">Press [Esc] to cancel</p>
+                <button class="stop-training-btn" onclick="cancelTraining()">Stop (Esc)</button>
             `;
             elements.trainingStatus.textContent = 'COUNTDOWN';
             elements.trainingStatus.className = 'gold';
@@ -405,7 +451,7 @@ function updateTrainingState(training) {
                 <span style="font-size: 48px; font-weight: 700; color: var(--red);">${Math.ceil(training.remaining)}s</span>
                 <progress value="${training.progress}" max="1" style="width: 80%; height: 8px;"></progress>
                 <p>${training.frame_count} frames captured</p>
-                <p class="dim">Press [Esc] to cancel</p>
+                <button class="stop-training-btn" onclick="cancelTraining()">Stop (Esc)</button>
             `;
             elements.trainingStatus.textContent = 'CAPTURING';
             elements.trainingStatus.className = 'red';
@@ -417,7 +463,7 @@ function updateTrainingState(training) {
                 <span class="rest-indicator">REST</span>
                 <span style="font-size: 32px;">${Math.ceil(training.remaining)}s</span>
                 <p class="green">Completed ${training.completed_reps} of ${training.total_reps} reps</p>
-                <p class="dim">Press [Esc] to cancel</p>
+                <button class="stop-training-btn" onclick="cancelTraining()">Stop (Esc)</button>
             `;
             elements.trainingStatus.textContent = 'RESTING';
             elements.trainingStatus.className = 'orange';
@@ -670,6 +716,21 @@ async function deleteGesture(id) {
         }
         state.lastGesturesHash = null; // Force re-render
     }
+}
+
+function toggleExampleList(gestureId) {
+    if (state.expandedGestures.has(gestureId)) {
+        state.expandedGestures.delete(gestureId);
+    } else {
+        state.expandedGestures.add(gestureId);
+    }
+    state.lastGesturesHash = null; // Force re-render
+}
+
+async function deleteExample(gestureId, index, gestureName) {
+    if (!confirm(`Delete this example from "${gestureName}"?`)) return;
+    await invoke('delete_example', { gestureId, exampleIndex: index });
+    state.lastGesturesHash = null; // Force re-render
 }
 
 async function startTraining() {

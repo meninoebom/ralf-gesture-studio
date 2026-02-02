@@ -165,12 +165,9 @@ impl AppState {
                 self.recognizer.add_example(gesture.id, scaled.clone());
 
                 // Add ephemeral augmented copies (of the scaled data)
-                for aug in generate_augmented(
-                    &scaled,
-                    &self.vocabulary.augmentation,
-                    gesture.id,
-                    ex_idx,
-                ) {
+                for aug in
+                    generate_augmented(&scaled, &self.vocabulary.augmentation, gesture.id, ex_idx)
+                {
                     self.recognizer.add_example(gesture.id, aug);
                 }
             }
@@ -1195,8 +1192,7 @@ pub fn set_consensus(
     if let Some(gesture) = app.vocabulary.get_gesture_mut(gesture_id) {
         gesture.consensus_enabled = enabled;
     }
-    app.recognizer
-        .set_consensus(gesture_id, enabled, 0.5);
+    app.recognizer.set_consensus(gesture_id, enabled, 0.5);
     app.mark_dirty();
 
     Ok(())

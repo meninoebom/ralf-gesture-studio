@@ -234,11 +234,7 @@ mod tests {
         let config = PreprocessingConfig::default();
         let preprocessor = Preprocessor::new(config, "mediapipe-pose-33-xy");
 
-        let raw_frames: Vec<Vec<f32>> = vec![
-            vec![0.1; 66],
-            vec![0.2; 66],
-            vec![0.3; 66],
-        ];
+        let raw_frames: Vec<Vec<f32>> = vec![vec![0.1; 66], vec![0.2; 66], vec![0.3; 66]];
 
         let processed = preprocessor.process_sequence(&raw_frames);
         assert_eq!(processed.len(), raw_frames.len());
@@ -316,6 +312,72 @@ mod tests {
         let vocab: Vocabulary = serde_json::from_str(json).unwrap();
         assert!(!vocab.augmentation.enabled);
         assert_eq!(vocab.augmentation.multiplier, 2);
+    }
+
+    // --- Example deletion ---
+
+    #[test]
+    fn test_remove_example_valid_index() {
+        let mut vocab = Vocabulary::new("Test");
+        let id = vocab.add_gesture("wave");
+        let gesture = vocab.get_gesture_mut(id).unwrap();
+
+        gesture.add_example(Example::new(vec![vec![1.0]], 100));
+        gesture.add_example(Example::new(vec![vec![2.0]], 200));
+        gesture.add_example(Example::new(vec![vec![3.0]], 300));
+        assert_eq!(gesture.example_count(), 3);
+
+        let removed = gesture.remove_example(1).unwrap();
+        assert_eq!(removed.duration_ms, 200);
+        assert_eq!(gesture.example_count(), 2);
+    }
+
+    #[test]
+    fn test_remove_example_out_of_bounds() {
+        let mut vocab = Vocabulary::new("Test");
+        let id = vocab.add_gesture("wave");
+        let gesture = vocab.get_gesture_mut(id).unwrap();
+        gesture.add_example(Example::new(vec![vec![1.0]], 100));
+
+        let result = gesture.remove_example(5);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("out of bounds"));
+    }
+
+    #[test]
+    fn test_remove_example_clears_statistics_when_below_two() {
+        let mut vocab = Vocabulary::new("Test");
+        let id = vocab.add_gesture("wave");
+        let gesture = vocab.get_gesture_mut(id).unwrap();
+
+        gesture.add_example(Example::new(vec![vec![1.0]], 100));
+        gesture.add_example(Example::new(vec![vec![2.0]], 200));
+
+        // Set fake statistics
+        gesture.update_statistics(50.0, 10.0);
+        assert!(gesture.distance_mean.is_some());
+        assert!(gesture.distance_std.is_some());
+
+        // Remove one — drops to 1, statistics should be cleared
+        gesture.remove_example(0).unwrap();
+        assert_eq!(gesture.example_count(), 1);
+        assert!(
+            gesture.distance_mean.is_none(),
+            "statistics should be cleared when < 2 examples"
+        );
+        assert!(gesture.distance_std.is_none());
+    }
+
+    #[test]
+    fn test_remove_last_example() {
+        let mut vocab = Vocabulary::new("Test");
+        let id = vocab.add_gesture("wave");
+        let gesture = vocab.get_gesture_mut(id).unwrap();
+        gesture.add_example(Example::new(vec![vec![1.0]], 100));
+
+        gesture.remove_example(0).unwrap();
+        assert_eq!(gesture.example_count(), 0);
+        assert!(!gesture.has_examples());
     }
 
     // --- Phase 3: Joint weighting + Consensus ---

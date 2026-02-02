@@ -489,6 +489,41 @@ mod tests {
     }
 
     #[test]
+    fn test_cancel_clears_completed_examples() {
+        let mut session = test_session();
+        let config = TrainingConfig {
+            reps: 3,
+            duration_secs: 0.05,
+            rest_secs: 0.05,
+            countdown_secs: 0.05,
+        };
+
+        session.start(1, "wave", config);
+
+        // Go through countdown
+        sleep(Duration::from_millis(100));
+        session.update();
+        assert_eq!(session.state, SessionState::Capturing);
+
+        // Add frames and complete first rep
+        session.add_frame(vec![1.0, 2.0]);
+        sleep(Duration::from_millis(100));
+        session.update();
+        assert_eq!(session.completed_reps, 1);
+        assert_eq!(session.completed_examples.len(), 1);
+
+        // Cancel mid-session
+        session.cancel();
+
+        assert_eq!(session.state, SessionState::Idle);
+        assert!(session.current_frames.is_empty());
+        assert!(
+            session.completed_examples.is_empty(),
+            "completed_examples should be cleared on cancel"
+        );
+    }
+
+    #[test]
     fn test_is_active() {
         let mut session = test_session();
 

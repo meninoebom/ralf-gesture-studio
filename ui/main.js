@@ -125,10 +125,25 @@ function setupEventListeners() {
     // Gestures
     elements.btnAddGesture.addEventListener('click', addGesture);
 
+    // Example delete — event delegation on gesture list (survives re-renders)
+    elements.gestureList.addEventListener('click', (e) => {
+        if (e.target.classList.contains('example-delete-btn') && !e.target.disabled) {
+            e.stopPropagation();
+            const gestureId = parseInt(e.target.dataset.gestureId);
+            const index = parseInt(e.target.dataset.index);
+            const gesture = state.vocabulary?.gestures.find(g => g.id === gestureId);
+            const name = gesture ? gesture.name : 'gesture';
+            deleteExample(gestureId, index, name);
+        }
+    });
+
     // Training button is dynamically rendered, use event delegation
     elements.trainingDisplay.addEventListener('click', (e) => {
         if (e.target.id === 'btn-start-training') {
             startTraining();
+        }
+        if (e.target.classList.contains('stop-training-btn')) {
+            cancelTraining();
         }
     });
 
@@ -380,10 +395,7 @@ function renderGestures(gestures) {
                     <button class="example-delete-btn" data-gesture-id="${gesture.id}" data-index="${idx}"
                             ${isTrainingActive ? 'disabled' : ''}>×</button>
                 `;
-                item.querySelector('.example-delete-btn').addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    deleteExample(gesture.id, idx, gesture.name);
-                });
+                // Click handled via event delegation on gestureList
                 exList.appendChild(item);
             });
             container.appendChild(exList);
@@ -438,7 +450,7 @@ function updateTrainingState(training) {
             elements.trainingDisplay.innerHTML = `
                 <span class="countdown-number">${training.countdown}</span>
                 <p>Get ready for rep ${training.current_rep} of ${training.total_reps}</p>
-                <button class="stop-training-btn" onclick="cancelTraining()">Stop (Esc)</button>
+                <button class="stop-training-btn">Stop (Esc)</button>
             `;
             elements.trainingStatus.textContent = 'COUNTDOWN';
             elements.trainingStatus.className = 'gold';
@@ -451,7 +463,7 @@ function updateTrainingState(training) {
                 <span style="font-size: 48px; font-weight: 700; color: var(--red);">${Math.ceil(training.remaining)}s</span>
                 <progress value="${training.progress}" max="1" style="width: 80%; height: 8px;"></progress>
                 <p>${training.frame_count} frames captured</p>
-                <button class="stop-training-btn" onclick="cancelTraining()">Stop (Esc)</button>
+                <button class="stop-training-btn">Stop (Esc)</button>
             `;
             elements.trainingStatus.textContent = 'CAPTURING';
             elements.trainingStatus.className = 'red';
@@ -463,7 +475,7 @@ function updateTrainingState(training) {
                 <span class="rest-indicator">REST</span>
                 <span style="font-size: 32px;">${Math.ceil(training.remaining)}s</span>
                 <p class="green">Completed ${training.completed_reps} of ${training.total_reps} reps</p>
-                <button class="stop-training-btn" onclick="cancelTraining()">Stop (Esc)</button>
+                <button class="stop-training-btn">Stop (Esc)</button>
             `;
             elements.trainingStatus.textContent = 'RESTING';
             elements.trainingStatus.className = 'orange';

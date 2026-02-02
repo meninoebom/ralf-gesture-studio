@@ -73,6 +73,8 @@ function cacheElements() {
     elements.btnStartTraining = document.getElementById('btn-start-training');
     elements.trainingHint = document.getElementById('training-hint');
     elements.trainingStatus = document.getElementById('training-status');
+    elements.qualityFeedback = document.getElementById('quality-feedback');
+    elements.btnAugmentation = document.getElementById('btn-augmentation');
 
     elements.performancePanel = document.getElementById('performance-panel');
     elements.hitDisplay = document.getElementById('hit-display');
@@ -144,6 +146,9 @@ function setupEventListeners() {
         await invoke('set_cooldown', { ms: parseInt(elements.cooldownMs.value) });
     });
 
+    // Augmentation toggle
+    elements.btnAugmentation.addEventListener('click', toggleAugmentation);
+
     // Diagnostics toggle
     elements.btnToggleDiagnostics.addEventListener('click', toggleDiagnostics);
 }
@@ -190,6 +195,13 @@ function updateFromState(appState) {
 
     // Connection status
     updateConnectionStatus(appState.osc_status);
+
+    // Augmentation toggle state
+    if (appState.vocabulary?.augmentation) {
+        const aug = appState.vocabulary.augmentation;
+        elements.btnAugmentation.textContent = aug.enabled ? `ON (×${aug.multiplier})` : 'OFF';
+        elements.btnAugmentation.classList.toggle('active', aug.enabled);
+    }
 
     // Training state
     updateTrainingState(appState.training);
@@ -349,6 +361,7 @@ function updateTrainingState(training) {
 
     switch (training.state) {
         case 'idle':
+            elements.qualityFeedback.classList.add('hidden');
             elements.trainingDisplay.innerHTML = `
                 <button id="btn-start-training" class="big-button" ${!state.selectedGestureId ? 'disabled' : ''}>
                     ▶ START TRAINING
@@ -397,7 +410,7 @@ function updateTrainingState(training) {
             break;
 
         case 'complete':
-            // Phase 3: Show calibration info after training completes
+            // Show calibration info after training completes
             const trainedGesture = training.gesture_id && state.vocabulary?.gestures
                 ? state.vocabulary.gestures.find(g => g.id === training.gesture_id)
                 : null;
@@ -411,6 +424,17 @@ function updateTrainingState(training) {
             `;
             elements.trainingStatus.textContent = 'COMPLETE';
             elements.trainingStatus.className = 'green';
+
+            // Show quality feedback if any issues detected
+            if (training.quality_issues && training.quality_issues.length > 0) {
+                elements.qualityFeedback.classList.remove('hidden');
+                elements.qualityFeedback.innerHTML = training.quality_issues
+                    .map(q => `<div class="quality-warning"><span class="quality-label">${q.label}</span> Example #${q.example_index}: ${q.message}</div>`)
+                    .join('');
+            } else {
+                elements.qualityFeedback.classList.add('hidden');
+                elements.qualityFeedback.innerHTML = '';
+            }
             break;
     }
 }
@@ -641,6 +665,12 @@ async function cancelTraining() {
     if (state.trainingState !== 'idle') {
         await invoke('cancel_training');
     }
+}
+
+async function toggleAugmentation() {
+    // Read current state from the button text (ON/OFF)
+    const isCurrentlyEnabled = elements.btnAugmentation.textContent !== 'OFF';
+    await invoke('set_augmentation_enabled', { enabled: !isCurrentlyEnabled });
 }
 
 async function toggleDiagnostics() {

@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use tauri::State;
 
 use crate::engine::{
-    compute_threshold_stats, DiagnosticEvent, DiagnosticLogger, GestureDiag, HitLog,
-    Preprocessor, RecognitionConfig, Recognizer, SessionState, TrainingConfig,
-    TrainingSession,
+    assess_example, compute_threshold_stats, generate_augmented, DiagnosticEvent,
+    DiagnosticLogger, GestureDiag, HitLog, Preprocessor, RecognitionConfig, Recognizer,
+    SessionState, TrainingConfig, TrainingSession,
 };
 use crate::model::{
     default_vocabulary_dir, load_vocabulary as model_load_vocabulary,
@@ -55,6 +55,8 @@ pub struct AppState {
     dimension_mismatch: Option<(usize, usize)>,
     /// Frame preprocessor (hip centering, scale normalization, velocity features)
     preprocessor: Preprocessor,
+    /// Quality feedback from most recent training session (cleared on next training start)
+    quality_feedback: Vec<QualityFeedbackEntry>,
 }
 
 impl AppState {
@@ -105,6 +107,7 @@ impl AppState {
             diagnostic_logger: DiagnosticLogger::new(),
             dimension_mismatch: None,
             preprocessor,
+            quality_feedback: Vec::new(),
         }
     }
 
@@ -123,10 +126,20 @@ impl AppState {
                 gesture.threshold,
             );
 
-            for example in &gesture.examples {
+            for (ex_idx, example) in gesture.examples.iter().enumerate() {
                 // Preprocess stored raw frames before adding to recognizer
                 let processed = self.preprocessor.process_sequence(&example.frames);
-                self.recognizer.add_example(gesture.id, processed);
+                self.recognizer.add_example(gesture.id, processed.clone());
+
+                // Add ephemeral augmented copies
+                for aug in generate_augmented(
+                    &processed,
+                    &self.vocabulary.augmentation,
+                    gesture.id,
+                    ex_idx,
+                ) {
+                    self.recognizer.add_example(gesture.id, aug);
+                }
             }
         }
 
@@ -138,24 +151,67 @@ impl AppState {
     /// Save completed training examples
     fn save_training_examples(&mut self) {
         let gesture_id = self.training_session.gesture_id;
-        let examples = self.training_session.take_examples();
+        let new_frame_sets = self.training_session.take_examples();
 
-        for frames in examples {
+        let gesture_name = self
+            .vocabulary
+            .get_gesture(gesture_id)
+            .map(|g| g.name.clone())
+            .unwrap_or_default();
+
+        // Preprocess existing examples for quality assessment (before adding new ones)
+        let existing_processed: Vec<Vec<Vec<f32>>> = self
+            .vocabulary
+            .get_gesture(gesture_id)
+            .map(|g| {
+                g.examples
+                    .iter()
+                    .map(|e| self.preprocessor.process_sequence(&e.frames))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let existing_count = existing_processed.len();
+
+        for (new_idx, frames) in new_frame_sets.iter().enumerate() {
             if frames.is_empty() {
                 continue;
             }
 
-            let frame_count = frames.len();
             // Store RAW frames in the vocabulary (preprocessing applied at comparison time)
-            let example = Example::new(frames.clone(), frame_count as u64);
+            let example = Example::new(frames.clone(), frames.len() as u64);
 
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
                 gesture.add_example(example);
             }
 
             // Add PREPROCESSED frames to recognizer
-            let processed = self.preprocessor.process_sequence(&frames);
-            self.recognizer.add_example(gesture_id, processed);
+            let processed = self.preprocessor.process_sequence(frames);
+            self.recognizer
+                .add_example(gesture_id, processed.clone());
+
+            // Add ephemeral augmented copies
+            let example_index = existing_count + new_idx;
+            for aug in generate_augmented(
+                &processed,
+                &self.vocabulary.augmentation,
+                gesture_id,
+                example_index,
+            ) {
+                self.recognizer.add_example(gesture_id, aug);
+            }
+
+            // Quality assessment: check new example against pre-training examples
+            if !existing_processed.is_empty() {
+                if let Some(issue) = assess_example(&processed, &existing_processed) {
+                    self.quality_feedback.push(QualityFeedbackEntry {
+                        gesture_name: gesture_name.clone(),
+                        example_index: example_index + 1, // 1-indexed for display
+                        label: issue.label().to_string(),
+                        message: issue.message(),
+                    });
+                }
+            }
         }
 
         // Compute statistical threshold
@@ -422,6 +478,13 @@ pub struct StateResponse {
 pub struct VocabularyDto {
     name: String,
     gestures: Vec<GestureDto>,
+    augmentation: AugmentationConfigDto,
+}
+
+#[derive(Serialize)]
+pub struct AugmentationConfigDto {
+    enabled: bool,
+    multiplier: u32,
 }
 
 #[derive(Serialize)]
@@ -463,6 +526,22 @@ pub struct TrainingDto {
     remaining: f32,
     progress: f32,
     frame_count: usize,
+    quality_issues: Vec<QualityIssueDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct QualityFeedbackEntry {
+    gesture_name: String,
+    example_index: usize,
+    label: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct QualityIssueDto {
+    example_index: usize,
+    label: String,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -535,6 +614,10 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
                     .collect(),
             })
             .collect(),
+        augmentation: AugmentationConfigDto {
+            enabled: app.vocabulary.augmentation.enabled,
+            multiplier: app.vocabulary.augmentation.multiplier,
+        },
     };
 
     let input_status = match app.osc_receiver.state.status {
@@ -571,6 +654,16 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
         SessionState::Complete => "complete",
     };
 
+    let quality_issues: Vec<QualityIssueDto> = app
+        .quality_feedback
+        .iter()
+        .map(|entry| QualityIssueDto {
+            example_index: entry.example_index,
+            label: entry.label.clone(),
+            message: entry.message.clone(),
+        })
+        .collect();
+
     let training = TrainingDto {
         state: training_state.to_string(),
         gesture_id: if app.training_session.state != SessionState::Idle {
@@ -585,6 +678,7 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
         remaining: app.training_session.remaining_secs(),
         progress: app.training_session.progress(),
         frame_count: app.training_session.current_frame_count(),
+        quality_issues,
     };
 
     let distances = app.recognizer.current_distances();
@@ -859,6 +953,9 @@ pub fn start_training(
         .map(|g| g.name.clone());
 
     if let Some(name) = gesture_name {
+        // Clear stale quality feedback from previous training session
+        app.quality_feedback.clear();
+
         let config = TrainingConfig {
             reps,
             countdown_secs: countdown_secs as f32,
@@ -992,4 +1089,16 @@ pub fn disable_diagnostics(state: State<Arc<Mutex<AppState>>>) -> Result<(), Str
 pub fn is_diagnostics_enabled(state: State<Arc<Mutex<AppState>>>) -> Result<bool, String> {
     let app = state.lock().map_err(|e| e.to_string())?;
     Ok(app.diagnostic_logger.is_enabled())
+}
+
+#[tauri::command]
+pub fn set_augmentation_enabled(
+    state: State<Arc<Mutex<AppState>>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.vocabulary.augmentation.enabled = enabled;
+    app.sync_recognizer();
+    app.mark_dirty();
+    Ok(())
 }

@@ -3067,6 +3067,7 @@ dependencies = [
  "chrono",
  "crossbeam-channel",
  "directories",
+ "rand 0.8.5",
  "rfd",
  "rodio",
  "rosc",

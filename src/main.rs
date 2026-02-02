@@ -34,6 +34,7 @@ fn main() {
             gui::select_gesture,
             gui::rename_gesture,
             gui::delete_gesture,
+            gui::delete_example,
             gui::start_training,
             gui::cancel_training,
             gui::set_threshold,

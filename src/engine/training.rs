@@ -159,10 +159,11 @@ impl TrainingSession {
         self.transition_to(SessionState::Countdown);
     }
 
-    /// Cancel the current session
+    /// Cancel the current session, discarding all captured data
     pub fn cancel(&mut self) {
         self.transition_to(SessionState::Idle);
         self.current_frames.clear();
+        self.completed_examples.clear();
     }
 
     /// Get elapsed time in current state

@@ -169,7 +169,6 @@ impl Gesture {
     }
 
     /// Clear statistical data (e.g., when examples are removed)
-    #[allow(dead_code)]
     pub fn clear_statistics(&mut self) {
         self.distance_mean = None;
         self.distance_std = None;
@@ -179,6 +178,23 @@ impl Gesture {
     #[allow(dead_code)]
     pub fn has_statistics(&self) -> bool {
         self.distance_mean.is_some() && self.distance_std.is_some()
+    }
+
+    /// Remove an example by index, clearing statistics if fewer than 2 remain.
+    /// Returns the removed example, or an error if the index is out of bounds.
+    pub fn remove_example(&mut self, index: usize) -> Result<Example, String> {
+        if index >= self.examples.len() {
+            return Err(format!(
+                "Example index {} out of bounds (gesture has {} examples)",
+                index,
+                self.examples.len()
+            ));
+        }
+        let removed = self.examples.remove(index);
+        if self.examples.len() < 2 {
+            self.clear_statistics();
+        }
+        Ok(removed)
     }
 
     /// Add a recorded example to this gesture

@@ -527,6 +527,8 @@ pub struct GestureDto {
 #[derive(Serialize)]
 pub struct ExampleDto {
     frame_count: usize,
+    duration_ms: u64,
+    recorded_at: String,
 }
 
 #[derive(Serialize)]
@@ -639,6 +641,8 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
                     .iter()
                     .map(|e| ExampleDto {
                         frame_count: e.frames.len(),
+                        duration_ms: e.duration_ms,
+                        recorded_at: e.recorded_at.to_rfc3339(),
                     })
                     .collect(),
             })
@@ -972,6 +976,28 @@ pub fn delete_gesture(state: State<Arc<Mutex<AppState>>>, gesture_id: u32) -> Re
         app.selected_gesture_id = app.vocabulary.gestures.first().map(|g| g.id);
     }
 
+    app.sync_recognizer();
+    app.mark_dirty();
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_example(
+    state: State<Arc<Mutex<AppState>>>,
+    gesture_id: u32,
+    example_index: usize,
+) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+
+    let gesture = app
+        .vocabulary
+        .get_gesture_mut(gesture_id)
+        .ok_or_else(|| format!("Gesture {} not found", gesture_id))?;
+    gesture.remove_example(example_index)?;
+
+    // Recompute statistics if enough examples remain
+    app.compute_gesture_statistics(gesture_id);
     app.sync_recognizer();
     app.mark_dirty();
 

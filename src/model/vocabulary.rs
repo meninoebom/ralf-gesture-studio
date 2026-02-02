@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::engine::augmentation::AugmentationConfig;
 use crate::engine::preprocess::PreprocessingConfig;
 
 /// Default coefficient for statistical threshold (μ + σ×coefficient)
@@ -252,6 +253,11 @@ pub struct Vocabulary {
     #[serde(default)]
     pub preprocessing: PreprocessingConfig,
 
+    // --- Data augmentation ---
+    /// Configuration for ephemeral data augmentation (temporal stretch, jitter, mirror).
+    #[serde(default)]
+    pub augmentation: AugmentationConfig,
+
     /// Baseline frames (deprecated - kept for file compatibility)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Vec<Vec<f32>>>,
@@ -287,6 +293,8 @@ impl Vocabulary {
             extensions: HashMap::new(),
             // Preprocessing pipeline (defaults to all OFF for new vocabularies)
             preprocessing: PreprocessingConfig::default(),
+            // Data augmentation (defaults to OFF, user must opt in)
+            augmentation: AugmentationConfig::default(),
             // Legacy/internal fields
             baseline: None,
             gestures: Vec::new(),

@@ -42,6 +42,7 @@ fn main() {
             gui::enable_diagnostics,
             gui::disable_diagnostics,
             gui::is_diagnostics_enabled,
+            gui::set_augmentation_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("Error running Tauri application");
@@ -261,5 +262,56 @@ mod tests {
 
         // New gesture should have id 3, not 1
         assert_eq!(new_id, 3);
+    }
+
+    #[test]
+    fn test_augmentation_config_roundtrip() {
+        use crate::engine::augmentation::AugmentationConfig;
+
+        let mut vocab = Vocabulary::new("Test Augmentation");
+        vocab.augmentation = AugmentationConfig {
+            enabled: true,
+            multiplier: 3,
+            temporal_stretch: true,
+            spatial_jitter: false,
+            horizontal_mirror: true,
+        };
+        vocab.add_gesture("wave");
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("augmentation.ralf");
+        save_vocabulary(&vocab, &path).unwrap();
+
+        let loaded = load_vocabulary(&path).unwrap();
+        assert!(loaded.augmentation.enabled);
+        assert_eq!(loaded.augmentation.multiplier, 3);
+        assert!(loaded.augmentation.temporal_stretch);
+        assert!(!loaded.augmentation.spatial_jitter);
+        assert!(loaded.augmentation.horizontal_mirror);
+    }
+
+    #[test]
+    fn test_augmentation_defaults_off_for_new_vocabulary() {
+        let vocab = Vocabulary::new("Test");
+        assert!(!vocab.augmentation.enabled);
+        assert_eq!(vocab.augmentation.multiplier, 2);
+    }
+
+    #[test]
+    fn test_old_file_without_augmentation_loads_with_defaults() {
+        // Simulate loading an old file without augmentation field
+        let json = r#"{
+            "version": "1.2",
+            "name": "Legacy Vocab",
+            "created_at": "2026-01-01T00:00:00Z",
+            "modified_at": "2026-01-01T00:00:00Z",
+            "input": {"dimensions": 66, "port": 6448, "address": "/wek/inputs"},
+            "output": {"host": "127.0.0.1", "port": 12000},
+            "gestures": []
+        }"#;
+
+        let vocab: Vocabulary = serde_json::from_str(json).unwrap();
+        assert!(!vocab.augmentation.enabled);
+        assert_eq!(vocab.augmentation.multiplier, 2);
     }
 }

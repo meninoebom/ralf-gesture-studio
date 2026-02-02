@@ -40,6 +40,9 @@ rodio = "0.19"
 # Native file dialogs
 rfd = "0.14"
 
+# Random number generation (deterministic augmentation)
+rand = "0.8"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

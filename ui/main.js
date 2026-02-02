@@ -131,8 +131,11 @@ function setupEventListeners() {
         }
     });
 
-    // Keyboard shortcuts
+    // Keyboard shortcuts (skip when an input/textarea is focused)
     document.addEventListener('keydown', (e) => {
+        const tag = document.activeElement?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
         if (e.code === 'Space' && state.mode === 'training' && state.trainingState === 'idle') {
             e.preventDefault();
             startTraining();

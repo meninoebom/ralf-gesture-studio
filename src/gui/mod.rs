@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use tauri::State;
 
 use crate::engine::{
-    assess_example, compute_threshold_stats, generate_augmented, DiagnosticEvent,
-    DiagnosticLogger, GestureDiag, HitLog, Preprocessor, RecognitionConfig, Recognizer,
-    SessionState, TrainingConfig, TrainingSession,
+    assess_example, compute_joint_weights, compute_threshold_stats, generate_augmented,
+    DiagnosticEvent, DiagnosticLogger, GestureDiag, HitLog, Preprocessor, RecognitionConfig,
+    Recognizer, SessionState, TrainingConfig, TrainingSession,
 };
 use crate::model::{
     default_vocabulary_dir, load_vocabulary as model_load_vocabulary,
@@ -111,8 +111,13 @@ impl AppState {
         }
     }
 
-    /// Sync recognizer with vocabulary
+    /// Sync recognizer with vocabulary.
+    ///
+    /// Rebuilds the recognizer from scratch: preprocess → weight → augment → add.
+    /// This is the canonical rebuild path — called after loading, training, or toggling features.
     fn sync_recognizer(&mut self) {
+        use crate::engine::weighting::apply_weights_to_sequence;
+
         let was_active = self.recognizer.is_active();
 
         self.recognizer = Recognizer::with_config(600, 180, self.recognition_config.clone());
@@ -126,14 +131,42 @@ impl AppState {
                 gesture.threshold,
             );
 
-            for (ex_idx, example) in gesture.examples.iter().enumerate() {
-                // Preprocess stored raw frames before adding to recognizer
-                let processed = self.preprocessor.process_sequence(&example.frames);
-                self.recognizer.add_example(gesture.id, processed.clone());
+            // Set consensus config from vocabulary
+            self.recognizer.set_consensus(
+                gesture.id,
+                gesture.consensus_enabled,
+                gesture.consensus_threshold,
+            );
 
-                // Add ephemeral augmented copies
+            // Preprocess all examples
+            let processed: Vec<Vec<Vec<f32>>> = gesture
+                .examples
+                .iter()
+                .map(|e| self.preprocessor.process_sequence(&e.frames))
+                .collect();
+
+            // Compute joint weights if enabled and enough examples
+            let weights = if self.vocabulary.joint_weighting && processed.len() >= 2 {
+                compute_joint_weights(&processed)
+            } else {
+                None
+            };
+
+            // Store weights in recognizer for runtime window scaling
+            self.recognizer.set_weights(gesture.id, weights.clone());
+
+            for (ex_idx, example) in processed.iter().enumerate() {
+                // Apply joint weights (if any)
+                let scaled = match &weights {
+                    Some(w) => apply_weights_to_sequence(example, w),
+                    None => example.clone(),
+                };
+
+                self.recognizer.add_example(gesture.id, scaled.clone());
+
+                // Add ephemeral augmented copies (of the scaled data)
                 for aug in generate_augmented(
-                    &processed,
+                    &scaled,
                     &self.vocabulary.augmentation,
                     gesture.id,
                     ex_idx,
@@ -148,7 +181,11 @@ impl AppState {
         }
     }
 
-    /// Save completed training examples
+    /// Save completed training examples.
+    ///
+    /// Saves raw examples to vocabulary, runs quality checks, computes statistics,
+    /// then rebuilds the recognizer via sync_recognizer() (which handles preprocessing,
+    /// joint weighting, and augmentation).
     fn save_training_examples(&mut self) {
         let gesture_id = self.training_session.gesture_id;
         let new_frame_sets = self.training_session.take_examples();
@@ -159,7 +196,7 @@ impl AppState {
             .map(|g| g.name.clone())
             .unwrap_or_default();
 
-        // Preprocess existing examples for quality assessment (before adding new ones)
+        // Snapshot existing processed examples for quality assessment (before adding new ones)
         let existing_processed: Vec<Vec<Vec<f32>>> = self
             .vocabulary
             .get_gesture(gesture_id)
@@ -173,36 +210,23 @@ impl AppState {
 
         let existing_count = existing_processed.len();
 
+        // Store raw examples in vocabulary and run quality checks
         for (new_idx, frames) in new_frame_sets.iter().enumerate() {
             if frames.is_empty() {
                 continue;
             }
 
-            // Store RAW frames in the vocabulary (preprocessing applied at comparison time)
+            // Store RAW frames in the vocabulary (preprocessing applied during sync)
             let example = Example::new(frames.clone(), frames.len() as u64);
 
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
                 gesture.add_example(example);
             }
 
-            // Add PREPROCESSED frames to recognizer
-            let processed = self.preprocessor.process_sequence(frames);
-            self.recognizer
-                .add_example(gesture_id, processed.clone());
-
-            // Add ephemeral augmented copies
-            let example_index = existing_count + new_idx;
-            for aug in generate_augmented(
-                &processed,
-                &self.vocabulary.augmentation,
-                gesture_id,
-                example_index,
-            ) {
-                self.recognizer.add_example(gesture_id, aug);
-            }
-
             // Quality assessment: check new example against pre-training examples
             if !existing_processed.is_empty() {
+                let processed = self.preprocessor.process_sequence(frames);
+                let example_index = existing_count + new_idx;
                 if let Some(issue) = assess_example(&processed, &existing_processed) {
                     self.quality_feedback.push(QualityFeedbackEntry {
                         gesture_name: gesture_name.clone(),
@@ -214,8 +238,11 @@ impl AppState {
             }
         }
 
-        // Compute statistical threshold
+        // Compute statistical threshold (uses real unweighted examples)
         self.compute_gesture_statistics(gesture_id);
+
+        // Rebuild recognizer with all examples (preprocess → weight → augment)
+        self.sync_recognizer();
 
         self.dirty = true;
         self.auto_save();
@@ -479,6 +506,7 @@ pub struct VocabularyDto {
     name: String,
     gestures: Vec<GestureDto>,
     augmentation: AugmentationConfigDto,
+    joint_weighting: bool,
 }
 
 #[derive(Serialize)]
@@ -567,6 +595,7 @@ pub struct GestureMonitorDto {
     distance_mean: Option<f32>,
     distance_std: Option<f32>,
     threshold_coefficient: f32,
+    consensus_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -618,6 +647,7 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
             enabled: app.vocabulary.augmentation.enabled,
             multiplier: app.vocabulary.augmentation.multiplier,
         },
+        joint_weighting: app.vocabulary.joint_weighting,
     };
 
     let input_status = match app.osc_receiver.state.status {
@@ -701,9 +731,17 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
                     .map(|g| !g.threshold_manual_override)
                     .unwrap_or(false);
                 let recent_hit = recent_hit_name.as_ref().map(|n| n == name).unwrap_or(false);
-                let (distance_mean, distance_std, threshold_coefficient) = gesture
-                    .map(|g| (g.distance_mean, g.distance_std, g.threshold_coefficient))
-                    .unwrap_or((None, None, 2.0));
+                let (distance_mean, distance_std, threshold_coefficient, consensus_enabled) =
+                    gesture
+                        .map(|g| {
+                            (
+                                g.distance_mean,
+                                g.distance_std,
+                                g.threshold_coefficient,
+                                g.consensus_enabled,
+                            )
+                        })
+                        .unwrap_or((None, None, 2.0, false));
 
                 GestureMonitorDto {
                     id: *id,
@@ -716,6 +754,7 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
                     distance_mean,
                     distance_std,
                     threshold_coefficient,
+                    consensus_enabled,
                 }
             })
             .collect(),
@@ -1100,5 +1139,35 @@ pub fn set_augmentation_enabled(
     app.vocabulary.augmentation.enabled = enabled;
     app.sync_recognizer();
     app.mark_dirty();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_joint_weighting(
+    state: State<Arc<Mutex<AppState>>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.vocabulary.joint_weighting = enabled;
+    app.sync_recognizer();
+    app.mark_dirty();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_consensus(
+    state: State<Arc<Mutex<AppState>>>,
+    gesture_id: u32,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+
+    if let Some(gesture) = app.vocabulary.get_gesture_mut(gesture_id) {
+        gesture.consensus_enabled = enabled;
+    }
+    app.recognizer
+        .set_consensus(gesture_id, enabled, 0.5);
+    app.mark_dirty();
+
     Ok(())
 }

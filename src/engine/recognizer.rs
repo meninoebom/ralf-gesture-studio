@@ -25,6 +25,7 @@ use super::dtw::{
     compute_lb_envelope, dtw_distance, dtw_distance_with_abandon, lb_keogh, Frame, LBEnvelope,
     Sequence,
 };
+use super::weighting::apply_weights_to_sequence;
 
 /// Number of distance samples to keep for slope checking
 const DISTANCE_HISTORY_SIZE: usize = 3;
@@ -174,6 +175,12 @@ pub struct GestureState {
     recovery_start: Option<Instant>,
     /// History of recent distance values (for slope detection)
     distance_history: VecDeque<f32>,
+    /// Per-dimension weights from joint variance (None = no weighting)
+    weights: Option<Vec<f32>>,
+    /// Whether consensus gate is active for this gesture
+    consensus_enabled: bool,
+    /// Minimum fraction of examples that must agree (default 0.5)
+    consensus_threshold: f32,
 }
 
 impl GestureState {
@@ -192,7 +199,28 @@ impl GestureState {
             frames_below_threshold: 0,
             recovery_start: None,
             distance_history: VecDeque::with_capacity(DISTANCE_HISTORY_SIZE),
+            // Joint weighting + consensus (Phase 3)
+            weights: None,
+            consensus_enabled: false,
+            consensus_threshold: 0.5,
         }
+    }
+
+    /// Set per-dimension weights for this gesture (from joint variance computation)
+    pub fn set_weights(&mut self, weights: Option<Vec<f32>>) {
+        self.weights = weights;
+    }
+
+    /// Get the per-dimension weights (if any)
+    #[allow(dead_code)]
+    pub fn weights(&self) -> Option<&[f32]> {
+        self.weights.as_deref()
+    }
+
+    /// Set consensus scoring configuration
+    pub fn set_consensus(&mut self, enabled: bool, threshold: f32) {
+        self.consensus_enabled = enabled;
+        self.consensus_threshold = threshold;
     }
 
     pub fn add_example(&mut self, example: Sequence) {
@@ -624,8 +652,10 @@ impl Recognizer {
     /// Compute DTW distances for all gestures against the current window.
     ///
     /// Uses LB_Keogh pruning and early abandoning across gestures for efficiency.
-    /// Returns a Vec of (gesture_index, best_distance) for gestures with examples.
-    fn compute_distances(&self, window: &Sequence) -> Vec<(usize, f32)> {
+    /// Applies per-gesture joint weights to the window before DTW comparison.
+    /// Returns a Vec of (gesture_index, best_distance, consensus) for gestures with examples.
+    /// Consensus is 1.0 when consensus scoring is disabled for a gesture.
+    fn compute_distances(&self, window: &Sequence) -> Vec<(usize, f32, f32)> {
         let mut distances = Vec::new();
         let mut best_so_far = f32::MAX;
         let sakoe_chiba_band = self.config.sakoe_chiba_band;
@@ -635,10 +665,20 @@ impl Recognizer {
                 continue;
             }
 
+            // Apply per-gesture joint weights to the window
+            let weighted_window;
+            let window_ref = match &gesture.weights {
+                Some(w) => {
+                    weighted_window = apply_weights_to_sequence(window, w);
+                    &weighted_window
+                }
+                None => window,
+            };
+
             let (examples, envelopes) = (gesture.examples(), gesture.lb_envelopes());
 
             let dist = Self::find_best_distance(
-                window,
+                window_ref,
                 examples,
                 envelopes,
                 self.downsample,
@@ -648,17 +688,81 @@ impl Recognizer {
             if dist < best_so_far {
                 best_so_far = dist;
             }
-            distances.push((idx, dist));
+
+            // Compute consensus if enabled and distance is below threshold
+            let consensus = if gesture.consensus_enabled && dist < gesture.threshold {
+                Self::compute_consensus(
+                    window_ref,
+                    examples,
+                    envelopes,
+                    self.downsample,
+                    sakoe_chiba_band,
+                    gesture.threshold,
+                )
+            } else if gesture.consensus_enabled {
+                0.0 // Above threshold, consensus is 0
+            } else {
+                1.0 // Consensus disabled, always passes
+            };
+
+            distances.push((idx, dist, consensus));
         }
 
         distances
+    }
+
+    /// Compute the fraction of examples with distance below threshold.
+    ///
+    /// Uses LB_Keogh to quickly reject examples that are clearly above threshold,
+    /// and early abandoning with threshold as cutoff.
+    fn compute_consensus(
+        window: &Sequence,
+        examples: &[Sequence],
+        envelopes: &[LBEnvelope],
+        downsample: usize,
+        sakoe_chiba_band: f32,
+        threshold: f32,
+    ) -> f32 {
+        if examples.is_empty() {
+            return 0.0;
+        }
+
+        let mut below_count = 0usize;
+
+        for (i, example) in examples.iter().enumerate() {
+            // LB_Keogh pruning: if lower bound >= threshold, definitely above
+            if let Some(envelope) = envelopes.get(i) {
+                let lb = lb_keogh(window, envelope);
+                if lb >= threshold {
+                    continue;
+                }
+            }
+
+            // Full DTW with threshold as abandon cutoff
+            let example_ds = Self::downsample_seq(example, downsample);
+            let below = if sakoe_chiba_band > 0.0 {
+                let max_len = window.len().max(example_ds.len());
+                let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
+                dtw_distance_with_abandon(window, &example_ds, band_width, threshold).is_some()
+            } else {
+                dtw_distance(window, &example_ds) < threshold
+            };
+
+            if below {
+                below_count += 1;
+            }
+        }
+
+        below_count as f32 / examples.len() as f32
     }
 
     /// Run state machines for all gestures and detect hits.
     ///
     /// Updates gesture distances (for UI), processes the best-matching gesture's
     /// state machine, resets non-best gestures, and returns a hit if one fired.
-    fn run_state_machines(&mut self, distances: &[(usize, f32)]) -> Option<RecognitionResult> {
+    /// Applies consensus gate: if consensus scoring is enabled for the best gesture,
+    /// the gesture must meet its consensus threshold to enter Building state.
+    fn run_state_machines(&mut self, distances: &[(usize, f32, f32)]) -> Option<RecognitionResult> {
         // Check global cooldown (NMS: suppress all detections after any hit)
         let in_global_cooldown = self
             .last_any_hit_time
@@ -668,22 +772,34 @@ impl Recognizer {
         // Find the best-matching gesture index
         let best_idx = distances
             .iter()
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| *i);
+            .min_by(|(_, a, _), (_, b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _, _)| *i);
+
+        // Check if the best gesture fails the consensus gate
+        let consensus_blocked = distances
+            .iter()
+            .find(|(i, _, _)| Some(*i) == best_idx)
+            .map(|(_, _, consensus)| {
+                let gesture = &self.gestures[best_idx.unwrap()];
+                gesture.consensus_enabled && *consensus < gesture.consensus_threshold
+            })
+            .unwrap_or(false);
 
         let mut hit_result: Option<(u32, String, f32)> = None;
 
         for (idx, gesture) in self.gestures.iter_mut().enumerate() {
             // Find this gesture's distance
-            let distance = distances.iter().find(|(i, _)| *i == idx).map(|(_, d)| *d);
+            let distance = distances.iter().find(|(i, _, _)| *i == idx).map(|(_, d, _)| *d);
 
             gesture.current_distance = distance;
 
             if let Some(dist) = distance {
                 if Some(idx) == best_idx {
                     // Best-matching gesture: run its state machine
+                    // Consensus gate: treat as global cooldown (suppress entry) if consensus fails
+                    let suppressed = in_global_cooldown || consensus_blocked;
                     let result =
-                        gesture.process_state_machine(dist, &self.config, in_global_cooldown);
+                        gesture.process_state_machine(dist, &self.config, suppressed);
 
                     if let Some(transition) = result.transition {
                         self.pending_transitions.push(GestureStateTransition {
@@ -715,7 +831,7 @@ impl Recognizer {
         } else {
             let best_distance = distances
                 .iter()
-                .map(|(_, d)| *d)
+                .map(|(_, d, _)| *d)
                 .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(f32::MAX);
 
@@ -782,6 +898,20 @@ impl Recognizer {
     pub fn set_threshold(&mut self, gesture_id: u32, threshold: f32) {
         if let Some(gesture) = self.get_gesture_mut(gesture_id) {
             gesture.threshold = threshold;
+        }
+    }
+
+    /// Set per-dimension weights for a gesture (from joint variance computation)
+    pub fn set_weights(&mut self, gesture_id: u32, weights: Option<Vec<f32>>) {
+        if let Some(gesture) = self.get_gesture_mut(gesture_id) {
+            gesture.set_weights(weights);
+        }
+    }
+
+    /// Set consensus scoring configuration for a gesture
+    pub fn set_consensus(&mut self, gesture_id: u32, enabled: bool, threshold: f32) {
+        if let Some(gesture) = self.get_gesture_mut(gesture_id) {
+            gesture.set_consensus(enabled, threshold);
         }
     }
 

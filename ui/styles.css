@@ -692,6 +692,26 @@ input[type="range"]::-webkit-slider-thumb {
     color: #000;
 }
 
+/* Consensus toggle button in monitor rows */
+.col-consensus { width: 40px; }
+
+.btn-consensus {
+    padding: 4px 8px;
+    font-size: var(--font-size-small);
+    background-color: var(--bg-light);
+    color: var(--text-dim);
+}
+
+.btn-consensus:hover {
+    background-color: var(--bg-lighter);
+    color: var(--text-white);
+}
+
+.btn-consensus.active {
+    background-color: var(--gold);
+    color: #000;
+}
+
 /* Diagnostics recording button */
 #btn-toggle-diagnostics.recording {
     background-color: var(--red);

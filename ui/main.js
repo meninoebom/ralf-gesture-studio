@@ -125,25 +125,34 @@ function setupEventListeners() {
     // Gestures
     elements.btnAddGesture.addEventListener('click', addGesture);
 
-    // Example delete — event delegation on gesture list (survives re-renders)
-    elements.gestureList.addEventListener('click', (e) => {
-        if (e.target.classList.contains('example-delete-btn') && !e.target.disabled) {
-            e.stopPropagation();
-            const gestureId = parseInt(e.target.dataset.gestureId);
-            const index = parseInt(e.target.dataset.index);
-            const gesture = state.vocabulary?.gestures.find(g => g.id === gestureId);
-            const name = gesture ? gesture.name : 'gesture';
-            deleteExample(gestureId, index, name);
+    // Training start button — click delegation (idle state doesn't re-render, so click is fine)
+    elements.trainingDisplay.addEventListener('click', (e) => {
+        if (e.target.closest('#btn-start-training')) {
+            startTraining();
         }
     });
 
-    // Training button is dynamically rendered, use event delegation
-    elements.trainingDisplay.addEventListener('click', (e) => {
-        if (e.target.id === 'btn-start-training') {
-            startTraining();
-        }
-        if (e.target.classList.contains('stop-training-btn')) {
+    // Stop training + Delete example — use mousedown on document so the handler
+    // fires immediately on press, before the 50ms poll can destroy the element.
+    // Using closest() to match even if click lands on a child node.
+    document.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return; // primary button only
+
+        if (e.target.closest('.stop-training-btn')) {
+            e.preventDefault();
             cancelTraining();
+            return;
+        }
+
+        const deleteBtn = e.target.closest('.example-delete-btn');
+        if (deleteBtn && !deleteBtn.disabled) {
+            e.preventDefault();
+            e.stopPropagation();
+            const gestureId = parseInt(deleteBtn.dataset.gestureId);
+            const index = parseInt(deleteBtn.dataset.index);
+            const gesture = state.vocabulary?.gestures.find(g => g.id === gestureId);
+            const name = gesture ? gesture.name : 'gesture';
+            deleteExample(gestureId, index, name);
         }
     });
 

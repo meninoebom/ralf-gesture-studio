@@ -117,9 +117,15 @@ RecognitionConfig {
 
 For algorithm details, echo defense design, preprocessing pipeline, threshold calibration, and diagnostic log analysis, see the `dtw-gesture-recognition` skill.
 
+## Operational Learnings
+
+- **Warm-up effect in first 3-5 seconds.** The sliding window needs real movement data before distances are meaningful. First 3 hits in a session average ~34% margin vs ~68% for the rest. The very first hit may barely clear threshold (6.6% margin observed). This is normal — not a bug. Account for it when analyzing diagnostic logs.
+- **Detection latency ~400ms.** Mean time from Building entry to Peak fire is ~400ms (3 frames of accumulation at ~15Hz DTW rate). This is the baseline responsiveness of the system.
+- **Jump-style gestures produce tight margins.** Gestures with low inter-example variance (e.g., jumps) get tight auto-thresholds (low σ), resulting in lower margins (~39%) compared to complex gestures like spins (~75%). This is correct behavior — tight thresholds mean precise detection, not fragile detection.
+
 ## Current Status (v0.7.0)
 
-All core features implemented: DTW recognition with VAD-style state machine, statistical threshold calibration (mu+sigma), two-layer echo defense (0% echo rate in production), LB_Keogh + Sakoe-Chiba + early abandoning optimizations, preprocessing pipeline (hip centering, scale normalization, velocity features), diagnostic logging, and research-ready vocabulary format (v1.1). 76 passing tests.
+All core features implemented: DTW recognition with VAD-style state machine, statistical threshold calibration (mu+sigma), two-layer echo defense (0% echo rate in production), LB_Keogh + Sakoe-Chiba + early abandoning optimizations, preprocessing pipeline (hip centering, scale normalization, velocity features), data augmentation, example quality assessment, joint weighting, consensus scoring, diagnostic logging, and research-ready vocabulary format (v1.2). 146 passing tests.
 
 ## Coding Guidelines
 

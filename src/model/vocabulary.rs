@@ -11,6 +11,11 @@ fn default_threshold_coefficient() -> f32 {
     2.0
 }
 
+/// Default consensus threshold (50% of examples must agree)
+fn default_consensus_threshold() -> f32 {
+    0.5
+}
+
 /// Configuration for OSC input (receiving skeleton data)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputConfig {
@@ -107,6 +112,14 @@ pub struct Gesture {
     /// Coefficient for statistical threshold: threshold = μ + σ×coefficient (default 2.0)
     #[serde(default = "default_threshold_coefficient")]
     pub threshold_coefficient: f32,
+
+    // --- Consensus scoring (Phase 3) ---
+    /// If true, require majority of examples to agree before firing
+    #[serde(default)]
+    pub consensus_enabled: bool,
+    /// Minimum fraction of examples below threshold to fire (default 0.5)
+    #[serde(default = "default_consensus_threshold")]
+    pub consensus_threshold: f32,
 }
 
 impl Gesture {
@@ -124,6 +137,9 @@ impl Gesture {
             distance_std: None,
             threshold_manual_override: false,
             threshold_coefficient: default_threshold_coefficient(),
+            // Consensus scoring (default OFF)
+            consensus_enabled: false,
+            consensus_threshold: default_consensus_threshold(),
         }
     }
 
@@ -258,6 +274,11 @@ pub struct Vocabulary {
     #[serde(default)]
     pub augmentation: AugmentationConfig,
 
+    // --- Recognition refinements (Phase 3) ---
+    /// Enable variance-based joint weighting for DTW (default OFF)
+    #[serde(default)]
+    pub joint_weighting: bool,
+
     /// Baseline frames (deprecated - kept for file compatibility)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Vec<Vec<f32>>>,
@@ -295,6 +316,8 @@ impl Vocabulary {
             preprocessing: PreprocessingConfig::default(),
             // Data augmentation (defaults to OFF, user must opt in)
             augmentation: AugmentationConfig::default(),
+            // Joint weighting (default OFF)
+            joint_weighting: false,
             // Legacy/internal fields
             baseline: None,
             gestures: Vec::new(),

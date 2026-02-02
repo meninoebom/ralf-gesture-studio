@@ -14,6 +14,7 @@
 //! - `training` - Training session with audio cues
 //! - `statistics` - Statistical threshold computation (μ+σ)
 //! - `diagnostics` - Diagnostic logging for analysis
+//! - `weighting` - Variance-based joint weighting for DTW
 
 pub mod augmentation;
 pub mod diagnostics;
@@ -23,6 +24,7 @@ pub mod quality;
 pub mod recognizer;
 pub mod statistics;
 pub mod training;
+pub mod weighting;
 
 // Core types used by the app
 pub use augmentation::generate_augmented;
@@ -32,3 +34,4 @@ pub use quality::assess_example;
 pub use recognizer::{HitLog, RecognitionConfig, Recognizer};
 pub use statistics::compute_threshold_stats;
 pub use training::{SessionState, TrainingConfig, TrainingSession};
+pub use weighting::compute_joint_weights;

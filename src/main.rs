@@ -43,6 +43,8 @@ fn main() {
             gui::disable_diagnostics,
             gui::is_diagnostics_enabled,
             gui::set_augmentation_enabled,
+            gui::set_joint_weighting,
+            gui::set_consensus,
         ])
         .run(tauri::generate_context!())
         .expect("Error running Tauri application");
@@ -313,5 +315,84 @@ mod tests {
         let vocab: Vocabulary = serde_json::from_str(json).unwrap();
         assert!(!vocab.augmentation.enabled);
         assert_eq!(vocab.augmentation.multiplier, 2);
+    }
+
+    // --- Phase 3: Joint weighting + Consensus ---
+
+    #[test]
+    fn test_joint_weighting_defaults_off_for_new_vocabulary() {
+        let vocab = Vocabulary::new("Test");
+        assert!(!vocab.joint_weighting);
+    }
+
+    #[test]
+    fn test_consensus_defaults_off_for_new_gesture() {
+        let mut vocab = Vocabulary::new("Test");
+        let id = vocab.add_gesture("wave");
+        let gesture = vocab.get_gesture(id).unwrap();
+        assert!(!gesture.consensus_enabled);
+        assert!((gesture.consensus_threshold - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_joint_weighting_roundtrip() {
+        let mut vocab = Vocabulary::new("Test Weighting");
+        vocab.joint_weighting = true;
+        vocab.add_gesture("wave");
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("weighting.ralf");
+        save_vocabulary(&vocab, &path).unwrap();
+
+        let loaded = load_vocabulary(&path).unwrap();
+        assert!(loaded.joint_weighting);
+    }
+
+    #[test]
+    fn test_consensus_config_roundtrip() {
+        let mut vocab = Vocabulary::new("Test Consensus");
+        let id = vocab.add_gesture("wave");
+        {
+            let gesture = vocab.get_gesture_mut(id).unwrap();
+            gesture.consensus_enabled = true;
+            gesture.consensus_threshold = 0.75;
+        }
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("consensus.ralf");
+        save_vocabulary(&vocab, &path).unwrap();
+
+        let loaded = load_vocabulary(&path).unwrap();
+        let gesture = loaded.get_gesture(id).unwrap();
+        assert!(gesture.consensus_enabled);
+        assert!((gesture.consensus_threshold - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_old_file_without_phase3_fields_loads_with_defaults() {
+        // Simulate loading a file from before Phase 3 (no joint_weighting, no consensus)
+        let json = r#"{
+            "version": "1.2",
+            "name": "Pre-Phase3 Vocab",
+            "created_at": "2026-01-01T00:00:00Z",
+            "modified_at": "2026-01-01T00:00:00Z",
+            "input": {"dimensions": 66, "port": 6448, "address": "/wek/inputs"},
+            "output": {"host": "127.0.0.1", "port": 12000},
+            "gestures": [{
+                "id": 1,
+                "name": "wave",
+                "osc_address": "/gesture/1",
+                "threshold": 100.0,
+                "created_at": "2026-01-01T00:00:00Z",
+                "examples": []
+            }]
+        }"#;
+
+        let vocab: Vocabulary = serde_json::from_str(json).unwrap();
+        assert!(!vocab.joint_weighting);
+
+        let gesture = vocab.get_gesture(1).unwrap();
+        assert!(!gesture.consensus_enabled);
+        assert!((gesture.consensus_threshold - 0.5).abs() < f32::EPSILON);
     }
 }

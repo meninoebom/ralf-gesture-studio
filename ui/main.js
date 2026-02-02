@@ -75,6 +75,7 @@ function cacheElements() {
     elements.trainingStatus = document.getElementById('training-status');
     elements.qualityFeedback = document.getElementById('quality-feedback');
     elements.btnAugmentation = document.getElementById('btn-augmentation');
+    elements.btnJointWeighting = document.getElementById('btn-joint-weighting');
 
     elements.performancePanel = document.getElementById('performance-panel');
     elements.hitDisplay = document.getElementById('hit-display');
@@ -149,6 +150,9 @@ function setupEventListeners() {
     // Augmentation toggle
     elements.btnAugmentation.addEventListener('click', toggleAugmentation);
 
+    // Joint weighting toggle
+    elements.btnJointWeighting.addEventListener('click', toggleJointWeighting);
+
     // Diagnostics toggle
     elements.btnToggleDiagnostics.addEventListener('click', toggleDiagnostics);
 }
@@ -201,6 +205,13 @@ function updateFromState(appState) {
         const aug = appState.vocabulary.augmentation;
         elements.btnAugmentation.textContent = aug.enabled ? `ON (×${aug.multiplier})` : 'OFF';
         elements.btnAugmentation.classList.toggle('active', aug.enabled);
+    }
+
+    // Joint weighting toggle state
+    if (appState.vocabulary) {
+        const jw = appState.vocabulary.joint_weighting;
+        elements.btnJointWeighting.textContent = jw ? 'ON' : 'OFF';
+        elements.btnJointWeighting.classList.toggle('active', jw);
     }
 
     // Training state
@@ -478,6 +489,10 @@ function updateMonitor(monitor) {
                <span class="threshold-value">${Math.round(g.threshold)}</span>
                <button class="btn-auto small" data-id="${g.id}">Auto</button>`;
 
+        const consensusBtn = g.consensus_enabled
+            ? '<button class="btn-consensus small active" data-id="' + g.id + '">CON</button>'
+            : '<button class="btn-consensus small" data-id="' + g.id + '">CON</button>';
+
         row.innerHTML = `
             <span class="gesture-name col-gesture">${g.name} (${g.example_count})</span>
             <span class="distance col-distance ${distanceColor}">${distanceText}</span>
@@ -485,6 +500,7 @@ function updateMonitor(monitor) {
             <span class="hit-indicator col-hit ${g.recent_hit ? 'green' : ''}">
                 ${g.recent_hit ? '● HIT' : ''}
             </span>
+            <span class="col-consensus">${consensusBtn}</span>
         `;
 
         // Event listeners based on mode
@@ -502,6 +518,11 @@ function updateMonitor(monitor) {
                 await invoke('toggle_threshold_mode', { gestureId: g.id });
             });
         }
+
+        // Consensus toggle
+        row.querySelector('.btn-consensus').addEventListener('click', async () => {
+            await invoke('set_consensus', { gestureId: g.id, enabled: !g.consensus_enabled });
+        });
 
         elements.monitorList.appendChild(row);
     }
@@ -671,6 +692,11 @@ async function toggleAugmentation() {
     // Read current state from the button text (ON/OFF)
     const isCurrentlyEnabled = elements.btnAugmentation.textContent !== 'OFF';
     await invoke('set_augmentation_enabled', { enabled: !isCurrentlyEnabled });
+}
+
+async function toggleJointWeighting() {
+    const isCurrentlyEnabled = elements.btnJointWeighting.textContent !== 'OFF';
+    await invoke('set_joint_weighting', { enabled: !isCurrentlyEnabled });
 }
 
 async function toggleDiagnostics() {

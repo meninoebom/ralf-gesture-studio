@@ -951,8 +951,12 @@ pub fn rename_gesture(
     let mut app = state.lock().map_err(|e| e.to_string())?;
 
     if let Some(gesture) = app.vocabulary.get_gesture_mut(gesture_id) {
-        gesture.name = name;
+        gesture.name = name.clone();
         app.mark_dirty();
+    }
+    // Also update the recognizer's copy so hits use the new name
+    if let Some(g) = app.recognizer.get_gesture_mut(gesture_id) {
+        g.name = name;
     }
 
     Ok(())

@@ -51,12 +51,12 @@ Add a new `delete_example` Tauri command and expand the UI to show per-example d
 - [x] Example count in gesture list is clickable and expands to show individual examples
 - [x] Each example row shows: recorded time, duration, frame count
 - [x] Each example row has a delete (x) button
-- [x] Deletion shows `confirm()` dialog (consistent with `delete_gesture`)
+- [ ] Deletion shows `confirm()` dialog (consistent with `delete_gesture`) — deferred; removed during debugging, add back later
 - [x] Backend validates gesture exists and index is in bounds
 - [x] After deletion: statistics are cleared if < 2 examples remain
 - [x] After deletion: `sync_recognizer()` rebuilds recognizer
 - [x] After deletion: `mark_dirty()` triggers auto-save
-- [x] Delete buttons disabled during active training sessions
+- [ ] Delete buttons disabled during active training sessions — deferred; `trainingActive` removed from hash to fix handler stability
 - [x] Example list only rendered in Training mode (not Performance mode)
 
 ## Technical Approach
@@ -205,8 +205,8 @@ async function deleteExample(gestureId, index) {
 - [x] Unit test: `Gesture::remove_example()` removes correct example, returns error on out-of-bounds
 - [x] Unit test: `Gesture::remove_example()` clears statistics when < 2 examples remain
 - [ ] Integration: `delete_example` command removes example, triggers sync and dirty flag
-- [ ] Manual: Stop button visible and functional in all three active training states
-- [ ] Manual: Example list expands/collapses, delete works with confirmation
+- [x] Manual: Stop button visible and functional in all three active training states
+- [x] Manual: Example list expands/collapses, delete works, list stays expanded after delete
 
 ## References
 

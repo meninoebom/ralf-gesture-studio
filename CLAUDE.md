@@ -123,9 +123,9 @@ For algorithm details, echo defense design, preprocessing pipeline, threshold ca
 - **Detection latency ~400ms.** Mean time from Building entry to Peak fire is ~400ms (3 frames of accumulation at ~15Hz DTW rate). This is the baseline responsiveness of the system.
 - **Jump-style gestures produce tight margins.** Gestures with low inter-example variance (e.g., jumps) get tight auto-thresholds (low σ), resulting in lower margins (~39%) compared to complex gestures like spins (~75%). This is correct behavior — tight thresholds mean precise detection, not fragile detection.
 
-## Current Status (v0.7.0)
+## Current Status (v0.7.1)
 
-All core features implemented: DTW recognition with VAD-style state machine, statistical threshold calibration (mu+sigma), two-layer echo defense (0% echo rate in production), LB_Keogh + Sakoe-Chiba + early abandoning optimizations, preprocessing pipeline (hip centering, scale normalization, velocity features), data augmentation, example quality assessment, joint weighting, consensus scoring, diagnostic logging, and research-ready vocabulary format (v1.2). 146 passing tests.
+All core features implemented: DTW recognition with VAD-style state machine, statistical threshold calibration (mu+sigma), two-layer echo defense (0% echo rate in production), LB_Keogh + Sakoe-Chiba + early abandoning optimizations, preprocessing pipeline (hip centering, scale normalization, velocity features), data augmentation, example quality assessment, joint weighting, consensus scoring, diagnostic logging, and research-ready vocabulary format (v1.2). Stop training button and individual example deletion. 151 passing tests.
 
 ## Coding Guidelines
 

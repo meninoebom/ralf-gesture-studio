@@ -296,6 +296,34 @@ function updateConnectionStatus(status) {
     elements.popoverOutputTime.textContent = formatTimeAgo(status.ms_since_last_send);
 }
 
+function buildExampleList(gesture) {
+    const list = document.createElement('div');
+    list.className = 'example-list';
+
+    gesture.examples.forEach((ex, idx) => {
+        const time = new Date(ex.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const duration = (ex.duration_ms / 1000).toFixed(1);
+
+        const row = document.createElement('div');
+        row.className = 'example-item';
+
+        const info = document.createElement('span');
+        info.className = 'example-info dim';
+        info.textContent = `${time} · ${duration}s · ${ex.frame_count} frames`;
+
+        const btn = document.createElement('button');
+        btn.className = 'example-delete-btn';
+        btn.textContent = '×';
+        btn.onclick = () => deleteExample(gesture.id, idx);
+
+        row.appendChild(info);
+        row.appendChild(btn);
+        list.appendChild(row);
+    });
+
+    return list;
+}
+
 function renderGestures(gestures) {
     // Skip re-render if currently editing a gesture name
     if (state.isEditingGestureName) {
@@ -310,7 +338,6 @@ function renderGestures(gestures) {
         gestures: gestures.map(g => ({ id: g.id, name: g.name, examples: g.examples.length, osc_address: g.osc_address })),
         selectedId: state.selectedGestureId,
         expanded: [...state.expandedGestures],
-        trainingActive: state.trainingState !== 'idle',
     });
 
     // Skip re-render if nothing changed
@@ -320,8 +347,6 @@ function renderGestures(gestures) {
     state.lastGesturesHash = currentHash;
 
     elements.gestureList.innerHTML = '';
-
-    const isTrainingActive = state.trainingState !== 'idle';
 
     for (const gesture of gestures) {
         const isExpanded = state.expandedGestures.has(gesture.id);
@@ -378,24 +403,7 @@ function renderGestures(gestures) {
 
         // Render expanded example list
         if (isExpanded && gesture.examples.length > 0) {
-            const exList = document.createElement('div');
-            exList.className = 'example-list';
-            gesture.examples.forEach((ex, idx) => {
-                const time = new Date(ex.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                const durationSec = (ex.duration_ms / 1000).toFixed(1);
-                const item = document.createElement('div');
-                item.className = 'example-item';
-                item.innerHTML = `
-                    <span class="example-info dim">${time} · ${durationSec}s · ${ex.frame_count} frames</span>
-                    <button class="example-delete-btn" ${isTrainingActive ? 'disabled' : ''}>×</button>
-                `;
-                item.querySelector('.example-delete-btn').addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    deleteExample(gesture.id, idx);
-                });
-                exList.appendChild(item);
-            });
-            container.appendChild(exList);
+            container.appendChild(buildExampleList(gesture));
         }
 
         elements.gestureList.appendChild(container);
@@ -736,12 +744,14 @@ function toggleExampleList(gestureId) {
     state.lastGesturesHash = null; // Force re-render
 }
 
-async function deleteExample(gestureId, index) {
-    const gesture = state.vocabulary?.gestures.find(g => g.id === gestureId);
-    const name = gesture ? gesture.name : 'gesture';
-    if (!confirm(`Delete this example from "${name}"?`)) return;
-    await invoke('delete_example', { gestureId, exampleIndex: index });
-    state.lastGesturesHash = null; // Force re-render
+async function deleteExample(gestureId, exampleIndex) {
+    try {
+        await invoke('delete_example', { gestureId, exampleIndex });
+        state.expandedGestures.delete(gestureId);
+        state.lastGesturesHash = null;
+    } catch (err) {
+        console.error('delete_example failed:', err);
+    }
 }
 
 async function startTraining() {

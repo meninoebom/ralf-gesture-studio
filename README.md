@@ -57,6 +57,8 @@ ralf/
 │       └── training.rs        # Training session state machine with audio cues
 ├── test_osc_sender.py         # Python script to test OSC input
 ├── test_osc_receiver.py       # Python script to test OSC output
+├── tools/
+│   └── gesture-viewer.html    # Standalone .ralf gesture visualizer
 ├── CLAUDE.md                  # AI development guidelines
 ├── requirements.md            # Full specification document
 └── .llm/
@@ -248,6 +250,16 @@ Vocabulary files are human-readable JSON with the `.ralf` extension.
 Default save location: `~/Documents/RALF/`
 
 See `FORMAT.md` for complete field reference.
+
+## Gesture Viewer
+
+A standalone HTML tool for visual playback of recorded gesture examples. No install required — open in any browser.
+
+```bash
+open tools/gesture-viewer.html
+```
+
+Drag a `.ralf` file onto the page, select a gesture and example, and watch the stick figure animate through the recorded frames. Includes playback controls, speed adjustment, and ghost trails for visualizing motion over time.
 
 ## Current Status
 

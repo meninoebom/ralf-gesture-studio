@@ -47,6 +47,9 @@ src/
 │   └── sender.rs               # OSC sender for hit messages
 └── gui/
     └── mod.rs                  # Tauri GUI (Training/Performance modes)
+
+tools/
+└── gesture-viewer.html         # Standalone .ralf file visualizer (MediaPipe skeleton)
 ```
 
 ### Key Dependencies
@@ -125,7 +128,7 @@ For algorithm details, echo defense design, preprocessing pipeline, threshold ca
 
 ## Current Status (v0.7.1)
 
-All core features implemented: DTW recognition with VAD-style state machine, statistical threshold calibration (mu+sigma), two-layer echo defense (0% echo rate in production), LB_Keogh + Sakoe-Chiba + early abandoning optimizations, preprocessing pipeline (hip centering, scale normalization, velocity features), data augmentation, example quality assessment, joint weighting, consensus scoring, diagnostic logging, and research-ready vocabulary format (v1.2). Stop training button and individual example deletion. 151 passing tests.
+All core features implemented: DTW recognition with VAD-style state machine, statistical threshold calibration (mu+sigma), two-layer echo defense (0% echo rate in production), LB_Keogh + Sakoe-Chiba + early abandoning optimizations, preprocessing pipeline (hip centering, scale normalization, velocity features), data augmentation, example quality assessment, joint weighting, consensus scoring, diagnostic logging, and research-ready vocabulary format (v1.2). Stop training button and individual example deletion. Standalone gesture viewer for visual inspection of recorded examples. 151 passing tests.
 
 ## Coding Guidelines
 
@@ -193,9 +196,24 @@ For development without a real skeleton tracker:
 oscsend localhost 6448 /wek/inputs f f f f ...
 ```
 
+## Tools
+
+### Gesture Viewer (`tools/gesture-viewer.html`)
+
+Standalone HTML file for visual playback of recorded gesture examples. Open in any browser, drag-drop a `.ralf` file, select a gesture and example, and watch a stick figure animate through the recorded frames.
+
+- **Skeleton rendering**: MediaPipe Pose 33 keypoints with left/right body coloring
+- **Playback**: Play/pause, frame scrubber, speed control (0.25x–2x), loop
+- **Ghost trails**: Configurable motion history overlay (0–15 previous frames)
+- **Keyboard**: Space (play/pause), arrows (step), Home/End (jump)
+- **Zero dependencies**: Single HTML file, no build step
+
+Currently renders MediaPipe skeleton topology. For unknown `tracking_system` values, could fall back to point-cloud rendering (not yet implemented).
+
 ## Related Files
 
 - `requirements.md` - Full specification document
 - `FORMAT.md` - Complete .ralf file format specification
+- `tools/gesture-viewer.html` - Standalone .ralf gesture visualizer
 - `ralf-graphviz.dot` - System architecture diagram
 - `RALF in context.png` - Context diagram showing RALF in the larger system

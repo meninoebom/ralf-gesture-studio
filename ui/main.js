@@ -747,7 +747,6 @@ function toggleExampleList(gestureId) {
 async function deleteExample(gestureId, exampleIndex) {
     try {
         await invoke('delete_example', { gestureId, exampleIndex });
-        state.expandedGestures.delete(gestureId);
         state.lastGesturesHash = null;
     } catch (err) {
         console.error('delete_example failed:', err);

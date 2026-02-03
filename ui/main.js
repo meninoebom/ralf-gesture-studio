@@ -132,27 +132,13 @@ function setupEventListeners() {
         }
     });
 
-    // Stop training + Delete example — use mousedown on document so the handler
-    // fires immediately on press, before the 50ms poll can destroy the element.
-    // Using closest() to match even if click lands on a child node.
+    // Stop training — mousedown on document fires immediately on press,
+    // before the 50ms poll can destroy the button via innerHTML replacement.
     document.addEventListener('mousedown', (e) => {
-        if (e.button !== 0) return; // primary button only
-
+        if (e.button !== 0) return;
         if (e.target.closest('.stop-training-btn')) {
             e.preventDefault();
             cancelTraining();
-            return;
-        }
-
-        const deleteBtn = e.target.closest('.example-delete-btn');
-        if (deleteBtn && !deleteBtn.disabled) {
-            e.preventDefault();
-            e.stopPropagation();
-            const gestureId = parseInt(deleteBtn.dataset.gestureId);
-            const index = parseInt(deleteBtn.dataset.index);
-            const gesture = state.vocabulary?.gestures.find(g => g.id === gestureId);
-            const name = gesture ? gesture.name : 'gesture';
-            deleteExample(gestureId, index, name);
         }
     });
 
@@ -401,10 +387,12 @@ function renderGestures(gestures) {
                 item.className = 'example-item';
                 item.innerHTML = `
                     <span class="example-info dim">${time} · ${durationSec}s · ${ex.frame_count} frames</span>
-                    <button class="example-delete-btn" data-gesture-id="${gesture.id}" data-index="${idx}"
-                            ${isTrainingActive ? 'disabled' : ''}>×</button>
+                    <button class="example-delete-btn" ${isTrainingActive ? 'disabled' : ''}>×</button>
                 `;
-                // Click handled via event delegation on gestureList
+                item.querySelector('.example-delete-btn').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteExample(gesture.id, idx);
+                });
                 exList.appendChild(item);
             });
             container.appendChild(exList);
@@ -748,8 +736,10 @@ function toggleExampleList(gestureId) {
     state.lastGesturesHash = null; // Force re-render
 }
 
-async function deleteExample(gestureId, index, gestureName) {
-    if (!confirm(`Delete this example from "${gestureName}"?`)) return;
+async function deleteExample(gestureId, index) {
+    const gesture = state.vocabulary?.gestures.find(g => g.id === gestureId);
+    const name = gesture ? gesture.name : 'gesture';
+    if (!confirm(`Delete this example from "${name}"?`)) return;
     await invoke('delete_example', { gestureId, exampleIndex: index });
     state.lastGesturesHash = null; // Force re-render
 }

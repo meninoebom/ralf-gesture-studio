@@ -789,7 +789,10 @@ impl Recognizer {
 
         for (idx, gesture) in self.gestures.iter_mut().enumerate() {
             // Find this gesture's distance
-            let distance = distances.iter().find(|(i, _, _)| *i == idx).map(|(_, d, _)| *d);
+            let distance = distances
+                .iter()
+                .find(|(i, _, _)| *i == idx)
+                .map(|(_, d, _)| *d);
 
             gesture.current_distance = distance;
 
@@ -798,8 +801,7 @@ impl Recognizer {
                     // Best-matching gesture: run its state machine
                     // Consensus gate: treat as global cooldown (suppress entry) if consensus fails
                     let suppressed = in_global_cooldown || consensus_blocked;
-                    let result =
-                        gesture.process_state_machine(dist, &self.config, suppressed);
+                    let result = gesture.process_state_machine(dist, &self.config, suppressed);
 
                     if let Some(transition) = result.transition {
                         self.pending_transitions.push(GestureStateTransition {

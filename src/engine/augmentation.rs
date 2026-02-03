@@ -331,10 +331,11 @@ mod tests {
         let seq = make_test_sequence(30);
         let r1 = generate_augmented(&seq, &config, 1, 0);
         let r2 = generate_augmented(&seq, &config, 1, 1);
-        let any_diff = r1[0]
-            .iter()
-            .zip(r2[0].iter())
-            .any(|(a, b)| a.iter().zip(b.iter()).any(|(va, vb)| (va - vb).abs() > 1e-6));
+        let any_diff = r1[0].iter().zip(r2[0].iter()).any(|(a, b)| {
+            a.iter()
+                .zip(b.iter())
+                .any(|(va, vb)| (va - vb).abs() > 1e-6)
+        });
         assert!(any_diff);
     }
 
@@ -382,10 +383,11 @@ mod tests {
         let seq = make_test_sequence(5);
         let mut mirrored = seq.clone();
         apply_horizontal_mirror(&mut mirrored);
-        let any_diff = seq
-            .iter()
-            .zip(mirrored.iter())
-            .any(|(a, b)| a.iter().zip(b.iter()).any(|(va, vb)| (va - vb).abs() > 1e-6));
+        let any_diff = seq.iter().zip(mirrored.iter()).any(|(a, b)| {
+            a.iter()
+                .zip(b.iter())
+                .any(|(va, vb)| (va - vb).abs() > 1e-6)
+        });
         assert!(any_diff);
     }
 
@@ -403,10 +405,11 @@ mod tests {
         let original = seq.clone();
         let mut rng = StdRng::seed_from_u64(42);
         apply_spatial_jitter(&mut seq, 0.1, &mut rng);
-        let any_diff = original
-            .iter()
-            .zip(seq.iter())
-            .any(|(a, b)| a.iter().zip(b.iter()).any(|(va, vb)| (va - vb).abs() > 1e-10));
+        let any_diff = original.iter().zip(seq.iter()).any(|(a, b)| {
+            a.iter()
+                .zip(b.iter())
+                .any(|(va, vb)| (va - vb).abs() > 1e-10)
+        });
         assert!(any_diff);
     }
 

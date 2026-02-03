@@ -558,6 +558,90 @@ input[type="range"]::-webkit-slider-thumb {
     color: var(--orange);
 }
 
+/* Stop Training Button */
+.stop-training-btn {
+    width: 100%;
+    max-width: 300px;
+    padding: 12px 24px;
+    margin-top: 12px;
+    font-size: var(--font-size-base);
+    font-weight: 600;
+    background-color: transparent;
+    border: 2px solid var(--red);
+    color: var(--red);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.stop-training-btn:hover {
+    background-color: var(--red);
+    color: #000;
+}
+
+/* Expandable Example List */
+.gesture-container {
+    border-bottom: 1px solid var(--bg-darkest);
+}
+
+.gesture-container .gesture-row {
+    border-bottom: none;
+}
+
+.col-examples.clickable {
+    cursor: pointer;
+    user-select: none;
+}
+
+.col-examples.clickable:hover {
+    color: var(--blue);
+}
+
+.col-examples.expanded {
+    color: var(--blue);
+}
+
+.example-list {
+    padding: 4px 0 8px 42px;
+}
+
+.example-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 8px;
+    border-radius: 3px;
+}
+
+.example-item:hover {
+    background-color: var(--bg-darkest);
+}
+
+.example-info {
+    font-size: var(--font-size-small);
+}
+
+.example-delete-btn {
+    padding: 2px 8px;
+    font-size: var(--font-size-small);
+    background-color: transparent;
+    color: var(--text-dim);
+    border: 1px solid transparent;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.example-delete-btn:hover {
+    color: var(--red);
+    border-color: var(--red);
+}
+
+.example-delete-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
 /* Performance Panel */
 #performance-panel {
     flex: 1;

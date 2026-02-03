@@ -482,11 +482,7 @@ mod tests {
         };
         let p = Preprocessor::new(config, "mediapipe-pose-33-xy");
 
-        let sequence = vec![
-            vec![1.0, 2.0],
-            vec![1.5, 2.5],
-            vec![2.0, 3.0],
-        ];
+        let sequence = vec![vec![1.0, 2.0], vec![1.5, 2.5], vec![2.0, 3.0]];
 
         let result = p.process_sequence(&sequence);
 

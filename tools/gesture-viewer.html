@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RALF Gesture Viewer</title>
+    <style>
+        :root {
+            --bg-darkest: #0a0a0c;
+            --bg-dark: #121214;
+            --bg-mid: #1c1c20;
+            --bg-light: #2a2a30;
+            --bg-lighter: #3a3a42;
+            --text-white: #f0f0f5;
+            --text-dim: #a0a0a8;
+            --text-heading: #c8d0e0;
+            --green: #64dc64;
+            --red: #ff6464;
+            --blue: #64aaff;
+            --gold: #ffb932;
+            --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: var(--font);
+            font-size: 14px;
+            background: var(--bg-dark);
+            color: var(--text-white);
+            line-height: 1.4;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        #app {
+            display: grid;
+            grid-template-rows: auto 1fr auto;
+            grid-template-columns: 240px 1fr;
+            height: 100vh;
+        }
+
+        /* Header */
+        header {
+            grid-column: 1 / -1;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 16px;
+            background: var(--bg-mid);
+            border-bottom: 1px solid var(--bg-lighter);
+        }
+        header h1 { font-size: 15px; font-weight: 600; color: var(--text-heading); }
+        #file-name { color: var(--text-dim); font-size: 13px; }
+
+        /* Sidebar */
+        #sidebar {
+            background: var(--bg-mid);
+            border-right: 1px solid var(--bg-lighter);
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #drop-zone {
+            padding: 20px 16px;
+            text-align: center;
+            border-bottom: 1px solid var(--bg-light);
+        }
+        #drop-zone p { color: var(--text-dim); font-size: 13px; margin-bottom: 10px; }
+        #drop-zone.dragover { background: var(--bg-light); }
+
+        .btn {
+            background: var(--bg-lighter);
+            color: var(--text-white);
+            border: 1px solid #4a4a52;
+            border-radius: 4px;
+            padding: 6px 14px;
+            font-size: 13px;
+            cursor: pointer;
+            font-family: var(--font);
+        }
+        .btn:hover { background: #4a4a52; }
+
+        .sidebar-section {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--bg-light);
+        }
+        .sidebar-section h3 {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-dim);
+            margin-bottom: 6px;
+        }
+
+        #file-info { font-size: 13px; }
+        #file-info .label { color: var(--text-dim); }
+
+        .list-item {
+            padding: 5px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .list-item:hover { background: var(--bg-light); }
+        .list-item.selected { background: var(--bg-lighter); color: var(--blue); }
+        .list-item .count { color: var(--text-dim); font-size: 12px; }
+        .list-item.empty { color: var(--text-dim); cursor: default; opacity: 0.5; }
+
+        /* Canvas area */
+        #canvas-container {
+            position: relative;
+            background: var(--bg-darkest);
+            overflow: hidden;
+        }
+        #skeleton-canvas {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+        }
+        #empty-state {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-dim);
+            font-size: 14px;
+        }
+        #loading-overlay {
+            position: absolute;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(10, 10, 12, 0.85);
+            color: var(--text-dim);
+            font-size: 14px;
+            z-index: 10;
+        }
+
+        /* Controls */
+        #controls {
+            grid-column: 1 / -1;
+            background: var(--bg-mid);
+            border-top: 1px solid var(--bg-lighter);
+            padding: 8px 16px;
+            display: none;
+            flex-direction: column;
+            gap: 6px;
+        }
+        #controls.visible { display: flex; }
+
+        #transport {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #transport button {
+            background: var(--bg-lighter);
+            color: var(--text-white);
+            border: 1px solid #4a4a52;
+            border-radius: 4px;
+            width: 32px; height: 28px;
+            cursor: pointer;
+            font-size: 14px;
+            font-family: var(--font);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #transport button:hover { background: #4a4a52; }
+        #btn-play-pause { width: 48px; font-size: 12px; }
+
+        #scrubber {
+            flex: 1;
+            height: 4px;
+            -webkit-appearance: none;
+            appearance: none;
+            background: var(--bg-lighter);
+            border-radius: 2px;
+            outline: none;
+            cursor: pointer;
+        }
+        #scrubber::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px; height: 14px;
+            border-radius: 50%;
+            background: var(--blue);
+            cursor: pointer;
+        }
+
+        #frame-display, #time-display {
+            font-size: 12px;
+            color: var(--text-dim);
+            font-variant-numeric: tabular-nums;
+            min-width: 60px;
+        }
+
+        #settings {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            font-size: 12px;
+            color: var(--text-dim);
+        }
+        #settings label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+        }
+        #settings select {
+            background: var(--bg-lighter);
+            color: var(--text-white);
+            border: 1px solid #4a4a52;
+            border-radius: 3px;
+            padding: 2px 4px;
+            font-size: 12px;
+            font-family: var(--font);
+        }
+        #settings input[type="range"] {
+            width: 60px;
+            height: 3px;
+            -webkit-appearance: none;
+            appearance: none;
+            background: var(--bg-lighter);
+            border-radius: 2px;
+            outline: none;
+        }
+        #settings input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: var(--text-dim);
+            cursor: pointer;
+        }
+        #settings input[type="checkbox"] {
+            accent-color: var(--blue);
+        }
+
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1>RALF Gesture Viewer</h1>
+            <span id="file-name">Drop a .ralf file to begin</span>
+        </header>
+
+        <div id="sidebar">
+            <div id="drop-zone">
+                <p>Drop .ralf file here<br>or</p>
+                <button class="btn" id="btn-open">Open File</button>
+                <input type="file" id="file-input" accept=".ralf,.json" hidden>
+            </div>
+
+            <div id="file-info" class="sidebar-section hidden"></div>
+
+            <div id="gesture-section" class="sidebar-section hidden">
+                <h3>Gestures</h3>
+                <div id="gesture-list"></div>
+            </div>
+
+            <div id="example-section" class="sidebar-section hidden">
+                <h3>Examples</h3>
+                <div id="example-list"></div>
+            </div>
+        </div>
+
+        <div id="canvas-container">
+            <canvas id="skeleton-canvas"></canvas>
+            <div id="empty-state">Load a .ralf file and select an example</div>
+            <div id="loading-overlay">Loading...</div>
+        </div>
+
+        <div id="controls">
+            <div id="transport">
+                <button id="btn-step-back" title="Previous frame (Left)">&larr;</button>
+                <button id="btn-play-pause" title="Play/Pause (Space)">Play</button>
+                <button id="btn-step-fwd" title="Next frame (Right)">&rarr;</button>
+                <input type="range" id="scrubber" min="0" max="0" value="0">
+                <span id="frame-display">0 / 0</span>
+                <span id="time-display">0.00s</span>
+            </div>
+            <div id="settings">
+                <label>Speed
+                    <select id="speed-select">
+                        <option value="0.25">0.25x</option>
+                        <option value="0.5">0.5x</option>
+                        <option value="1" selected>1x</option>
+                        <option value="1.5">1.5x</option>
+                        <option value="2">2x</option>
+                    </select>
+                </label>
+                <label>Ghosts
+                    <input type="range" id="ghost-slider" min="0" max="15" value="3">
+                    <span id="ghost-count">3</span>
+                </label>
+                <label><input type="checkbox" id="chk-loop" checked> Loop</label>
+                <label><input type="checkbox" id="chk-face"> Face</label>
+            </div>
+        </div>
+    </div>
+
+<script>
+// ============================================================
+// 1. CONSTANTS — MediaPipe Pose 33 skeleton topology
+// ============================================================
+
+const CONNECTIONS = {
+    center: [
+        [11, 12], // shoulders
+        [23, 24], // hips
+        [11, 23], // left torso
+        [12, 24], // right torso
+    ],
+    left: [
+        [11, 13], [13, 15],           // shoulder → elbow → wrist
+        [15, 17], [15, 19], [15, 21], // wrist → fingers
+        [17, 19],                      // pinky → index
+        [23, 25], [25, 27],           // hip → knee → ankle
+        [27, 29], [27, 31], [29, 31], // ankle → heel/foot
+    ],
+    right: [
+        [12, 14], [14, 16],           // shoulder → elbow → wrist
+        [16, 18], [16, 20], [16, 22], // wrist → fingers
+        [18, 20],                      // pinky → index
+        [24, 26], [26, 28],           // hip → knee → ankle
+        [28, 30], [28, 32], [30, 32], // ankle → heel/foot
+    ],
+    face: [
+        [0, 1], [1, 2], [2, 3], [3, 7],  // nose → left eye → ear
+        [0, 4], [4, 5], [5, 6], [6, 8],  // nose → right eye → ear
+        [9, 10],                           // mouth
+    ],
+};
+
+const COLORS = {
+    center: [240, 240, 245],
+    left:   [100, 170, 255],
+    right:  [255, 100, 100],
+    face:   [160, 160, 168],
+};
+
+// ============================================================
+// 2. APPLICATION STATE
+// ============================================================
+
+let vocabulary = null;
+let selectedGestureIdx = -1;
+let selectedExampleIdx = -1;
+let currentFrames = null;
+
+const anim = {
+    playing: false,
+    frame: 0,
+    speed: 1.0,
+    loop: true,
+    lastTs: null,
+    frameDuration: 1000 / 60,
+    ghostCount: 3,
+    showFace: false,
+    rafId: null,
+};
+
+// ============================================================
+// 3. DOM REFERENCES
+// ============================================================
+
+const $ = (sel) => document.querySelector(sel);
+const canvas = $('#skeleton-canvas');
+const ctx = canvas.getContext('2d');
+
+const els = {
+    fileName:    $('#file-name'),
+    dropZone:    $('#drop-zone'),
+    fileInput:   $('#file-input'),
+    btnOpen:     $('#btn-open'),
+    fileInfo:    $('#file-info'),
+    gestureSection: $('#gesture-section'),
+    gestureList: $('#gesture-list'),
+    exampleSection: $('#example-section'),
+    exampleList: $('#example-list'),
+    emptyState:  $('#empty-state'),
+    loading:     $('#loading-overlay'),
+    controls:    $('#controls'),
+    btnPlay:     $('#btn-play-pause'),
+    btnStepBack: $('#btn-step-back'),
+    btnStepFwd:  $('#btn-step-fwd'),
+    scrubber:    $('#scrubber'),
+    frameDisp:   $('#frame-display'),
+    timeDisp:    $('#time-display'),
+    speedSel:    $('#speed-select'),
+    ghostSlider: $('#ghost-slider'),
+    ghostCount:  $('#ghost-count'),
+    chkLoop:     $('#chk-loop'),
+    chkFace:     $('#chk-face'),
+};
+
+// ============================================================
+// 4. FILE LOADING
+// ============================================================
+
+function loadFile(file) {
+    els.loading.style.display = 'flex';
+    // Let the loading overlay paint before blocking on JSON.parse
+    setTimeout(async () => {
+        try {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            onFileLoaded(data, file.name);
+        } catch (e) {
+            alert('Failed to parse file: ' + e.message);
+        } finally {
+            els.loading.style.display = 'none';
+        }
+    }, 50);
+}
+
+function onFileLoaded(data, name) {
+    vocabulary = data;
+    selectedGestureIdx = -1;
+    selectedExampleIdx = -1;
+    currentFrames = null;
+    pause();
+
+    // Derive frame duration from source_fps
+    const fps = data.source_fps || 60;
+    anim.frameDuration = 1000 / fps;
+
+    // Validate dimensions
+    const dims = data.input?.dimensions || 66;
+    if (dims !== 66) {
+        console.warn(`Expected 66 dimensions (MediaPipe 33×XY), got ${dims}. Visualization may be incorrect.`);
+    }
+
+    els.fileName.textContent = name;
+    renderSidebar(data);
+    els.emptyState.textContent = 'Select a gesture and example';
+    renderStatic();
+}
+
+// ============================================================
+// 5. SIDEBAR
+// ============================================================
+
+function renderSidebar(data) {
+    // File info
+    els.fileInfo.innerHTML = `
+        <div><span class="label">Name:</span> ${esc(data.name)}</div>
+        <div><span class="label">Tracking:</span> ${esc(data.tracking_system || 'unknown')}</div>
+        <div><span class="label">FPS:</span> ${data.source_fps || '?'}</div>
+        <div><span class="label">Gestures:</span> ${data.gestures.length}</div>
+    `;
+    els.fileInfo.classList.remove('hidden');
+
+    // Gesture list
+    els.gestureList.innerHTML = '';
+    data.gestures.forEach((g, i) => {
+        const item = document.createElement('div');
+        item.className = 'list-item' + (g.examples.length === 0 ? ' empty' : '');
+        item.innerHTML = `<span>${esc(g.name)}</span><span class="count">${g.examples.length}</span>`;
+        if (g.examples.length > 0) {
+            item.addEventListener('click', () => selectGesture(i));
+        }
+        els.gestureList.appendChild(item);
+    });
+    els.gestureSection.classList.remove('hidden');
+    els.exampleSection.classList.add('hidden');
+}
+
+function selectGesture(idx) {
+    selectedGestureIdx = idx;
+    selectedExampleIdx = -1;
+    currentFrames = null;
+    pause();
+
+    // Highlight gesture
+    els.gestureList.querySelectorAll('.list-item').forEach((el, i) => {
+        el.classList.toggle('selected', i === idx);
+    });
+
+    // Render examples
+    const gesture = vocabulary.gestures[idx];
+    els.exampleList.innerHTML = '';
+    gesture.examples.forEach((ex, i) => {
+        const item = document.createElement('div');
+        item.className = 'list-item';
+        const date = new Date(ex.recorded_at);
+        const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const dur = (ex.duration_ms / 1000).toFixed(1);
+        item.innerHTML = `<span>#${i + 1} &middot; ${timeStr}</span><span class="count">${ex.frame_count}f &middot; ${dur}s</span>`;
+        item.addEventListener('click', () => selectExample(i));
+        els.exampleList.appendChild(item);
+    });
+    els.exampleSection.classList.remove('hidden');
+    els.emptyState.textContent = 'Select an example';
+    renderStatic();
+}
+
+function selectExample(idx) {
+    selectedExampleIdx = idx;
+    const example = vocabulary.gestures[selectedGestureIdx].examples[idx];
+    currentFrames = example.frames;
+
+    // Highlight example
+    els.exampleList.querySelectorAll('.list-item').forEach((el, i) => {
+        el.classList.toggle('selected', i === idx);
+    });
+
+    // Set up playback
+    anim.frame = 0;
+    anim.lastTs = null;
+    els.scrubber.max = currentFrames.length - 1;
+    els.scrubber.value = 0;
+
+    els.emptyState.classList.add('hidden');
+    els.controls.classList.add('visible');
+    updateFrameDisplay();
+    renderStatic();
+}
+
+// ============================================================
+// 6. CANVAS RENDERING
+// ============================================================
+
+let canvasW = 0, canvasH = 0;
+
+function resizeCanvas() {
+    const container = $('#canvas-container');
+    const rect = container.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    canvasW = canvas.width;
+    canvasH = canvas.height;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    renderStatic();
+}
+
+function toCanvas(nx, ny) {
+    // Map normalized 0-1 coords to canvas pixel coords with padding
+    // Preserve aspect ratio using min dimension
+    const pad = 30;
+    const w = canvasW / (window.devicePixelRatio || 1) - pad * 2;
+    const h = canvasH / (window.devicePixelRatio || 1) - pad * 2;
+    const scale = Math.min(w, h);
+    const ox = pad + (w - scale) / 2;
+    const oy = pad + (h - scale) / 2;
+    return [ox + nx * scale, oy + ny * scale];
+}
+
+function parseJoints(frame) {
+    const joints = [];
+    for (let i = 0; i < 33; i++) {
+        // Data axes: x = vertical (head→feet), y = horizontal
+        // Swap to canvas: y → canvas-x, x → canvas-y
+        const cx = frame[i * 2 + 1];
+        const cy = frame[i * 2];
+        joints.push(toCanvas(cx, cy));
+    }
+    return joints;
+}
+
+function drawConnections(joints, conns, rgb, opacity, lineWidth) {
+    ctx.strokeStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${opacity})`;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (const [a, b] of conns) {
+        const [x1, y1] = joints[a];
+        const [x2, y2] = joints[b];
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+    }
+    ctx.stroke();
+}
+
+function drawJointDots(joints, sideIndices, rgb, opacity, radius) {
+    ctx.fillStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${opacity})`;
+    for (const idx of sideIndices) {
+        const [x, y] = joints[idx];
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+function drawSkeleton(frame, opacity, isGhost) {
+    const joints = parseJoints(frame);
+    const lw = isGhost ? 1.2 : 2.5;
+    const dotR = isGhost ? 0 : 3;
+
+    drawConnections(joints, CONNECTIONS.center, COLORS.center, opacity, lw);
+    drawConnections(joints, CONNECTIONS.left, COLORS.left, opacity, lw);
+    drawConnections(joints, CONNECTIONS.right, COLORS.right, opacity, lw);
+
+    if (anim.showFace) {
+        drawConnections(joints, CONNECTIONS.face, COLORS.face, opacity * 0.6, lw * 0.6);
+    }
+
+    if (dotR > 0) {
+        // Center joints: 11, 12, 23, 24
+        drawJointDots(joints, [11, 12, 23, 24], COLORS.center, opacity, dotR);
+        // Left joints
+        drawJointDots(joints, [13, 15, 17, 19, 21, 25, 27, 29, 31], COLORS.left, opacity, dotR);
+        // Right joints
+        drawJointDots(joints, [14, 16, 18, 20, 22, 26, 28, 30, 32], COLORS.right, opacity, dotR);
+        if (anim.showFace) {
+            drawJointDots(joints, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], COLORS.face, opacity * 0.6, dotR * 0.6);
+        }
+    }
+}
+
+function renderFrame() {
+    const dpr = window.devicePixelRatio || 1;
+    const cw = canvasW / dpr;
+    const ch = canvasH / dpr;
+    ctx.clearRect(0, 0, cw, ch);
+
+    if (!currentFrames || currentFrames.length === 0) return;
+
+    // Ghost frames (oldest first)
+    const gc = anim.ghostCount;
+    for (let i = gc; i >= 1; i--) {
+        const ghostIdx = anim.frame - i;
+        if (ghostIdx >= 0) {
+            const t = 1 - i / gc; // 0 = oldest, 1 = newest ghost
+            const opacity = 0.08 + 0.30 * t;
+            drawSkeleton(currentFrames[ghostIdx], opacity, true);
+        }
+    }
+
+    // Current frame
+    drawSkeleton(currentFrames[anim.frame], 1.0, false);
+}
+
+function renderStatic() {
+    renderFrame();
+}
+
+// ============================================================
+// 7. ANIMATION LOOP
+// ============================================================
+
+function animate(ts) {
+    if (!anim.playing) return;
+
+    if (anim.lastTs === null) {
+        anim.lastTs = ts;
+        anim.rafId = requestAnimationFrame(animate);
+        return;
+    }
+
+    const elapsed = ts - anim.lastTs;
+    const effectiveDur = anim.frameDuration / anim.speed;
+
+    if (elapsed >= effectiveDur) {
+        const advance = Math.floor(elapsed / effectiveDur);
+        anim.lastTs = ts - (elapsed % effectiveDur);
+        anim.frame += advance;
+
+        const total = currentFrames.length;
+        if (anim.frame >= total) {
+            if (anim.loop) {
+                anim.frame = anim.frame % total;
+            } else {
+                anim.frame = total - 1;
+                pause();
+                return;
+            }
+        }
+
+        renderFrame();
+        updateFrameDisplay();
+    }
+
+    anim.rafId = requestAnimationFrame(animate);
+}
+
+function play() {
+    if (!currentFrames || currentFrames.length <= 1) return;
+    // If at end, restart
+    if (anim.frame >= currentFrames.length - 1) {
+        anim.frame = 0;
+    }
+    anim.playing = true;
+    anim.lastTs = null;
+    els.btnPlay.textContent = 'Pause';
+    anim.rafId = requestAnimationFrame(animate);
+}
+
+function pause() {
+    anim.playing = false;
+    els.btnPlay.textContent = 'Play';
+    if (anim.rafId) {
+        cancelAnimationFrame(anim.rafId);
+        anim.rafId = null;
+    }
+}
+
+function togglePlay() {
+    if (anim.playing) pause(); else play();
+}
+
+function stepForward() {
+    if (!currentFrames) return;
+    pause();
+    anim.frame = Math.min(anim.frame + 1, currentFrames.length - 1);
+    renderFrame();
+    updateFrameDisplay();
+}
+
+function stepBack() {
+    if (!currentFrames) return;
+    pause();
+    anim.frame = Math.max(anim.frame - 1, 0);
+    renderFrame();
+    updateFrameDisplay();
+}
+
+function updateFrameDisplay() {
+    if (!currentFrames) return;
+    const total = currentFrames.length;
+    els.scrubber.value = anim.frame;
+    els.frameDisp.textContent = `${anim.frame + 1} / ${total}`;
+    const time = (anim.frame * anim.frameDuration / 1000).toFixed(2);
+    els.timeDisp.textContent = `${time}s`;
+}
+
+// ============================================================
+// 8. CONTROLS & EVENT LISTENERS
+// ============================================================
+
+function setupEvents() {
+    // File opening
+    els.btnOpen.addEventListener('click', () => els.fileInput.click());
+    els.fileInput.addEventListener('change', (e) => {
+        if (e.target.files[0]) loadFile(e.target.files[0]);
+    });
+
+    // Drag and drop (whole page)
+    document.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        els.dropZone.classList.add('dragover');
+    });
+    document.addEventListener('dragleave', (e) => {
+        if (!e.relatedTarget || e.relatedTarget === document.documentElement) {
+            els.dropZone.classList.remove('dragover');
+        }
+    });
+    document.addEventListener('drop', (e) => {
+        e.preventDefault();
+        els.dropZone.classList.remove('dragover');
+        const file = e.dataTransfer.files[0];
+        if (file) loadFile(file);
+    });
+
+    // Transport
+    els.btnPlay.addEventListener('click', togglePlay);
+    els.btnStepBack.addEventListener('click', stepBack);
+    els.btnStepFwd.addEventListener('click', stepForward);
+
+    // Scrubber
+    els.scrubber.addEventListener('input', (e) => {
+        pause();
+        anim.frame = parseInt(e.target.value, 10);
+        renderFrame();
+        updateFrameDisplay();
+    });
+
+    // Settings
+    els.speedSel.addEventListener('change', (e) => {
+        anim.speed = parseFloat(e.target.value);
+    });
+    els.ghostSlider.addEventListener('input', (e) => {
+        anim.ghostCount = parseInt(e.target.value, 10);
+        els.ghostCount.textContent = anim.ghostCount;
+        renderFrame();
+    });
+    els.chkLoop.addEventListener('change', (e) => {
+        anim.loop = e.target.checked;
+    });
+    els.chkFace.addEventListener('change', (e) => {
+        anim.showFace = e.target.checked;
+        renderFrame();
+    });
+
+    // Keyboard
+    document.addEventListener('keydown', (e) => {
+        // Don't intercept when typing in inputs
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+        switch (e.code) {
+            case 'Space':
+                e.preventDefault();
+                togglePlay();
+                break;
+            case 'ArrowLeft':
+                e.preventDefault();
+                stepBack();
+                break;
+            case 'ArrowRight':
+                e.preventDefault();
+                stepForward();
+                break;
+            case 'Home':
+                e.preventDefault();
+                pause();
+                anim.frame = 0;
+                renderFrame();
+                updateFrameDisplay();
+                break;
+            case 'End':
+                e.preventDefault();
+                if (currentFrames) {
+                    pause();
+                    anim.frame = currentFrames.length - 1;
+                    renderFrame();
+                    updateFrameDisplay();
+                }
+                break;
+        }
+    });
+
+    // Canvas resize
+    new ResizeObserver(resizeCanvas).observe($('#canvas-container'));
+}
+
+// ============================================================
+// 9. HELPERS
+// ============================================================
+
+function esc(str) {
+    const el = document.createElement('span');
+    el.textContent = str;
+    return el.innerHTML;
+}
+
+// ============================================================
+// 10. INIT
+// ============================================================
+
+document.addEventListener('DOMContentLoaded', () => {
+    setupEvents();
+    resizeCanvas();
+});
+</script>
+</body>
+</html>

@@ -161,7 +161,11 @@ mod tests {
         let weights = compute_joint_weights(&examples).unwrap();
 
         // Dimension 1 (constant) should get minimum weight (clamped)
-        assert!(weights[1] < 0.1, "Zero-variance dim should be near-zero: {}", weights[1]);
+        assert!(
+            weights[1] < 0.1,
+            "Zero-variance dim should be near-zero: {}",
+            weights[1]
+        );
     }
 
     #[test]
@@ -227,8 +231,8 @@ mod tests {
                 (0..10)
                     .map(|t| {
                         vec![
-                            (t as f32 + i as f32) * 10.0, // dim 0: high variance
-                            50.0 + (i as f32) * 0.1,       // dim 1: low variance
+                            (t as f32 + i as f32) * 10.0,        // dim 0: high variance
+                            50.0 + (i as f32) * 0.1,             // dim 1: low variance
                             (t as f32).sin() * (1.0 + i as f32), // dim 2: medium variance
                         ]
                     })

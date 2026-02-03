@@ -21,7 +21,10 @@ pub enum QualityIssue {
     /// The example is statistically dissimilar to other examples.
     Outlier { distance: f32, threshold: f32 },
     /// The example has significantly fewer frames than others.
-    TooShort { frame_count: usize, threshold: usize },
+    TooShort {
+        frame_count: usize,
+        threshold: usize,
+    },
 }
 
 impl QualityIssue {
@@ -90,8 +93,7 @@ pub fn assess_example(new_example: &Sequence, existing: &[Sequence]) -> Option<Q
         }
 
         if !inter_distances.is_empty() {
-            let inter_mean =
-                inter_distances.iter().sum::<f32>() / inter_distances.len() as f32;
+            let inter_mean = inter_distances.iter().sum::<f32>() / inter_distances.len() as f32;
             let outlier_threshold = inter_mean * 3.0;
 
             let new_distances: Vec<f32> = existing
@@ -137,17 +139,12 @@ mod tests {
     use super::*;
 
     fn make_moving_sequence(n_frames: usize, speed: f32) -> Sequence {
-        (0..n_frames)
-            .map(|i| vec![i as f32 * speed, 0.0])
-            .collect()
+        (0..n_frames).map(|i| vec![i as f32 * speed, 0.0]).collect()
     }
 
     #[test]
     fn test_no_issues_with_good_example() {
-        let existing = vec![
-            make_moving_sequence(30, 1.0),
-            make_moving_sequence(30, 1.1),
-        ];
+        let existing = vec![make_moving_sequence(30, 1.0), make_moving_sequence(30, 1.1)];
         let new_ex = make_moving_sequence(30, 0.9);
         assert!(assess_example(&new_ex, &existing).is_none());
     }
@@ -160,10 +157,7 @@ mod tests {
 
     #[test]
     fn test_too_short_detected() {
-        let existing = vec![
-            make_moving_sequence(30, 1.0),
-            make_moving_sequence(30, 1.0),
-        ];
+        let existing = vec![make_moving_sequence(30, 1.0), make_moving_sequence(30, 1.0)];
         let short = make_moving_sequence(10, 1.0); // 10 < 30 * 0.5 = 15
         let result = assess_example(&short, &existing);
         assert!(matches!(result, Some(QualityIssue::TooShort { .. })));
@@ -171,10 +165,7 @@ mod tests {
 
     #[test]
     fn test_too_still_detected() {
-        let existing = vec![
-            make_moving_sequence(30, 1.0),
-            make_moving_sequence(30, 1.0),
-        ];
+        let existing = vec![make_moving_sequence(30, 1.0), make_moving_sequence(30, 1.0)];
         let still: Sequence = vec![vec![5.0, 5.0]; 30]; // zero motion
         let result = assess_example(&still, &existing);
         assert!(matches!(result, Some(QualityIssue::TooStill { .. })));
@@ -204,10 +195,7 @@ mod tests {
     #[test]
     fn test_too_short_has_priority() {
         // An example that is both too short AND too still should report TooShort
-        let existing = vec![
-            make_moving_sequence(30, 1.0),
-            make_moving_sequence(30, 1.0),
-        ];
+        let existing = vec![make_moving_sequence(30, 1.0), make_moving_sequence(30, 1.0)];
         let short_still: Sequence = vec![vec![5.0, 5.0]; 5]; // 5 frames, no motion
         let result = assess_example(&short_still, &existing);
         assert!(matches!(result, Some(QualityIssue::TooShort { .. })));

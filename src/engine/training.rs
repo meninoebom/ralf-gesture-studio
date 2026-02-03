@@ -159,10 +159,11 @@ impl TrainingSession {
         self.transition_to(SessionState::Countdown);
     }
 
-    /// Cancel the current session
+    /// Cancel the current session, discarding all captured data
     pub fn cancel(&mut self) {
         self.transition_to(SessionState::Idle);
         self.current_frames.clear();
+        self.completed_examples.clear();
     }
 
     /// Get elapsed time in current state
@@ -485,6 +486,41 @@ mod tests {
         // Should have close to 3 seconds remaining
         let remaining = session.remaining_secs();
         assert!(remaining > 2.5 && remaining <= 3.0);
+    }
+
+    #[test]
+    fn test_cancel_clears_completed_examples() {
+        let mut session = test_session();
+        let config = TrainingConfig {
+            reps: 3,
+            duration_secs: 0.05,
+            rest_secs: 0.05,
+            countdown_secs: 0.05,
+        };
+
+        session.start(1, "wave", config);
+
+        // Go through countdown
+        sleep(Duration::from_millis(100));
+        session.update();
+        assert_eq!(session.state, SessionState::Capturing);
+
+        // Add frames and complete first rep
+        session.add_frame(vec![1.0, 2.0]);
+        sleep(Duration::from_millis(100));
+        session.update();
+        assert_eq!(session.completed_reps, 1);
+        assert_eq!(session.completed_examples.len(), 1);
+
+        // Cancel mid-session
+        session.cancel();
+
+        assert_eq!(session.state, SessionState::Idle);
+        assert!(session.current_frames.is_empty());
+        assert!(
+            session.completed_examples.is_empty(),
+            "completed_examples should be cleared on cancel"
+        );
     }
 
     #[test]

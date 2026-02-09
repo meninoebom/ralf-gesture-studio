@@ -210,6 +210,14 @@ Standalone HTML file for visual playback of recorded gesture examples. Open in a
 
 Currently renders MediaPipe skeleton topology. For unknown `tracking_system` values, could fall back to point-cloud rendering (not yet implemented).
 
+## After Completing Work (Agent Self-Assessment)
+
+Before wrapping up a non-trivial PR, self-assess:
+- What was the hardest decision or trickiest problem?
+- Did anything surprise you or require a workaround?
+- Would a future session benefit from knowing this?
+If yes, update this CLAUDE.md with the pattern or gotcha (the "Operational Learnings" section above is the right place) — don't wait to be asked.
+
 ## Related Files
 
 - `requirements.md` - Full specification document

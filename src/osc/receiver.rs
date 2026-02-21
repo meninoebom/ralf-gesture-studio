@@ -126,6 +126,12 @@ impl OscReceiverHandle {
     }
 }
 
+/// MediaPipe Pose landmark constants
+const JOINTS: usize = 33;
+const COORDS_PER_JOINT: usize = 2;
+const LEGACY_FRAME_LEN: usize = JOINTS * COORDS_PER_JOINT; // 66
+const VISIBILITY_FRAME_LEN: usize = JOINTS * (COORDS_PER_JOINT + 1); // 99
+
 /// OSC Receiver that listens for skeleton data
 pub struct OscReceiver {
     port: u16,
@@ -228,7 +234,8 @@ impl OscReceiver {
     }
 
     fn handle_message(&self, msg: &OscMessage) {
-        // Accept both the configured address filter AND /ralf/pose
+        // Accept both legacy Wekinator address (configured filter, typically "/wek/inputs")
+        // and native RALF address ("/ralf/pose") for forward compatibility.
         if msg.addr != self.address_filter && msg.addr != "/ralf/pose" {
             return;
         }
@@ -245,12 +252,13 @@ impl OscReceiver {
         }
 
         if !floats.is_empty() {
-            // Auto-detect visibility data: 99 floats = 33 joints × 3 (x, y, visibility)
-            // vs legacy 66 floats = 33 joints × 2 (x, y)
-            if floats.len() == 99 {
-                let mut coords = Vec::with_capacity(66);
-                let mut visibility = Vec::with_capacity(33);
-                for chunk in floats.chunks(3) {
+            // Auto-detect visibility data based on frame length:
+            // 99 floats = 33 joints × 3 (x, y, visibility)
+            // 66 floats = 33 joints × 2 (x, y) — legacy format
+            if floats.len() == VISIBILITY_FRAME_LEN {
+                let mut coords = Vec::with_capacity(LEGACY_FRAME_LEN);
+                let mut visibility = Vec::with_capacity(JOINTS);
+                for chunk in floats.chunks(COORDS_PER_JOINT + 1) {
                     coords.push(chunk[0]); // x
                     coords.push(chunk[1]); // y
                     visibility.push(chunk[2]); // visibility

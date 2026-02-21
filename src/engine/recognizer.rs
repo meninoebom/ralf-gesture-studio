@@ -459,6 +459,12 @@ impl FrameBuffer {
         let start = self.frames.len().saturating_sub(n);
         self.frames.iter().skip(start).cloned().collect()
     }
+
+    /// Clear all frames from the buffer.
+    /// Used after a hit fires to prevent re-triggering from stale gesture data.
+    pub fn clear(&mut self) {
+        self.frames.clear();
+    }
 }
 
 // ============================================================================
@@ -560,7 +566,8 @@ impl Recognizer {
         let mut best = best_so_far;
         for (i, example) in examples.iter().enumerate() {
             // Layer 1: LB_Keogh pruning (O(n) lower bound check)
-            // Skip LB_Keogh when visibility weights are active (envelope doesn't account for them)
+            // LB_Keogh envelopes were computed without visibility weights,
+            // so the lower bound is invalid when weights change per-frame.
             if visibility_weights.is_none() {
                 if let Some(envelope) = envelopes.get(i) {
                     let lb = lb_keogh(window, envelope);
@@ -684,6 +691,18 @@ impl Recognizer {
         let sakoe_chiba_band = self.config.sakoe_chiba_band;
         let vis_weights = self.current_visibility_weights.as_deref();
 
+        // When visibility weights are active, distances are systematically lower
+        // because each dimension is scaled by weight ∈ [0,1]. To keep distances
+        // comparable to unweighted training thresholds, we normalize by the mean
+        // visibility weight (dividing restores the original distance scale).
+        let visibility_normalizer = vis_weights
+            .filter(|w| !w.is_empty())
+            .map(|w| {
+                let mean = w.iter().sum::<f32>() / w.len() as f32;
+                if mean > 1e-6 { mean } else { 1.0 }
+            })
+            .unwrap_or(1.0);
+
         for (idx, gesture) in self.gestures.iter().enumerate() {
             if gesture.examples().is_empty() {
                 continue;
@@ -701,15 +720,21 @@ impl Recognizer {
 
             let (examples, envelopes) = (gesture.examples(), gesture.lb_envelopes());
 
-            let dist = Self::find_best_distance(
+            // Early abandoning needs `best_so_far` in the same domain as raw
+            // DTW distances. Visibility weighting scales each dimension by w_i,
+            // so raw distances are smaller by ~mean(w). Convert best_so_far from
+            // normalized space → weighted space, then convert result back.
+            let raw_dist = Self::find_best_distance(
                 window_ref,
                 examples,
                 envelopes,
                 self.downsample,
                 sakoe_chiba_band,
-                best_so_far,
+                best_so_far * visibility_normalizer,
                 vis_weights,
             );
+            // Normalize visibility-weighted distance to unweighted scale
+            let dist = raw_dist / visibility_normalizer;
             if dist < best_so_far {
                 best_so_far = dist;
             }
@@ -850,6 +875,16 @@ impl Recognizer {
         if let Some((id, name, distance)) = hit_result {
             // Set global cooldown timestamp (NMS: suppress all gestures)
             self.last_any_hit_time = Some(Instant::now());
+
+            // Clear the buffer to prevent re-triggering from stale gesture data.
+            // The buffer must refill (~1-1.5s) before the next detection can occur.
+            // Do NOT reset gesture state machines — Recovery state must persist
+            // so the user must complete a full gesture cycle to retrigger.
+            self.buffer.clear();
+            for gesture in &mut self.gestures {
+                gesture.current_distance = None;
+            }
+
             Some(RecognitionResult {
                 gesture_id: Some(id),
                 gesture_name: Some(name),

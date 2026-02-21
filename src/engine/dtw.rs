@@ -308,6 +308,92 @@ pub fn lb_keogh(candidate: &Sequence, envelope: &LBEnvelope) -> f32 {
     lb_sum.sqrt()
 }
 
+/// Compute per-joint visibility weights from a per-joint visibility array.
+///
+/// Converts per-joint visibility scores into per-dimension weights
+/// (each joint's visibility is duplicated for its X and Y coordinates).
+/// Returns None if the visibility slice is empty.
+pub fn visibility_to_dimension_weights(visibility: &[f32], coords_per_joint: usize) -> Vec<f32> {
+    let mut weights = Vec::with_capacity(visibility.len() * coords_per_joint);
+    for &v in visibility {
+        for _ in 0..coords_per_joint {
+            weights.push(v.clamp(0.0, 1.0));
+        }
+    }
+    weights
+}
+
+/// Calculate DTW distance with per-dimension visibility weighting.
+///
+/// Like `dtw_distance_with_abandon`, but each dimension of the frame distance
+/// is scaled by a weight (from visibility). Low-visibility joints contribute less.
+///
+/// `query_weights` are per-dimension weights for seq1 (the live window).
+/// Template weights could also be applied but for simplicity we use query weights only.
+pub fn dtw_distance_visibility_weighted(
+    seq1: &Sequence,
+    seq2: &Sequence,
+    band_width: usize,
+    best_so_far: f32,
+    weights: &[f32],
+) -> Option<f32> {
+    if seq1.is_empty() || seq2.is_empty() {
+        return None;
+    }
+
+    let n = seq1.len();
+    let m = seq2.len();
+
+    let mut prev_row = vec![f32::INFINITY; m + 1];
+    let mut curr_row = vec![f32::INFINITY; m + 1];
+    prev_row[0] = 0.0;
+
+    for i in 1..=n {
+        curr_row.fill(f32::INFINITY);
+
+        let diagonal = (i * m) / n;
+        let j_min = diagonal.saturating_sub(band_width).max(1);
+        let j_max = (diagonal + band_width + 1).min(m);
+
+        let mut row_min = f32::INFINITY;
+
+        for j in j_min..=j_max {
+            let dist = weighted_euclidean_distance(&seq1[i - 1], &seq2[j - 1], weights);
+
+            let min_prev = prev_row[j - 1].min(prev_row[j]).min(curr_row[j - 1]);
+
+            curr_row[j] = dist + min_prev;
+            row_min = row_min.min(curr_row[j]);
+        }
+
+        if row_min > best_so_far {
+            return None;
+        }
+
+        std::mem::swap(&mut prev_row, &mut curr_row);
+    }
+
+    Some(prev_row[m])
+}
+
+/// Weighted Euclidean distance: each dimension scaled by a weight.
+/// Falls back to normal Euclidean if weights are shorter than frames.
+fn weighted_euclidean_distance(a: &Frame, b: &Frame, weights: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len(), "Frames must have the same dimensions");
+
+    let sum_sq: f32 = a
+        .iter()
+        .zip(b.iter())
+        .enumerate()
+        .map(|(i, (x, y))| {
+            let w = weights.get(i).copied().unwrap_or(1.0);
+            w * (x - y).powi(2)
+        })
+        .sum();
+
+    sum_sq.sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,6 +766,124 @@ mod tests {
                 }
             ),
             f32::INFINITY
+        );
+    }
+
+    // =========================================================================
+    // Visibility-Weighted DTW Tests
+    // =========================================================================
+
+    #[test]
+    fn test_visibility_to_dimension_weights() {
+        let vis = vec![1.0, 0.5, 0.0];
+        let weights = visibility_to_dimension_weights(&vis, 2);
+        assert_eq!(weights, vec![1.0, 1.0, 0.5, 0.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_visibility_to_dimension_weights_clamps() {
+        let vis = vec![1.5, -0.2];
+        let weights = visibility_to_dimension_weights(&vis, 2);
+        assert_eq!(weights, vec![1.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_weighted_euclidean_all_ones_matches_regular() {
+        let a = vec![0.0, 0.0, 1.0, 1.0];
+        let b = vec![3.0, 4.0, 1.0, 1.0];
+        let weights = vec![1.0, 1.0, 1.0, 1.0];
+
+        let regular = euclidean_distance(&a, &b);
+        let weighted = weighted_euclidean_distance(&a, &b, &weights);
+        assert!((regular - weighted).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_weighted_euclidean_zero_weight_ignores_dimension() {
+        // Joint 0 (dims 0,1) differs by (3,4) → dist 5 if weight=1
+        // Joint 1 (dims 2,3) differs by (100,100) but weight=0 → ignored
+        let a = vec![0.0, 0.0, 0.0, 0.0];
+        let b = vec![3.0, 4.0, 100.0, 100.0];
+
+        let weights_all = vec![1.0, 1.0, 1.0, 1.0];
+        let weights_half = vec![1.0, 1.0, 0.0, 0.0];
+
+        let dist_all = weighted_euclidean_distance(&a, &b, &weights_all);
+        let dist_half = weighted_euclidean_distance(&a, &b, &weights_half);
+
+        // With zero weights on joint 1, only joint 0 contributes
+        assert!(dist_half < dist_all);
+        assert!((dist_half - 5.0).abs() < 0.001); // sqrt(1*9 + 1*16) = 5
+    }
+
+    #[test]
+    fn test_visibility_weighted_dtw_identical_returns_zero() {
+        let seq = vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
+        let weights = vec![1.0, 1.0];
+        let result =
+            dtw_distance_visibility_weighted(&seq, &seq, 2, f32::MAX, &weights);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_visibility_weighted_dtw_low_visibility_reduces_distance() {
+        // Two sequences that differ only in joint 1 (dims 2,3)
+        let seq1 = vec![vec![0.0, 0.0, 0.0, 0.0]; 5];
+        let seq2 = vec![vec![0.0, 0.0, 10.0, 10.0]; 5];
+
+        let full_vis = vec![1.0, 1.0, 1.0, 1.0];
+        let low_vis = vec![1.0, 1.0, 0.1, 0.1]; // Low visibility on joint 1
+
+        let dist_full =
+            dtw_distance_visibility_weighted(&seq1, &seq2, 2, f32::MAX, &full_vis).unwrap();
+        let dist_low =
+            dtw_distance_visibility_weighted(&seq1, &seq2, 2, f32::MAX, &low_vis).unwrap();
+
+        assert!(
+            dist_low < dist_full,
+            "Low visibility should reduce distance: {} vs {}",
+            dist_low,
+            dist_full
+        );
+    }
+
+    #[test]
+    fn test_visibility_weighted_dtw_empty_returns_none() {
+        let empty: Sequence = vec![];
+        let seq = vec![vec![1.0]];
+        let weights = vec![1.0];
+        assert!(dtw_distance_visibility_weighted(&empty, &seq, 2, f32::MAX, &weights).is_none());
+        assert!(dtw_distance_visibility_weighted(&seq, &empty, 2, f32::MAX, &weights).is_none());
+    }
+
+    #[test]
+    fn test_visibility_weighted_dtw_early_abandon() {
+        let seq1: Vec<Vec<f32>> = (0..10).map(|_| vec![0.0]).collect();
+        let seq2: Vec<Vec<f32>> = (0..10).map(|_| vec![100.0]).collect();
+        let weights = vec![1.0];
+
+        let result = dtw_distance_visibility_weighted(&seq1, &seq2, 3, 1.0, &weights);
+        assert!(result.is_none(), "Should abandon when distance exceeds best_so_far");
+    }
+
+    #[test]
+    fn test_visibility_weighted_dtw_all_ones_matches_standard() {
+        // With all weights = 1.0, should match standard DTW
+        let seq1: Vec<Vec<f32>> = (0..10).map(|i| vec![i as f32]).collect();
+        let seq2: Vec<Vec<f32>> = (0..10).map(|i| vec![(i as f32) + 0.5]).collect();
+        let weights = vec![1.0];
+
+        let weighted =
+            dtw_distance_visibility_weighted(&seq1, &seq2, 3, f32::MAX, &weights).unwrap();
+        let standard =
+            dtw_distance_with_abandon(&seq1, &seq2, 3, f32::MAX).unwrap();
+
+        assert!(
+            (weighted - standard).abs() < 0.01,
+            "All-ones weights should match standard DTW: {} vs {}",
+            weighted,
+            standard
         );
     }
 }

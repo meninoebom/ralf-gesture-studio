@@ -186,7 +186,7 @@ impl OscReceiver {
 
             // Receive with timeout so we can check shutdown periodically
             let recv_result = tokio::time::timeout(
-                tokio::time::Duration::from_millis(100),
+                tokio::time::Duration::from_millis(10),
                 socket.recv_from(&mut buf),
             )
             .await;

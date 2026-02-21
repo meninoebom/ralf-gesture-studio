@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RALF Sound Test</title>
+<script src="https://cdn.jsdelivr.net/npm/tone@14.7.77/build/Tone.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    background: #111; color: #eee;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 24px;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 12px; color: #888; margin-bottom: 24px; }
+  #start-btn {
+    font-size: 20px; padding: 16px 48px; margin-bottom: 24px;
+    background: #2a2; color: #fff; border: none; border-radius: 8px;
+    cursor: pointer; font-weight: 700; letter-spacing: 1px;
+  }
+  #start-btn:hover { background: #3b3; }
+  #start-btn.running { background: #a22; }
+  #start-btn.running:hover { background: #b33; }
+
+  .status { display: flex; gap: 24px; margin-bottom: 24px; font-size: 13px; }
+  .status span { color: #888; }
+  .status .val { color: #4f4; font-weight: 600; }
+
+  .tracks {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px; width: 100%; max-width: 800px; margin-bottom: 24px;
+  }
+  .track {
+    background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
+    padding: 16px; text-align: center;
+  }
+  .track.muted { opacity: 0.35; }
+  .track .name { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .track .meter {
+    height: 6px; background: #222; border-radius: 3px; overflow: hidden;
+    margin-bottom: 6px;
+  }
+  .track .meter-fill {
+    height: 100%; background: #4f4; border-radius: 3px;
+    transition: width 0.15s ease;
+  }
+  .track .vol { font-size: 11px; color: #888; }
+  .track.flash { border-color: #4f4; }
+
+  .log-container {
+    width: 100%; max-width: 800px; margin-top: 8px;
+  }
+  .log-container h3 { font-size: 13px; color: #888; margin-bottom: 8px; }
+  #log {
+    background: #0a0a0a; border: 1px solid #222; border-radius: 6px;
+    padding: 12px; font-size: 11px; font-family: monospace;
+    height: 200px; overflow-y: auto; color: #aaa;
+    line-height: 1.6;
+  }
+  #log .gesture { color: #4f4; }
+  #log .intent { color: #fa0; }
+  #log .signal { color: #0af; }
+  #log .action { color: #f4f; }
+  #log .stream { color: #ff4; }
+  #log .stack { color: #f44; }
+
+  .ws-status { font-size: 11px; color: #888; margin-bottom: 12px; }
+  .ws-status .dot { display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .ws-status .dot.on { background: #4f4; }
+  .ws-status .dot.off { background: #f44; }
+</style>
+</head>
+<body>
+
+<h1>RALF SOUND TEST</h1>
+<div class="subtitle">Browser-based four-system engine &mdash; no Ableton required</div>
+
+<div class="ws-status">
+  <span class="dot off" id="ws-dot"></span>
+  <span id="ws-label">Connecting...</span>
+</div>
+
+<button id="start-btn" onclick="togglePlayback()">START</button>
+
+<div class="status">
+  <span>Scene: <span class="val" id="scene-val">0</span></span>
+  <span>Hits: <span class="val" id="hit-count">0</span></span>
+  <span>Stack: <span class="val" id="stack-val">0</span></span>
+  <span>Stream: <span class="val" id="stream-val">0</span>/s</span>
+  <span>Elapsed: <span class="val" id="elapsed-val">0:00</span></span>
+</div>
+
+<div class="tracks" id="tracks"></div>
+
+<div class="log-container">
+  <h3>EVENT LOG</h3>
+  <div id="log"></div>
+</div>
+
+<script>
+// =============================================================================
+// SCENE CONFIG — mirrors gesture-controller.js, edit per piece
+// =============================================================================
+
+// ── Gesture Profiles ─────────────────────────────────────────────────────────
+// gesture/1 = ENERGY DOWN — pull back, strip, filter down, hush
+// gesture/2 = ENERGY UP   — add layers, open filter, boost, reveal
+// gesture/3 = STRUCTURE   — scene changes, breakdowns, buildups, resets
+
+const gestures = {
+  "/gesture/1": {
+    name: "pull back",
+    streams:  { energy_down: 1, all_movement: 1 },
+    stacks:   { total_moves: 1, pull_back_streak: 1 },
+    intents:  ["strip_energy"],
+    signals:  ["stop"]
+  },
+  "/gesture/2": {
+    name: "push energy",
+    streams:  { energy_up: 1, all_movement: 1 },
+    stacks:   { total_moves: 1, push_streak: 1 },
+    intents:  ["add_energy"],
+    signals:  ["start"]
+  },
+  "/gesture/3": {
+    name: "structure shift",
+    streams:  { structure_rate: 1, all_movement: 1 },
+    stacks:   { total_moves: 1, structure_count: 1 },
+    intents:  ["shift_structure"],
+    signals:  []
+  }
+};
+
+// ── Stream Definitions (rate-based, windowed) ────────────────────────────────
+
+const streamDefs = {
+  // Rapid pull-back gestures → dramatic filter sweep down
+  energy_down: {
+    window_ms: 5000,
+    thresholds: [
+      { above: 6, action: { intent: "frantic_strip" } }
+    ]
+  },
+  // Rapid energy-up gestures → explosive reveal
+  energy_up: {
+    window_ms: 5000,
+    thresholds: [
+      { above: 6, action: { intent: "explosive_build" } }
+    ]
+  },
+  // Rapid structure gestures → bass drop (you're asking for chaos)
+  structure_rate: {
+    window_ms: 5000,
+    thresholds: [
+      { above: 4, action: { intent: "total_reset" } }
+    ]
+  },
+  // Overall movement rate across all gestures
+  all_movement: {
+    window_ms: 5000,
+    thresholds: [
+      { above: 10, action: { intent: "peak_frenzy" } }
+    ]
+  }
+};
+
+// ── Stack Definitions (accumulation, no decay) ───────────────────────────────
+
+const stackDefs = {
+  // Total moves: minor shift every 5, major every 15
+  total_moves: {
+    triggers: [
+      { at: 5,  action: { intent: "minor_shift" },  reset: false },
+      { at: 15, action: { intent: "breakthrough" },  reset: true  }
+    ]
+  },
+  // Sustained pull-backs → full breakdown
+  pull_back_streak: {
+    triggers: [
+      { at: 5, action: { intent: "full_breakdown" }, reset: true }
+    ]
+  },
+  // Sustained energy pushes → scene advance
+  push_streak: {
+    triggers: [
+      { at: 5, action: { intent: "scene_advance" }, reset: true }
+    ]
+  },
+  // Structure gesture accumulation → drop
+  structure_count: {
+    triggers: [
+      { at: 3, action: { intent: "structure_payoff" }, reset: true }
+    ]
+  }
+};
+
+// ── Intent Pools (weighted non-deterministic actions) ────────────────────────
+
+const intentPools = {
+  // --- ENERGY DOWN domain (gesture/1 immediate) ---
+  "strip_energy": [
+    { action: "filter_sweep",   args: { freq: 300, duration: 3000 },                weight: 3 },
+    { action: "hush_master",    args: { drop: 0.4, duration: 2500 },                weight: 2 },
+    { action: "mute_track",     args: { track: 5 },                                  weight: 2 },  // kill perc
+    { action: "mute_track",     args: { track: 0 },                                  weight: 1 },  // kill kick
+    { action: "reverb_throw",   args: { track: 3, duration: 4000 },                  weight: 2 },  // drench chords in verb
+  ],
+
+  // --- ENERGY UP domain (gesture/2 immediate) ---
+  "add_energy": [
+    { action: "unmute_track",   args: { track: 0 },                                  weight: 2 },  // bring kick
+    { action: "unmute_track",   args: { track: 5 },                                  weight: 2 },  // bring perc
+    { action: "emphasis_track", args: { track: 2, boost: 0.2, duration: 2000 },      weight: 2 },  // pump sub bass
+    { action: "unmute_track",   args: { track: 4 },                                  weight: 1 },  // reveal pad
+    { action: "timed_unmute",   args: { track: 5, duration: 8000 },                  weight: 1 },  // perc tease
+    { action: "filter_sweep",   args: { freq: 20000, duration: 2000 },               weight: 1 },  // open filter wide
+  ],
+
+  // --- STRUCTURE domain (gesture/3 immediate) ---
+  "shift_structure": [
+    { action: "fire_next_scene",                                                      weight: 3 },
+    { action: "breakdown",      args: { duration: 6000 },                             weight: 2 },
+    { action: "reverb_throw",   args: { track: 4, duration: 5000 },                   weight: 1 },  // pad wash
+  ],
+
+  // --- Stream triggers (rate-based, 6+ in 5s) ---
+  "frantic_strip": [
+    { action: "breakdown",      args: { duration: 8000 },                             weight: 2 },
+    { action: "filter_sweep",   args: { freq: 150, duration: 5000 },                  weight: 2 },
+    { action: "hush_master",    args: { drop: 0.6, duration: 4000 },                  weight: 1 },
+  ],
+  "explosive_build": [
+    { action: "bass_drop",                                                             weight: 2 },
+    { action: "fire_scene",     args: { scene: 3 },                                   weight: 2 },  // jump to Peak
+    { action: "tempo_shift",    args: { bpm: 128, duration: 6000 },                   weight: 1 },
+  ],
+  "total_reset": [
+    { action: "bass_drop",                                                             weight: 2 },
+    { action: "fire_scene",     args: { scene: 4 },                                   weight: 1 },  // Breakdown scene
+    { action: "fire_scene",     args: { scene: 5 },                                   weight: 1 },  // Drop scene
+  ],
+  "peak_frenzy": [
+    { action: "tempo_shift",    args: { bpm: 130, duration: 8000 },                   weight: 2 },
+    { action: "bass_drop",                                                             weight: 1 },
+    { action: "fire_scene",     args: { scene: 3 },                                   weight: 1 },  // force Peak
+  ],
+
+  // --- Stack triggers (accumulation payoffs) ---
+  "minor_shift": [
+    { action: "reverb_throw",   args: { track: 3, duration: 3000 },                   weight: 2 },  // chord wash
+    { action: "emphasis_track", args: { track: 2, boost: 0.25, duration: 2000 },      weight: 2 },  // bass pump
+    { action: "timed_unmute",   args: { track: 4, duration: 6000 },                   weight: 1 },  // pad tease
+    { action: "filter_sweep",   args: { freq: 600, duration: 3000 },                  weight: 1 },
+  ],
+  "breakthrough": [
+    { action: "fire_next_scene",                                                       weight: 3 },
+    { action: "bass_drop",                                                             weight: 2 },
+    { action: "breakdown",      args: { duration: 8000 },                              weight: 1 },
+  ],
+  "full_breakdown": [
+    { action: "breakdown",      args: { duration: 10000 },                             weight: 3 },
+    { action: "filter_sweep",   args: { freq: 200, duration: 6000 },                   weight: 1 },
+  ],
+  "scene_advance": [
+    { action: "fire_next_scene",                                                       weight: 3 },
+    { action: "bass_drop",                                                             weight: 1 },
+  ],
+  "structure_payoff": [
+    { action: "fire_next_scene",                                                       weight: 2 },
+    { action: "breakdown",      args: { duration: 6000 },                              weight: 2 },
+    { action: "bass_drop",                                                             weight: 1 },
+  ]
+};
+
+// ── Signal Map (gated direct commands) ───────────────────────────────────────
+
+const signalMap = {
+  "start": {
+    action: "start_playing",
+    condition: () => !playing
+  },
+  "stop": {
+    action: "stop_playing",
+    condition: () => playing && elapsedMs() > 300000  // only after 5 min
+  }
+};
+
+
+// =============================================================================
+// TONE.JS AUDIO ENGINE — Soulful House in C minor, 120 BPM
+// =============================================================================
+
+let playing = false;
+let startTime = 0;
+let currentScene = 0;
+let hitCount = 0;
+
+// --- Master bus ---
+const masterGain = new Tone.Gain(0.85).toDestination();
+const masterFilter = new Tone.Filter({ frequency: 20000, type: "lowpass", rolloff: -24 }).connect(masterGain);
+
+// --- Send effects ---
+const reverbSend = new Tone.Reverb({ decay: 3.5, wet: 1.0, preDelay: 0.02 }).connect(masterFilter);
+const delaySend = new Tone.FeedbackDelay({ delayTime: "8n.", feedback: 0.35, wet: 1.0 }).connect(masterFilter);
+reverbSend.generate();
+
+// --- Track definitions ---
+const trackDefs = [
+  { name: "Kick",    color: "#e44" },
+  { name: "Hats",    color: "#8d8" },
+  { name: "Sub Bass", color: "#48f" },
+  { name: "Chords",  color: "#fa0" },
+  { name: "Pad",     color: "#c6f" },
+  { name: "Perc",    color: "#f84" }
+];
+
+const channels = trackDefs.map(() => new Tone.Channel({ volume: -6 }).connect(masterFilter));
+
+// Per-channel send levels to reverb and delay
+const sendLevels = [
+  { rev: -Infinity, del: -Infinity }, // kick: dry
+  { rev: -18, del: -14 },            // hats: touch of space
+  { rev: -Infinity, del: -Infinity }, // sub bass: dry
+  { rev: -10, del: -12 },            // chords: warm reverb + delay
+  { rev: -6,  del: -18 },            // pad: lush reverb
+  { rev: -12, del: -10 }             // perc: delay throws
+];
+
+const revSends = [], delSends = [];
+channels.forEach((ch, i) => {
+  const rs = new Tone.Gain(Tone.dbToGain(sendLevels[i].rev)).connect(reverbSend);
+  const ds = new Tone.Gain(Tone.dbToGain(sendLevels[i].del)).connect(delaySend);
+  ch.connect(rs); ch.connect(ds);
+  revSends.push(rs); delSends.push(ds);
+});
+
+// ── Track 0: Deep Kick ──────────────────────────────────────────────────────
+const kick = new Tone.MembraneSynth({
+  pitchDecay: 0.08, octaves: 5.5,
+  envelope: { attack: 0.002, decay: 0.45, sustain: 0, release: 0.25 },
+  oscillator: { type: "sine" }
+}).connect(channels[0]);
+channels[0].volume.value = -4;
+
+// Four-on-the-floor with slight velocity humanization
+const kickLoop = new Tone.Loop((time) => {
+  const vel = 0.85 + Math.random() * 0.15;
+  kick.triggerAttackRelease("C1", "8n", time, vel);
+}, "4n");
+
+// ── Track 1: Swinging Hats ──────────────────────────────────────────────────
+const hatFilter = new Tone.Filter({ frequency: 9000, type: "highpass" }).connect(channels[1]);
+const closedHat = new Tone.NoiseSynth({
+  noise: { type: "white" },
+  envelope: { attack: 0.001, decay: 0.05, sustain: 0, release: 0.015 }
+}).connect(hatFilter);
+const openHat = new Tone.NoiseSynth({
+  noise: { type: "white" },
+  envelope: { attack: 0.001, decay: 0.18, sustain: 0, release: 0.08 }
+}).connect(hatFilter);
+channels[1].volume.value = -14;
+
+// Classic house hat pattern: closed 16ths with open hat on upbeats
+let hatStep = 0;
+const hatLoop = new Tone.Sequence((time, note) => {
+  const vel = 0.4 + Math.random() * 0.25;
+  if (note === "o") {
+    openHat.triggerAttackRelease("32n", time, vel * 1.2);
+  } else {
+    closedHat.triggerAttackRelease("32n", time, vel);
+  }
+  hatStep++;
+}, ["x","x","x","o", "x","x","x","o", "x","x","x","o", "x","x","x","o"], "16n");
+
+// ── Track 2: Deep Sub Bass ──────────────────────────────────────────────────
+const subBass = new Tone.MonoSynth({
+  oscillator: { type: "sine" },
+  envelope: { attack: 0.01, decay: 0.3, sustain: 0.7, release: 0.15 },
+  filterEnvelope: { attack: 0.01, decay: 0.1, sustain: 0.5, release: 0.2, baseFrequency: 60, octaves: 1.5 },
+  filter: { Q: 1, frequency: 200, type: "lowpass" }
+}).connect(channels[2]);
+// Harmonic layer for warmth above the sub
+const bassHarmonics = new Tone.MonoSynth({
+  oscillator: { type: "triangle" },
+  envelope: { attack: 0.01, decay: 0.2, sustain: 0.3, release: 0.2 },
+  filterEnvelope: { attack: 0.02, decay: 0.15, sustain: 0.2, release: 0.3, baseFrequency: 150, octaves: 2 },
+  filter: { Q: 2.5, frequency: 500, type: "lowpass" }
+}).connect(channels[2]);
+bassHarmonics.volume.value = -8;
+channels[2].volume.value = -6;
+
+// C minor bassline — deep and patient
+const bassNotes = [
+  {n:"C1",d:"4n"}, {n:null,d:"8n"}, {n:"C1",d:"8n"},
+  {n:"Eb1",d:"4n"}, {n:"F1",d:"8n"}, {n:"G1",d:"8n"},
+  {n:"Ab1",d:"4n."}, {n:"G1",d:"8n"},
+  {n:"F1",d:"4n"}, {n:"Eb1",d:"4n"}
+];
+let bassIdx = 0;
+const bassLoop = new Tone.Loop((time) => {
+  const step = bassNotes[bassIdx % bassNotes.length];
+  if (step.n) {
+    subBass.triggerAttackRelease(step.n, step.d, time, 0.9);
+    // Harmonic an octave up
+    const harmNote = step.n.replace("1", "2");
+    bassHarmonics.triggerAttackRelease(harmNote, step.d, time, 0.5 + Math.random() * 0.15);
+  }
+  bassIdx++;
+}, "4n");
+
+// ── Track 3: Soulful Chord Stabs (Rhodes-ish) ──────────────────────────────
+const chordFilter = new Tone.Filter({ frequency: 2800, type: "lowpass", rolloff: -12 }).connect(channels[3]);
+const chords = new Tone.PolySynth(Tone.Synth, {
+  oscillator: { type: "triangle" },
+  envelope: { attack: 0.015, decay: 0.4, sustain: 0.25, release: 0.8 }
+}).connect(chordFilter);
+// Subtle chorus for that electric piano warmth
+const chordChorus = new Tone.Chorus({ frequency: 1.2, delayTime: 3.5, depth: 0.4, wet: 0.3 }).connect(channels[3]);
+chords.connect(chordChorus);
+channels[3].volume.value = -10;
+
+// Cm7 - AbMaj7 - Fm9 - Gm7 — classic soulful progression
+const chordVoicings = [
+  ["C3","Eb3","G3","Bb3"],       // Cm7
+  ["Ab2","C3","Eb3","G3"],       // AbMaj7
+  ["F2","Ab2","C3","Eb3","G3"],  // Fm9
+  ["G2","Bb2","D3","F3"]         // Gm7
+];
+let chordIdx = 0;
+// Offbeat stab pattern — hits on the "and" of beats 2 and 4
+const chordLoop = new Tone.Part((time, chord) => {
+  const vel = 0.5 + Math.random() * 0.2;
+  chords.triggerAttackRelease(chord.notes, chord.dur, time, vel);
+}, [
+  { time: "0:1:2", notes: null, dur: "4n" },  // placeholder, filled per bar
+  { time: "0:3:2", notes: null, dur: "4n" }
+]);
+chordLoop.loop = true;
+chordLoop.loopEnd = "1m";
+
+// We'll use a separate loop to update chord voicings each bar
+const chordProgressionLoop = new Tone.Loop((time) => {
+  const voicing = chordVoicings[chordIdx % chordVoicings.length];
+  // Schedule the stabs slightly after bar start
+  const vel = 0.5 + Math.random() * 0.2;
+  chords.triggerAttackRelease(voicing, "4n", time + Tone.Time("4n").toSeconds() + Tone.Time("8n").toSeconds(), vel);
+  chords.triggerAttackRelease(voicing, "8n.", time + Tone.Time("2n").toSeconds() + Tone.Time("4n").toSeconds() + Tone.Time("8n").toSeconds(), vel * 0.8);
+  chordIdx++;
+}, "1m");
+
+// ── Track 4: Lush Pad / Atmosphere ──────────────────────────────────────────
+const padReverb = new Tone.Reverb({ decay: 6, wet: 0.7 }).connect(channels[4]);
+padReverb.generate();
+const pad = new Tone.PolySynth(Tone.Synth, {
+  oscillator: { type: "sine" },
+  envelope: { attack: 1.5, decay: 1.0, sustain: 0.8, release: 3.0 }
+}).connect(padReverb);
+const padLayer2 = new Tone.PolySynth(Tone.Synth, {
+  oscillator: { type: "triangle" },
+  envelope: { attack: 2.0, decay: 1.5, sustain: 0.6, release: 4.0 }
+}).connect(padReverb);
+padLayer2.volume.value = -6;
+channels[4].volume.value = -14;
+
+// Slow-moving pad — changes every 2 bars
+const padVoicings = [
+  ["C3","Eb3","G3","Bb3","D4"],
+  ["Ab2","C3","Eb3","G3","Bb3"],
+  ["F2","Ab2","C3","Eb3","G3"],
+  ["G2","Bb2","D3","F3","Ab3"]
+];
+let padIdx = 0;
+const padLoop = new Tone.Loop((time) => {
+  const voicing = padVoicings[padIdx % padVoicings.length];
+  pad.triggerAttackRelease(voicing, "1m", time, 0.3);
+  padLayer2.triggerAttackRelease(voicing, "1m", time, 0.2);
+  padIdx++;
+}, "2m");
+
+// ── Track 5: Percussive Accents (claps, congas) ────────────────────────────
+const clapFilter = new Tone.Filter({ frequency: 1200, type: "bandpass", Q: 1.5 }).connect(channels[5]);
+const clap = new Tone.NoiseSynth({
+  noise: { type: "white" },
+  envelope: { attack: 0.002, decay: 0.15, sustain: 0, release: 0.08 }
+}).connect(clapFilter);
+// Conga — tuned membrane
+const congaHi = new Tone.MembraneSynth({
+  pitchDecay: 0.015, octaves: 3,
+  envelope: { attack: 0.001, decay: 0.18, sustain: 0, release: 0.05 }
+}).connect(channels[5]);
+const congaLo = new Tone.MembraneSynth({
+  pitchDecay: 0.02, octaves: 2.5,
+  envelope: { attack: 0.001, decay: 0.22, sustain: 0, release: 0.06 }
+}).connect(channels[5]);
+channels[5].volume.value = -12;
+
+// Afro-latin inspired percussion pattern
+const percPattern = new Tone.Sequence((time, hit) => {
+  const vel = 0.5 + Math.random() * 0.3;
+  if (hit === "cl") clap.triggerAttackRelease("16n", time, vel);
+  else if (hit === "ch") congaHi.triggerAttackRelease("G3", "16n", time, vel);
+  else if (hit === "clo") congaLo.triggerAttackRelease("C3", "16n", time, vel);
+}, [null,"ch",null,"cl", "clo",null,"ch","ch", null,"cl",null,"ch", "clo","ch",null,null], "16n");
+
+// ── All loops ────────────────────────────────────────────────────────────────
+const loops = [kickLoop, hatLoop, bassLoop, chordProgressionLoop, padLoop, percPattern];
+
+// --- Scenes: progressive build from intimate to full -------------------------
+const scenes = [
+  { name: "Intro",     mutes: [true,  false, false, false, true,  true ], desc: "hats + bass + stabs — intimate" },
+  { name: "Groove",    mutes: [false, false, false, false, true,  true ], desc: "kick drops in" },
+  { name: "Build",     mutes: [false, false, false, false, true,  false], desc: "percussion enters" },
+  { name: "Peak",      mutes: [false, false, false, false, false, false], desc: "everything — full soulful house" },
+  { name: "Breakdown", mutes: [true,  true,  false, false, false, true ], desc: "strip to bass + chords + pad" },
+  { name: "Drop",      mutes: [false, false, false, false, false, false], desc: "everything back — big moment" }
+];
+
+function applyScene(idx) {
+  currentScene = ((idx % scenes.length) + scenes.length) % scenes.length;
+  const scene = scenes[currentScene];
+  scene.mutes.forEach((muted, i) => { channels[i].mute = muted; });
+  log(`scene ${currentScene}: ${scene.name} — ${scene.desc}`, "action");
+  updateUI();
+}
+
+// --- Volume helpers (Tone uses dB, we work in 0-1 linear) ---
+
+function getVolume(trackIdx) {
+  return Tone.dbToGain(channels[trackIdx].volume.value);
+}
+
+function setVolume(trackIdx, linear) {
+  linear = Math.max(0.0, Math.min(1.0, linear));
+  channels[trackIdx].volume.value = Tone.gainToDb(linear);
+  updateUI();
+}
+
+
+// =============================================================================
+// ACTION LIBRARY — Tone.js equivalents of Live API calls
+// =============================================================================
+
+function startPlaying() {
+  if (playing) return;
+  Tone.Transport.bpm.value = 120;
+  Tone.Transport.swing = 0.2;       // Soulful swing
+  Tone.Transport.swingSubdivision = "16n";
+  Tone.Transport.start();
+  loops.forEach(l => l.start(0));
+  applyScene(currentScene);
+  playing = true;
+  startTime = Date.now();
+  log("started playing", "action");
+  document.getElementById("start-btn").textContent = "STOP";
+  document.getElementById("start-btn").classList.add("running");
+}
+
+function stopPlaying() {
+  Tone.Transport.stop();
+  loops.forEach(l => l.stop());
+  playing = false;
+  log("stopped playing", "action");
+  document.getElementById("start-btn").textContent = "START";
+  document.getElementById("start-btn").classList.remove("running");
+}
+
+function fireScene(sceneIdx) {
+  applyScene(sceneIdx);
+}
+
+function fireNextScene() {
+  applyScene(currentScene + 1);
+}
+
+function muteTrack(trackIdx) {
+  if (trackIdx >= channels.length) return;
+  channels[trackIdx].mute = true;
+  log(`muted track ${trackIdx} (${trackDefs[trackIdx].name})`, "action");
+  updateUI();
+}
+
+function unmuteTrack(trackIdx) {
+  if (trackIdx >= channels.length) return;
+  channels[trackIdx].mute = false;
+  log(`unmuted track ${trackIdx} (${trackDefs[trackIdx].name})`, "action");
+  updateUI();
+}
+
+function volumeUp(trackIdx, amount) {
+  const cur = getVolume(trackIdx);
+  setVolume(trackIdx, cur + (amount || 0.05));
+  log(`track ${trackIdx} vol up to ${getVolume(trackIdx).toFixed(2)}`, "action");
+}
+
+function volumeDown(trackIdx, amount) {
+  const cur = getVolume(trackIdx);
+  setVolume(trackIdx, cur - (amount || 0.05));
+  log(`track ${trackIdx} vol down to ${getVolume(trackIdx).toFixed(2)}`, "action");
+}
+
+function emphasisTrack(trackIdx, boost, durationMs) {
+  const original = channels[trackIdx].volume.value;
+  const boostDb = Tone.gainToDb(Tone.dbToGain(original) + (boost || 0.15));
+  channels[trackIdx].volume.value = Math.min(0, boostDb);
+  log(`emphasis track ${trackIdx} (+${boost})`, "action");
+  updateUI();
+  setTimeout(() => {
+    channels[trackIdx].volume.value = original;
+    updateUI();
+  }, durationMs || 2000);
+}
+
+function hushMaster(drop, durationMs) {
+  const original = masterGain.gain.value;
+  masterGain.gain.rampTo(Math.max(0, original - (drop || 0.3)), 0.1);
+  log(`hush master (-${drop})`, "action");
+  setTimeout(() => {
+    masterGain.gain.rampTo(original, 0.3);
+  }, durationMs || 3000);
+}
+
+function timedUnmute(trackIdx, durationMs) {
+  if (trackIdx >= channels.length) return;
+  channels[trackIdx].mute = false;
+  log(`timed unmute track ${trackIdx} for ${durationMs}ms`, "action");
+  updateUI();
+  setTimeout(() => {
+    channels[trackIdx].mute = true;
+    updateUI();
+  }, durationMs || 4000);
+}
+
+function stopTrack(trackIdx) {
+  if (trackIdx >= channels.length) return;
+  channels[trackIdx].mute = true;
+  updateUI();
+}
+
+function stopAll() {
+  channels.forEach(ch => { ch.mute = true; });
+  updateUI();
+}
+
+// --- Dramatic Actions --------------------------------------------------------
+
+function filterSweep(targetFreq, durationMs) {
+  // Sweep the master filter down (or up) for tension/release
+  const target = targetFreq || 400;
+  const dur = (durationMs || 4000) / 1000;
+  const original = masterFilter.frequency.value;
+  masterFilter.frequency.rampTo(target, dur * 0.5);
+  log(`filter sweep → ${target}Hz`, "action");
+  setTimeout(() => {
+    masterFilter.frequency.rampTo(20000, dur * 0.5);
+  }, dur * 500);
+}
+
+function breakdown(durationMs) {
+  // Kill kick + perc, boost reverb send on chords, sweep filter down then back
+  const dur = durationMs || 8000;
+  channels[0].mute = true;  // kick
+  channels[5].mute = true;  // perc
+  masterFilter.frequency.rampTo(800, dur / 2000);
+  revSends[3].gain.rampTo(Tone.dbToGain(-2), 0.5); // drench chords in reverb
+  log("breakdown — stripped back", "action");
+  updateUI();
+  setTimeout(() => {
+    masterFilter.frequency.rampTo(20000, 1.5);
+    channels[0].mute = false;
+    channels[5].mute = false;
+    revSends[3].gain.rampTo(Tone.dbToGain(sendLevels[3].rev), 1.0);
+    log("breakdown recovery", "action");
+    updateUI();
+  }, dur);
+}
+
+function reverbThrow(trackIdx, durationMs) {
+  // Momentarily drench a track in reverb
+  const idx = trackIdx || 3;
+  const dur = durationMs || 3000;
+  const originalLevel = revSends[idx].gain.value;
+  revSends[idx].gain.rampTo(1.0, 0.05);
+  log(`reverb throw on ${trackDefs[idx].name}`, "action");
+  setTimeout(() => {
+    revSends[idx].gain.rampTo(originalLevel, 0.8);
+  }, dur);
+}
+
+function bassDrop() {
+  // Mute everything briefly, then drop the kick + bass back hard
+  channels.forEach(ch => { ch.mute = true; });
+  masterFilter.frequency.rampTo(20000, 0.01);
+  log("bass drop — silence...", "action");
+  updateUI();
+  setTimeout(() => {
+    channels[0].mute = false;  // kick
+    channels[2].mute = false;  // sub bass
+    log("...DROP!", "action");
+    updateUI();
+    // Bring the rest back gradually
+    setTimeout(() => {
+      channels.forEach((ch, i) => {
+        if (i > 2) ch.mute = scenes[currentScene].mutes[i];
+      });
+      channels[1].mute = scenes[currentScene].mutes[1];
+      updateUI();
+    }, 2000);
+  }, 1500);
+}
+
+function tempoShift(targetBpm, durationMs) {
+  const target = targetBpm || 125;
+  const dur = (durationMs || 4000) / 1000;
+  Tone.Transport.bpm.rampTo(target, dur);
+  log(`tempo shift → ${target} BPM over ${dur}s`, "action");
+  // Return to 120 after double the ramp time
+  setTimeout(() => {
+    Tone.Transport.bpm.rampTo(120, dur);
+    log("tempo restored → 120 BPM", "action");
+  }, dur * 2000);
+}
+
+
+// =============================================================================
+// FOUR-SYSTEM ENGINE (ported from gesture-controller.js)
+// =============================================================================
+
+const streamState = {};
+const stackState = {};
+
+function initState() {
+  for (const name in streamDefs) streamState[name] = [];
+  for (const name in stackDefs) stackState[name] = 0;
+}
+initState();
+
+function elapsedMs() {
+  if (startTime === 0) return 0;
+  return Date.now() - startTime;
+}
+
+// --- Dispatcher ---
+
+function handleGesture(address) {
+  const profile = gestures[address];
+  if (!profile) {
+    log(`unhandled: ${address}`, "gesture");
+    return;
+  }
+
+  hitCount++;
+  log(`${profile.name}`, "gesture");
+
+  const now = Date.now();
+  feedStreams(profile, now);
+  feedStacks(profile);
+  checkStreamThresholds(now);
+  checkStackTriggers();
+  resolveIntents(profile.intents);
+  executeSignals(profile.signals);
+  updateUI();
+}
+
+// --- Stream Engine ---
+
+function feedStreams(profile, now) {
+  if (!profile.streams) return;
+  for (const name in profile.streams) {
+    if (!streamState[name]) streamState[name] = [];
+    for (let i = 0; i < profile.streams[name]; i++) {
+      streamState[name].push(now);
+    }
+  }
+}
+
+function getStreamCount(name, now) {
+  const def = streamDefs[name];
+  if (!def || !streamState[name]) return 0;
+  const cutoff = now - def.window_ms;
+  streamState[name] = streamState[name].filter(t => t >= cutoff);
+  return streamState[name].length;
+}
+
+function checkStreamThresholds(now) {
+  for (const name in streamDefs) {
+    const def = streamDefs[name];
+    const count = getStreamCount(name, now);
+    for (const t of def.thresholds) {
+      if (t.above !== undefined && count > t.above) {
+        log(`stream ${name}: ${count} > ${t.above}`, "stream");
+        dispatchAction(t.action);
+      }
+      if (t.below !== undefined && count < t.below) {
+        dispatchAction(t.action);
+      }
+    }
+  }
+}
+
+// --- Stack Engine ---
+
+function feedStacks(profile) {
+  if (!profile.stacks) return;
+  for (const name in profile.stacks) {
+    if (stackState[name] === undefined) stackState[name] = 0;
+    stackState[name] += profile.stacks[name];
+  }
+}
+
+function checkStackTriggers() {
+  for (const name in stackDefs) {
+    const def = stackDefs[name];
+    const count = stackState[name] || 0;
+    for (const t of def.triggers) {
+      if (t.at !== undefined && count >= t.at) {
+        log(`stack ${name}: reached ${t.at}`, "stack");
+        dispatchAction(t.action);
+        if (t.reset) stackState[name] = 0;
+      }
+    }
+  }
+}
+
+// --- Intent Resolver ---
+
+function resolveIntents(intents) {
+  if (!intents) return;
+  for (const entry of intents) {
+    let intentName;
+    if (typeof entry === "string") {
+      intentName = entry;
+    } else if (entry && entry.intent) {
+      if (entry.condition && !entry.condition()) continue;
+      intentName = entry.intent;
+    } else continue;
+
+    const pool = intentPools[intentName];
+    if (!pool || pool.length === 0) continue;
+
+    const picked = weightedRandom(pool);
+    log(`intent ${intentName} -> ${picked.action}`, "intent");
+    executeAction(picked.action, picked.args);
+  }
+}
+
+function weightedRandom(pool) {
+  let total = pool.reduce((s, p) => s + (p.weight || 1), 0);
+  let roll = Math.random() * total;
+  for (const item of pool) {
+    roll -= (item.weight || 1);
+    if (roll <= 0) return item;
+  }
+  return pool[pool.length - 1];
+}
+
+// --- Signal Executor ---
+
+function executeSignals(signals) {
+  if (!signals) return;
+  for (const signalName of signals) {
+    const def = signalMap[signalName];
+    if (!def) continue;
+    if (def.condition && !def.condition()) continue;
+    log(`signal ${signalName} -> ${def.action}`, "signal");
+    executeAction(def.action, def.args || {});
+  }
+}
+
+// --- Action Dispatch ---
+
+function dispatchAction(descriptor) {
+  if (descriptor.intent) resolveIntents([descriptor.intent]);
+  else if (descriptor.signal) executeSignals([descriptor.signal]);
+}
+
+function executeAction(actionName, args) {
+  args = args || {};
+  switch (actionName) {
+    case "start_playing":      startPlaying(); break;
+    case "stop_playing":       stopPlaying(); break;
+    case "fire_next_scene":    fireNextScene(); break;
+    case "fire_scene":         fireScene(args.scene); break;
+    case "mute_track":         muteTrack(args.track); break;
+    case "unmute_track":       unmuteTrack(args.track); break;
+    case "volume_up":          volumeUp(args.track, args.amount); break;
+    case "volume_down":        volumeDown(args.track, args.amount); break;
+    case "emphasis_track":     emphasisTrack(args.track, args.boost, args.duration); break;
+    case "hush_master":        hushMaster(args.drop, args.duration); break;
+    case "timed_unmute":       timedUnmute(args.track, args.duration); break;
+    case "stop_track":         stopTrack(args.track); break;
+    case "stop_all":           stopAll(); break;
+    case "filter_sweep":       filterSweep(args.freq, args.duration); break;
+    case "breakdown":          breakdown(args.duration); break;
+    case "reverb_throw":       reverbThrow(args.track, args.duration); break;
+    case "bass_drop":          bassDrop(); break;
+    case "tempo_shift":        tempoShift(args.bpm, args.duration); break;
+    default:
+      log(`unknown action: ${actionName}`, "action");
+  }
+}
+
+
+// =============================================================================
+// WEBSOCKET CONNECTION
+// =============================================================================
+
+let ws;
+function connectWs() {
+  const url = `ws://${location.host}`;
+  ws = new WebSocket(url);
+  ws.onopen = () => {
+    document.getElementById("ws-dot").className = "dot on";
+    document.getElementById("ws-label").textContent = "Connected to bridge";
+  };
+  ws.onclose = () => {
+    document.getElementById("ws-dot").className = "dot off";
+    document.getElementById("ws-label").textContent = "Disconnected — reconnecting...";
+    setTimeout(connectWs, 2000);
+  };
+  ws.onmessage = (evt) => {
+    const data = JSON.parse(evt.data);
+    if (data.type === "gesture") {
+      handleGesture(data.address);
+    }
+  };
+}
+connectWs();
+
+
+// =============================================================================
+// UI
+// =============================================================================
+
+function log(msg, cls) {
+  const el = document.getElementById("log");
+  const line = document.createElement("div");
+  const time = new Date().toLocaleTimeString("en-US", { hour12: false });
+  line.innerHTML = `<span style="color:#555">${time}</span> <span class="${cls || ""}">${msg}</span>`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function updateUI() {
+  // Track cards
+  const container = document.getElementById("tracks");
+  if (container.children.length === 0) {
+    trackDefs.forEach((def, i) => {
+      const div = document.createElement("div");
+      div.className = "track";
+      div.id = `track-${i}`;
+      div.innerHTML = `
+        <div class="name" style="color:${def.color}">${def.name}</div>
+        <div class="meter"><div class="meter-fill" id="meter-${i}"></div></div>
+        <div class="vol" id="vol-${i}">0%</div>
+      `;
+      container.appendChild(div);
+    });
+  }
+
+  trackDefs.forEach((def, i) => {
+    const el = document.getElementById(`track-${i}`);
+    const vol = getVolume(i);
+    el.className = channels[i].mute ? "track muted" : "track";
+    document.getElementById(`meter-${i}`).style.width = `${vol * 100}%`;
+    document.getElementById(`vol-${i}`).textContent =
+      channels[i].mute ? "MUTED" : `${Math.round(vol * 100)}%`;
+  });
+
+  // Status bar
+  document.getElementById("scene-val").textContent =
+    `${currentScene} (${scenes[currentScene].name})`;
+  document.getElementById("hit-count").textContent = hitCount;
+  document.getElementById("stack-val").textContent = stackState.total_moves || 0;
+
+  const now = Date.now();
+  const rate = getStreamCount("all_movement", now);
+  document.getElementById("stream-val").textContent = rate;
+
+  if (playing) {
+    const secs = Math.floor(elapsedMs() / 1000);
+    const m = Math.floor(secs / 60);
+    const s = String(secs % 60).padStart(2, "0");
+    document.getElementById("elapsed-val").textContent = `${m}:${s}`;
+  }
+}
+
+// Periodic UI refresh for elapsed time and stream decay
+setInterval(updateUI, 500);
+
+// Initial UI render
+updateUI();
+
+// Start/stop button
+async function togglePlayback() {
+  await Tone.start(); // Required: unlock audio context on user gesture
+  if (playing) {
+    stopPlaying();
+  } else {
+    startPlaying();
+  }
+  updateUI();
+}
+</script>
+</body>
+</html>

@@ -22,8 +22,8 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use super::dtw::{
-    compute_lb_envelope, dtw_distance, dtw_distance_with_abandon, lb_keogh, Frame, LBEnvelope,
-    Sequence,
+    compute_lb_envelope, dtw_distance, dtw_distance_visibility_weighted, dtw_distance_with_abandon,
+    lb_keogh, visibility_to_dimension_weights, Frame, LBEnvelope, Sequence,
 };
 use super::weighting::apply_weights_to_sequence;
 
@@ -459,6 +459,12 @@ impl FrameBuffer {
         let start = self.frames.len().saturating_sub(n);
         self.frames.iter().skip(start).cloned().collect()
     }
+
+    /// Clear all frames from the buffer.
+    /// Used after a hit fires to prevent re-triggering from stale gesture data.
+    pub fn clear(&mut self) {
+        self.frames.clear();
+    }
 }
 
 // ============================================================================
@@ -493,6 +499,9 @@ pub struct Recognizer {
     pending_transitions: Vec<GestureStateTransition>,
     /// When any gesture last fired (for global cooldown / NMS)
     last_any_hit_time: Option<Instant>,
+    /// Current per-dimension visibility weights (from most recent frame).
+    /// None = no visibility data (all joints equally weighted).
+    current_visibility_weights: Option<Vec<f32>>,
 }
 
 impl Recognizer {
@@ -513,6 +522,7 @@ impl Recognizer {
             downsample: 4, // Compare at 15fps
             pending_transitions: Vec::new(),
             last_any_hit_time: None,
+            current_visibility_weights: None,
         }
     }
 
@@ -540,6 +550,7 @@ impl Recognizer {
     /// * `downsample` - Downsample factor for examples
     /// * `sakoe_chiba_band` - Band fraction (0.0 = unconstrained, 0.15 = 15% band)
     /// * `best_so_far` - Current best distance (for early abandoning across gestures)
+    /// * `visibility_weights` - Optional per-dimension visibility weights
     ///
     /// # Returns
     /// The best distance found, which may be >= best_so_far if no better match exists
@@ -550,27 +561,46 @@ impl Recognizer {
         downsample: usize,
         sakoe_chiba_band: f32,
         best_so_far: f32,
+        visibility_weights: Option<&[f32]>,
     ) -> f32 {
         let mut best = best_so_far;
         for (i, example) in examples.iter().enumerate() {
             // Layer 1: LB_Keogh pruning (O(n) lower bound check)
-            if let Some(envelope) = envelopes.get(i) {
-                let lb = lb_keogh(window, envelope);
-                if lb >= best {
-                    continue; // Lower bound already exceeds best, skip DTW
+            // LB_Keogh envelopes were computed without visibility weights,
+            // so the lower bound is invalid when weights change per-frame.
+            if visibility_weights.is_none() {
+                if let Some(envelope) = envelopes.get(i) {
+                    let lb = lb_keogh(window, envelope);
+                    if lb >= best {
+                        continue; // Lower bound already exceeds best, skip DTW
+                    }
                 }
             }
 
             // Layer 2: Full DTW with early abandoning
             let example_ds = Self::downsample_seq(example, downsample);
             let dist = if sakoe_chiba_band > 0.0 {
-                // Use Sakoe-Chiba constrained DTW with early abandoning
                 let max_len = window.len().max(example_ds.len());
                 let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
-                // Use early abandoning - skip if can't beat current best
-                match dtw_distance_with_abandon(window, &example_ds, band_width, best) {
-                    Some(d) => d,
-                    None => continue, // Abandoned - worse than best
+
+                if let Some(weights) = visibility_weights {
+                    // Use visibility-weighted DTW
+                    match dtw_distance_visibility_weighted(
+                        window,
+                        &example_ds,
+                        band_width,
+                        best,
+                        weights,
+                    ) {
+                        Some(d) => d,
+                        None => continue,
+                    }
+                } else {
+                    // Use standard DTW with early abandoning
+                    match dtw_distance_with_abandon(window, &example_ds, band_width, best) {
+                        Some(d) => d,
+                        None => continue,
+                    }
                 }
             } else {
                 // Use unconstrained DTW (no early abandoning available)
@@ -659,6 +689,19 @@ impl Recognizer {
         let mut distances = Vec::new();
         let mut best_so_far = f32::MAX;
         let sakoe_chiba_band = self.config.sakoe_chiba_band;
+        let vis_weights = self.current_visibility_weights.as_deref();
+
+        // When visibility weights are active, distances are systematically lower
+        // because each dimension is scaled by weight ∈ [0,1]. To keep distances
+        // comparable to unweighted training thresholds, we normalize by the mean
+        // visibility weight (dividing restores the original distance scale).
+        let visibility_normalizer = vis_weights
+            .filter(|w| !w.is_empty())
+            .map(|w| {
+                let mean = w.iter().sum::<f32>() / w.len() as f32;
+                if mean > 1e-6 { mean } else { 1.0 }
+            })
+            .unwrap_or(1.0);
 
         for (idx, gesture) in self.gestures.iter().enumerate() {
             if gesture.examples().is_empty() {
@@ -677,14 +720,21 @@ impl Recognizer {
 
             let (examples, envelopes) = (gesture.examples(), gesture.lb_envelopes());
 
-            let dist = Self::find_best_distance(
+            // Early abandoning needs `best_so_far` in the same domain as raw
+            // DTW distances. Visibility weighting scales each dimension by w_i,
+            // so raw distances are smaller by ~mean(w). Convert best_so_far from
+            // normalized space → weighted space, then convert result back.
+            let raw_dist = Self::find_best_distance(
                 window_ref,
                 examples,
                 envelopes,
                 self.downsample,
                 sakoe_chiba_band,
-                best_so_far,
+                best_so_far * visibility_normalizer,
+                vis_weights,
             );
+            // Normalize visibility-weighted distance to unweighted scale
+            let dist = raw_dist / visibility_normalizer;
             if dist < best_so_far {
                 best_so_far = dist;
             }
@@ -825,6 +875,16 @@ impl Recognizer {
         if let Some((id, name, distance)) = hit_result {
             // Set global cooldown timestamp (NMS: suppress all gestures)
             self.last_any_hit_time = Some(Instant::now());
+
+            // Clear the buffer to prevent re-triggering from stale gesture data.
+            // The buffer must refill (~1-1.5s) before the next detection can occur.
+            // Do NOT reset gesture state machines — Recovery state must persist
+            // so the user must complete a full gesture cycle to retrigger.
+            self.buffer.clear();
+            for gesture in &mut self.gestures {
+                gesture.current_distance = None;
+            }
+
             Some(RecognitionResult {
                 gesture_id: Some(id),
                 gesture_name: Some(name),
@@ -888,6 +948,20 @@ impl Recognizer {
 
         let distances = self.compute_distances(&window);
         self.run_state_machines(&distances)
+    }
+
+    /// Process a frame with associated per-joint visibility scores.
+    ///
+    /// Converts visibility to per-dimension weights and uses them during DTW.
+    pub fn process_frame_with_visibility(
+        &mut self,
+        frame: Frame,
+        visibility: &[f32],
+    ) -> Option<RecognitionResult> {
+        // Convert per-joint visibility to per-dimension weights (2 coords per joint for XY)
+        self.current_visibility_weights =
+            Some(visibility_to_dimension_weights(visibility, 2));
+        self.process_frame(frame)
     }
 
     pub fn current_distances(&self) -> Vec<(u32, String, Option<f32>, f32)> {

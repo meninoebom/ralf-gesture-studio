@@ -13,7 +13,7 @@ use crate::model::{
     save_vocabulary as model_save_vocabulary,
 };
 use crate::model::{Example, Vocabulary};
-use crate::osc::{ConnectionStatus, OscReceiverHandle, OscSender, SenderStatus};
+use crate::osc::{ConnectionStatus, OscReceiverHandle, OscSender, ReceivedFrame, SenderStatus};
 
 /// The two modes of the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,7 +320,9 @@ impl AppState {
         let cooldown_ms = self.recognition_config.cooldown_ms;
         let expected_dims = self.vocabulary.input.dimensions;
 
-        for frame in frames {
+        for received in frames {
+            let ReceivedFrame { coords: frame, visibility } = received;
+
             // Validate frame dimensions against vocabulary config
             if frame.len() != expected_dims {
                 if self.dimension_mismatch.map(|(_, a)| a) != Some(frame.len()) {
@@ -351,8 +353,13 @@ impl AppState {
             // Preprocess frame before recognition
             let processed = self.preprocessor.process_frame(&frame);
 
-            // Feed preprocessed frame to recognizer
-            if let Some(result) = self.recognizer.process_frame(processed) {
+            // Feed preprocessed frame to recognizer (with visibility if available)
+            let result = if let Some(ref vis) = visibility {
+                self.recognizer.process_frame_with_visibility(processed, vis)
+            } else {
+                self.recognizer.process_frame(processed)
+            };
+            if let Some(result) = result {
                 let frame_num = self.osc_receiver.state.frame_count as usize;
 
                 // Log state transitions if diagnostics enabled

@@ -22,12 +22,24 @@ pub enum ConnectionStatus {
 /// Events sent from the OSC receiver to the GUI
 #[derive(Debug, Clone)]
 pub enum ReceiverEvent {
-    /// A frame of data was received
+    /// A frame of data was received (coordinates only, no visibility)
     Frame(Vec<f32>),
+    /// A frame with per-joint visibility scores (coordinates, visibility)
+    FrameWithVisibility(Vec<f32>, Vec<f32>),
     /// Connection status changed
     StatusChanged(ConnectionStatus),
     /// An error occurred
     Error(String),
+}
+
+/// A received frame with optional per-joint visibility scores.
+#[derive(Debug, Clone)]
+pub struct ReceivedFrame {
+    /// Coordinate data (e.g., 66 floats for 33 joints × XY)
+    pub coords: Vec<f32>,
+    /// Per-joint visibility scores (e.g., 33 floats, one per joint).
+    /// None for legacy 66-float frames (treated as all visible).
+    pub visibility: Option<Vec<f32>>,
 }
 
 /// Shared state between the receiver task and the GUI
@@ -64,7 +76,7 @@ impl OscReceiverHandle {
     /// Poll for new events and update state.
     /// Returns any frames received since last poll.
     /// Call this every frame in the GUI update loop.
-    pub fn poll(&mut self) -> Vec<Vec<f32>> {
+    pub fn poll(&mut self) -> Vec<ReceivedFrame> {
         let mut frames = Vec::new();
 
         while let Ok(event) = self.event_rx.try_recv() {
@@ -73,7 +85,19 @@ impl OscReceiverHandle {
                     self.state.frame_count += 1;
                     self.state.last_frame_time = Some(Instant::now());
                     self.state.status = ConnectionStatus::Receiving;
-                    frames.push(data);
+                    frames.push(ReceivedFrame {
+                        coords: data,
+                        visibility: None,
+                    });
+                }
+                ReceiverEvent::FrameWithVisibility(coords, visibility) => {
+                    self.state.frame_count += 1;
+                    self.state.last_frame_time = Some(Instant::now());
+                    self.state.status = ConnectionStatus::Receiving;
+                    frames.push(ReceivedFrame {
+                        coords,
+                        visibility: Some(visibility),
+                    });
                 }
                 ReceiverEvent::StatusChanged(status) => {
                     self.state.status = status;
@@ -101,6 +125,12 @@ impl OscReceiverHandle {
         self.shutdown.store(true, Ordering::SeqCst);
     }
 }
+
+/// MediaPipe Pose landmark constants
+const JOINTS: usize = 33;
+const COORDS_PER_JOINT: usize = 2;
+const LEGACY_FRAME_LEN: usize = JOINTS * COORDS_PER_JOINT; // 66
+const VISIBILITY_FRAME_LEN: usize = JOINTS * (COORDS_PER_JOINT + 1); // 99
 
 /// OSC Receiver that listens for skeleton data
 pub struct OscReceiver {
@@ -162,7 +192,7 @@ impl OscReceiver {
 
             // Receive with timeout so we can check shutdown periodically
             let recv_result = tokio::time::timeout(
-                tokio::time::Duration::from_millis(100),
+                tokio::time::Duration::from_millis(10),
                 socket.recv_from(&mut buf),
             )
             .await;
@@ -204,8 +234,9 @@ impl OscReceiver {
     }
 
     fn handle_message(&self, msg: &OscMessage) {
-        // Check if this message matches our address filter
-        if msg.addr != self.address_filter {
+        // Accept both legacy Wekinator address (configured filter, typically "/wek/inputs")
+        // and native RALF address ("/ralf/pose") for forward compatibility.
+        if msg.addr != self.address_filter && msg.addr != "/ralf/pose" {
             return;
         }
 
@@ -221,7 +252,23 @@ impl OscReceiver {
         }
 
         if !floats.is_empty() {
-            let _ = self.event_tx.send(ReceiverEvent::Frame(floats));
+            // Auto-detect visibility data based on frame length:
+            // 99 floats = 33 joints × 3 (x, y, visibility)
+            // 66 floats = 33 joints × 2 (x, y) — legacy format
+            if floats.len() == VISIBILITY_FRAME_LEN {
+                let mut coords = Vec::with_capacity(LEGACY_FRAME_LEN);
+                let mut visibility = Vec::with_capacity(JOINTS);
+                for chunk in floats.chunks(COORDS_PER_JOINT + 1) {
+                    coords.push(chunk[0]); // x
+                    coords.push(chunk[1]); // y
+                    visibility.push(chunk[2]); // visibility
+                }
+                let _ = self
+                    .event_tx
+                    .send(ReceiverEvent::FrameWithVisibility(coords, visibility));
+            } else {
+                let _ = self.event_tx.send(ReceiverEvent::Frame(floats));
+            }
         }
     }
 }
@@ -270,6 +317,79 @@ mod tests {
 
         handle.poll();
         assert_eq!(handle.state.frame_count, 2);
+        assert_eq!(handle.state.status, ConnectionStatus::Receiving);
+    }
+
+    #[test]
+    fn test_legacy_66_float_frame_has_no_visibility() {
+        let (receiver, mut handle) = OscReceiver::new(6448, "/wek/inputs");
+
+        // 66 floats = legacy frame, no visibility
+        let frame_66: Vec<f32> = (0..66).map(|i| i as f32).collect();
+        receiver
+            .event_tx
+            .send(ReceiverEvent::Frame(frame_66.clone()))
+            .unwrap();
+
+        let frames = handle.poll();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].coords, frame_66);
+        assert!(frames[0].visibility.is_none());
+    }
+
+    #[test]
+    fn test_99_float_frame_extracts_visibility() {
+        let (receiver, mut handle) = OscReceiver::new(6448, "/wek/inputs");
+
+        // 99 floats = 33 joints × (x, y, visibility)
+        // Build: joint 0 = (0.1, 0.2, 0.9), joint 1 = (0.3, 0.4, 0.8), ...
+        let mut frame_99 = Vec::with_capacity(99);
+        for i in 0..33 {
+            frame_99.push(i as f32 * 0.1);       // x
+            frame_99.push(i as f32 * 0.1 + 0.01); // y
+            frame_99.push(1.0 - i as f32 * 0.02); // visibility
+        }
+
+        receiver
+            .event_tx
+            .send(ReceiverEvent::FrameWithVisibility(
+                // coords
+                {
+                    let mut c = Vec::with_capacity(66);
+                    for chunk in frame_99.chunks(3) {
+                        c.push(chunk[0]);
+                        c.push(chunk[1]);
+                    }
+                    c
+                },
+                // visibility
+                frame_99.chunks(3).map(|c| c[2]).collect(),
+            ))
+            .unwrap();
+
+        let frames = handle.poll();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].coords.len(), 66);
+        let vis = frames[0].visibility.as_ref().unwrap();
+        assert_eq!(vis.len(), 33);
+        // First joint should have high visibility
+        assert!((vis[0] - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_frame_with_visibility_increments_count() {
+        let (receiver, mut handle) = OscReceiver::new(6448, "/wek/inputs");
+
+        receiver
+            .event_tx
+            .send(ReceiverEvent::FrameWithVisibility(
+                vec![0.0; 66],
+                vec![1.0; 33],
+            ))
+            .unwrap();
+
+        handle.poll();
+        assert_eq!(handle.state.frame_count, 1);
         assert_eq!(handle.state.status, ConnectionStatus::Receiving);
     }
 }

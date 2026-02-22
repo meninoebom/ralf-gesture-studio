@@ -149,9 +149,27 @@ pub fn dtw_distance_constrained(seq1: &Sequence, seq2: &Sequence, band_width: us
 ///
 /// # Returns
 /// `Some(distance)` if computation completes, `None` if abandoned or inputs are empty.
+/// Subsequence DTW with wavefront banding and early abandoning.
+///
+/// Finds the best-matching subsequence of seq1 (window) against seq2 (template).
+/// - Free start: cost[i][0] = 0 for all i (alignment begins at any window frame)
+/// - Free end: result is min_i(cost[i][m]) (alignment ends at any window frame)
+/// - Template (seq2) must be fully matched
+/// - Wavefront banding: template column j advances at most (1 + band_width) per
+///   window row, preventing pathological warping without requiring a known start
+///
+/// # Arguments
+/// * `seq1` - Window (longer, contains gesture somewhere within)
+/// * `seq2` - Template (shorter, must be fully matched)
+/// * `band_width` - Sakoe-Chiba band width in frames
+/// * `best_so_far` - Abandon if no path can beat this distance
+///
+/// # Returns
+/// `Some(distance)` if result < best_so_far, `None` if abandoned or empty.
 pub fn sdtw_distance(
-    seq1: &Sequence,    // window (longer, may contain irrelevant prefix/suffix)
-    seq2: &Sequence,    // template (shorter, must be fully matched)
+    seq1: &Sequence,
+    seq2: &Sequence,
+    band_width: usize,
     best_so_far: f32,
 ) -> Option<f32> {
     if seq1.is_empty() || seq2.is_empty() {
@@ -161,64 +179,42 @@ pub fn sdtw_distance(
     let n = seq1.len();
     let m = seq2.len();
 
-    // Full matrix needed to find min over last column
-    // Using two-column approach (iterate over template, track window dimension)
-    // Actually, we iterate rows=window, cols=template, and want min of last column.
-    // Two-row approach: prev_row[j] = cost[i-1][j], curr_row[j] = cost[i][j]
     let mut prev_row = vec![f32::INFINITY; m + 1];
     let mut curr_row = vec![f32::INFINITY; m + 1];
-
-    // Free start: cost[0][0] through cost[n][0] are independent (not cumulative)
-    // We handle this by setting prev_row[0] for i=0 and updating curr_row[0] each row.
-    // prev_row represents cost[0][*] initially.
-    // cost[0][0] = dist(window[0], template[0]) but in our 1-indexed scheme:
-    // We need cost[i][0] = 0 for all i (free start on window, no template matched yet)
-    // Then cost[i][j] = dist(window[i], template[j]) + min(cost[i-1][j-1], cost[i-1][j], cost[i][j-1])
-    // And the answer is min over i of cost[i][m]
-
-    // Actually the standard sDTW formulation:
-    // cost[i][0] = 0 for all i   (can start matching template at any window position for free)
-    // cost[0][j] = INF for j > 0 (can't match template without window frames)
-    // Answer: min_i cost[i][m]
-
-    prev_row[0] = 0.0; // cost[0][0] = 0 (free start)
-    // prev_row[j>0] = INF (can't match template frames without window frames)
+    prev_row[0] = 0.0;
 
     let mut best_end = f32::INFINITY;
 
-    // Apply Sakoe-Chiba-style band: limit how far the template alignment
-    // can deviate from the diagonal. Since sDTW allows free start on the
-    // window, we use a generous band of 30% of template length.
-    let band = (m as f32 * 0.30).ceil() as usize;
+    // Wavefront: tracks the highest template column with finite cost.
+    // Each row can extend this by at most (1 + band_width), limiting warping
+    // without requiring a known alignment start position.
+    let mut j_frontier: usize = 0;
 
     for i in 1..=n {
         curr_row.fill(f32::INFINITY);
-        curr_row[0] = 0.0; // Free start: can begin alignment at any window frame
+        curr_row[0] = 0.0; // Free start
 
-        // Band limits: template column j should be near the diagonal
-        // For sDTW with free start, the diagonal is less meaningful,
-        // but we still want to prevent extreme warping within the matched region.
-        // Use full range for j since the free-start handles alignment offset.
-        let j_min = 1;
-        let j_max = m;
-
+        let j_max = (j_frontier + 1 + band_width).min(m);
         let mut row_min = f32::INFINITY;
+        let mut new_frontier: usize = 0;
 
-        for j in j_min..=j_max {
+        for j in 1..=j_max {
             let dist = euclidean_distance(&seq1[i - 1], &seq2[j - 1]);
             let min_prev = prev_row[j - 1].min(prev_row[j]).min(curr_row[j - 1]);
             curr_row[j] = dist + min_prev;
             row_min = row_min.min(curr_row[j]);
+            if curr_row[j].is_finite() {
+                new_frontier = j;
+            }
         }
 
-        // Early abandon: if every cell in this row exceeds best_so_far,
-        // no path through here can beat it
         if row_min > best_so_far {
             return None;
         }
 
-        // Track best distance at template end (j = m)
-        if curr_row[m] < best_end {
+        j_frontier = new_frontier;
+
+        if j_max >= m && curr_row[m] < best_end {
             best_end = curr_row[m];
         }
 

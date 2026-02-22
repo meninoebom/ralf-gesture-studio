@@ -793,7 +793,7 @@ fn benchmark_config() -> RecognitionConfig {
         global_cooldown_ms: 200,
         sakoe_chiba_band: 0.15,
         margin_rejection_ratio: 0.0,
-        use_subsequence_dtw: true, // sDTW: template matches best subsequence within window
+        use_subsequence_dtw: true, // sDTW with wavefront banding
         complexity_correction: false,
     }
 }
@@ -838,7 +838,7 @@ fn run_holdout_trial(
 
         let stats = if use_sdtw {
             ralf_gesture_studio::engine::statistics::compute_threshold_stats_sdtw(
-                &processed, 3.0, 4,
+                &processed, 3.0, 4, 0.15,
             )
         } else {
             ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(

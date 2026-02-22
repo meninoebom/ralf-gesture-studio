@@ -300,6 +300,7 @@ pub fn compute_threshold_stats_sdtw(
     examples: &[Sequence],
     coefficient: f32,
     downsample_factor: usize,
+    sakoe_chiba_band: f32,
 ) -> Option<ThresholdStats> {
     if examples.len() < 2 {
         return None;
@@ -323,9 +324,12 @@ pub fn compute_threshold_stats_sdtw(
 
     for i in 0..n_examples {
         for j in (i + 1)..n_examples {
+            let max_len = downsampled[i].len().max(downsampled[j].len());
+            let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
             if let Some(dist) = sdtw_distance(
                 &downsampled[i],
                 &downsampled[j],
+                band_width,
                 f32::INFINITY,
             ) {
                 if dist.is_finite() {
@@ -443,15 +447,18 @@ pub fn detect_confusion_pairs(
                 continue;
             }
 
-            // Compute mean cross-gesture distance
+            // Compute mean cross-gesture distance (banded for performance)
             let mut sum = 0.0f32;
             let mut count = 0usize;
             for ea in examples_a.iter() {
                 for eb in examples_b.iter() {
-                    let d = dtw_distance(ea, eb);
-                    if d.is_finite() {
-                        sum += d;
-                        count += 1;
+                    let max_len = ea.len().max(eb.len());
+                    let band_width = ((max_len as f32) * 0.15).ceil() as usize;
+                    if let Some(d) = dtw_distance_with_abandon(ea, eb, band_width, f32::INFINITY) {
+                        if d.is_finite() {
+                            sum += d;
+                            count += 1;
+                        }
                     }
                 }
             }

@@ -105,7 +105,7 @@ pub struct Vocabulary {
 
 **Migration**: v1.0 files are automatically upgraded when loaded (UUID generated, defaults applied).
 
-## Recognition Config (v0.7.0)
+## Recognition Config (v0.8.0)
 
 ```rust
 RecognitionConfig {
@@ -115,6 +115,7 @@ RecognitionConfig {
     max_recovery_ms: 5000,         // Safety valve: force re-arm after 5s
     global_cooldown_ms: 1500,      // Block ALL gestures after ANY hit
     sakoe_chiba_band: 0.15,        // 15% warping constraint
+    use_subsequence_dtw: true,     // sDTW with wavefront banding (93.3% benchmark)
 }
 ```
 
@@ -125,10 +126,19 @@ For algorithm details, echo defense design, preprocessing pipeline, threshold ca
 - **Warm-up effect in first 3-5 seconds.** The sliding window needs real movement data before distances are meaningful. First 3 hits in a session average ~34% margin vs ~68% for the rest. The very first hit may barely clear threshold (6.6% margin observed). This is normal — not a bug. Account for it when analyzing diagnostic logs.
 - **Detection latency ~400ms.** Mean time from Building entry to Peak fire is ~400ms (3 frames of accumulation at ~15Hz DTW rate). This is the baseline responsiveness of the system.
 - **Jump-style gestures produce tight margins.** Gestures with low inter-example variance (e.g., jumps) get tight auto-thresholds (low σ), resulting in lower margins (~39%) compared to complex gestures like spins (~75%). This is correct behavior — tight thresholds mean precise detection, not fragile detection.
+- **NEVER compute DTW in a Tauri polling command.** `get_state()` is called ~60Hz by the frontend. Any pairwise DTW computation here (even banded) will hang the app once gestures have 8+ examples. Cache expensive results (consistency, thresholds) when data changes, read the cached value in the poll. This caused repeated beach-ball-of-death bugs.
+- **Every DTW call in production must be banded.** Use `dtw_distance_with_abandon` (Sakoe-Chiba banded + early abandoning), never bare `dtw_distance` (unbanded O(N×M) with full matrix allocation). The unbanded version exists only for unit tests. Grep for `dtw_distance(` (without `_with_abandon` or `_constrained`) to audit.
+- **Threshold calibration must match the distance metric.** If recognition uses sDTW, thresholds must be computed with `compute_threshold_stats_sdtw`. Mixing standard DTW thresholds with sDTW recognition gives worse results than standard DTW alone (76.7% vs 83.3%). The distance scales are different.
+- **sDTW needs wavefront banding, not Sakoe-Chiba.** Standard Sakoe-Chiba assumes diagonal alignment. sDTW has free start (template can match anywhere in window), so there's no fixed diagonal. Use a `j_frontier` tracker that limits template column advance to `1 + band_width` per row. Without this, sDTW is unbounded O(N×M) and hangs in real-time.
+- **10 examples per gesture is the stress test threshold.** With 10 examples, pairwise operations hit 45 pairs. Any O(n²) computation on raw data becomes noticeable. Always downsample (factor 4) for pairwise statistics.
+- **Margin rejection is incompatible with sDTW.** sDTW free-start finds the "best matching subsequence" independently per template. During idle/transition periods, ALL templates find similar costs against the same window, producing tied distances. Margin rejection (requiring X% gap between best and second-best) blocks ALL hits when distances tie. Set `margin_rejection_ratio: 0.0` when sDTW is enabled. The per-gesture threshold already provides sufficient discrimination.
+- **Production config must match benchmark config.** When a benchmark test works but production doesn't, diff the configs. Common culprits: margin_rejection_ratio, threshold_coefficient, medoid selection, use_subsequence_dtw. The benchmark is the source of truth for what settings work.
+- **Only recompute thresholds on vocabulary load.** When loading a .ralf file, existing thresholds may have been computed with a different distance metric or coefficient. Always call `compute_gesture_statistics` for all gestures after loading. Without this, stale thresholds from standard DTW get used with sDTW recognition.
+- **Serde defaults only apply to missing fields.** Changing `default_threshold_coefficient()` from 2.0→3.0 does NOTHING for existing .ralf files that already have `threshold_coefficient` serialized. The serde `#[serde(default = "...")]` attribute only kicks in when the field is absent from JSON. To upgrade existing vocabularies, explicitly overwrite the field on load (see `load_vocabulary` in gui/mod.rs).
 
-## Current Status (v0.7.1)
+## Current Status (v0.8.0)
 
-All core features implemented: DTW recognition with VAD-style state machine, statistical threshold calibration (mu+sigma), two-layer echo defense (0% echo rate in production), LB_Keogh + Sakoe-Chiba + early abandoning optimizations, preprocessing pipeline (hip centering, scale normalization, velocity features), data augmentation, example quality assessment, joint weighting, consensus scoring, diagnostic logging, and research-ready vocabulary format (v1.2). Stop training button and individual example deletion. Standalone gesture viewer for visual inspection of recorded examples. 151 passing tests.
+All core features implemented: DTW recognition with VAD-style state machine, **subsequence DTW (sDTW) with wavefront banding** for production recognition (93.3% benchmark accuracy), statistical threshold calibration (mu+sigma) with sDTW-calibrated variant, two-layer echo defense (0% echo rate in production), LB_Keogh + Sakoe-Chiba + early abandoning optimizations, onset trimming for sliding window, preprocessing pipeline (hip centering, scale normalization, velocity features), data augmentation, example quality assessment, joint weighting, consensus scoring, diagnostic logging, and research-ready vocabulary format (v1.2). Stop training button and individual example deletion. Standalone gesture viewer for visual inspection of recorded examples.
 
 ## Coding Guidelines
 

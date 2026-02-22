@@ -99,9 +99,9 @@ impl Default for RecognitionConfig {
             global_cooldown_ms: 1000,
             // Sakoe-Chiba band: 15% of sequence length (recommended for gesture recognition)
             sakoe_chiba_band: 0.15,
-            // Margin rejection: require 15% gap between best and second-best
-            margin_rejection_ratio: 0.15,
-            use_subsequence_dtw: false, // sDTW works in benchmarks but too slow for real-time (no banding)
+            // Margin rejection: OFF by default (sDTW produces tied distances)
+            margin_rejection_ratio: 0.0,
+            use_subsequence_dtw: true, // sDTW with wavefront banding
             complexity_correction: false,
         }
     }
@@ -596,6 +596,46 @@ impl Recognizer {
         if cf < 1e-6 { 1.0 } else { cf }
     }
 
+    /// Trim the standing-still prefix from a window by detecting movement onset.
+    ///
+    /// Scans frame-to-frame velocity (sum of squared differences) and finds the
+    /// first frame where velocity exceeds 2× the baseline (median of first 10 frames).
+    /// Returns the window starting a few frames before onset for DTW lead-in.
+    /// If no onset is detected, returns the original window.
+    fn trim_to_onset(seq: &Sequence) -> Sequence {
+        if seq.len() < 10 {
+            return seq.to_vec();
+        }
+
+        // Compute frame-to-frame velocities
+        let velocities: Vec<f32> = seq.windows(2)
+            .map(|pair| {
+                pair[0].iter().zip(pair[1].iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+            })
+            .collect();
+
+        // Baseline: median velocity of first 10 frames (assumed standing still)
+        let baseline_count = 10.min(velocities.len());
+        let mut baseline_velocities: Vec<f32> = velocities[..baseline_count].to_vec();
+        baseline_velocities.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let baseline = baseline_velocities[baseline_count / 2];
+
+        // Threshold: 2× baseline, with a minimum floor to avoid noise triggers
+        let threshold = (baseline * 2.0).max(0.5);
+
+        // Find first frame where velocity exceeds threshold
+        if let Some(onset) = velocities.iter().position(|&v| v > threshold) {
+            // Start a few frames before onset for DTW lead-in
+            let start = onset.saturating_sub(3);
+            seq[start..].to_vec()
+        } else {
+            seq.to_vec()
+        }
+    }
+
     /// Downsample a sequence by taking every Nth frame
     fn downsample_seq(seq: &Sequence, factor: usize) -> Sequence {
         if factor <= 1 {
@@ -646,8 +686,9 @@ impl Recognizer {
             // Layer 2: Full DTW with early abandoning
             let example_ds = Self::downsample_seq(example, downsample);
             let dist = if use_subsequence_dtw {
-                // Subsequence DTW: template matches best subsequence within window
-                match sdtw_distance(window, &example_ds, best) {
+                let max_len = window.len().max(example_ds.len());
+                let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
+                match sdtw_distance(window, &example_ds, band_width, best) {
                     Some(d) => d,
                     None => continue,
                 }
@@ -892,7 +933,9 @@ impl Recognizer {
             // Full DTW with threshold as abandon cutoff
             let example_ds = Self::downsample_seq(example, downsample);
             let below = if use_subsequence_dtw {
-                sdtw_distance(window, &example_ds, threshold).is_some()
+                let max_len = window.len().max(example_ds.len());
+                let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
+                sdtw_distance(window, &example_ds, band_width, threshold).is_some()
             } else if sakoe_chiba_band > 0.0 {
                 let max_len = window.len().max(example_ds.len());
                 let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
@@ -1062,9 +1105,10 @@ impl Recognizer {
             });
         }
 
-        // Get current window and downsample for efficient DTW
+        // Get current window, downsample, and trim standing-still prefix
         let window_full = self.buffer.recent(self.window_size);
-        let window = Self::downsample_seq(&window_full, self.downsample);
+        let window_ds = Self::downsample_seq(&window_full, self.downsample);
+        let window = Self::trim_to_onset(&window_ds);
 
         let distances = self.compute_distances(&window);
         self.run_state_machines(&distances)

@@ -160,6 +160,9 @@ impl AppState {
                 .map(|e| self.preprocessor.process_sequence(&e.frames))
                 .collect();
 
+            // Cache consistency score (expensive pairwise DTW — compute once, not per poll)
+            gesture.consistency = compute_gesture_consistency(&processed);
+
             // Compute joint weights if enabled and enough examples
             let weights = if self.vocabulary.joint_weighting && processed.len() >= 2 {
                 compute_joint_weights(&processed)
@@ -170,8 +173,14 @@ impl AppState {
             // Store weights in recognizer for runtime window scaling
             self.recognizer.set_weights(gesture.id, weights.clone());
 
-            // Medoid selection: with 3+ examples, use only the most representative one
-            let medoid_idx = compute_medoid(&processed);
+            // Medoid selection: with 3+ examples, use only the most representative one.
+            // Skip medoid when sDTW is enabled — sDTW needs all examples to match
+            // the pairwise threshold calibration (medoid-only inflates distances).
+            let medoid_idx = if self.recognition_config.use_subsequence_dtw {
+                None
+            } else {
+                compute_medoid(&processed)
+            };
             gesture.medoid_index = medoid_idx;
 
             let examples_to_add: Vec<(usize, &Vec<Vec<f32>>)> = if let Some(mid) = medoid_idx {
@@ -337,7 +346,7 @@ impl AppState {
             .unwrap_or(2.0);
 
         let stats = if self.recognition_config.use_subsequence_dtw {
-            compute_threshold_stats_sdtw(&examples, coefficient, 4)
+            compute_threshold_stats_sdtw(&examples, coefficient, 4, self.recognition_config.sakoe_chiba_band)
         } else {
             compute_threshold_stats_banded(&examples, coefficient, 4, 0.15)
         };
@@ -752,9 +761,7 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
                 distance_mean: g.distance_mean,
                 distance_std: g.distance_std,
                 outlier_example_indices: g.outlier_example_indices.clone(),
-                consistency: compute_gesture_consistency(
-                    &g.examples.iter().map(|e| e.frames.clone()).collect::<Vec<_>>(),
-                ),
+                consistency: g.consistency,
                 medoid_index: g.medoid_index,
             })
             .collect(),
@@ -996,6 +1003,21 @@ pub fn open_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String>
                 );
                 app.smoother = PoseSmoother::new(app.vocabulary.input.dimensions);
                 app.last_frame_time = None;
+                // Ensure all gestures use the current default coefficient (the .ralf
+                // file may have been saved with an older default like 2.0 or 2.5)
+                let current_default = ralf_gesture_studio::model::default_threshold_coefficient();
+                for g in &mut app.vocabulary.gestures {
+                    if !g.threshold_manual_override {
+                        g.threshold_coefficient = current_default;
+                    }
+                }
+                // Recompute thresholds for all gestures (stored thresholds may have been
+                // computed with a different distance metric, e.g., standard DTW vs sDTW)
+                let gesture_ids: Vec<u32> = app.vocabulary.gestures.iter().map(|g| g.id).collect();
+                for gid in gesture_ids {
+                    app.compute_gesture_statistics(gid);
+                }
+
                 app.sync_recognizer();
 
                 app.osc_sender =

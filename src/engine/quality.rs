@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::dtw::{dtw_distance, Sequence};
+use super::dtw::{dtw_distance_with_abandon, Sequence};
 
 /// Quality issues detected in a training example.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -85,9 +85,14 @@ pub fn assess_example(new_example: &Sequence, existing: &[Sequence]) -> Option<Q
         let mut inter_distances = Vec::new();
         for i in 0..existing.len() {
             for j in (i + 1)..existing.len() {
-                let d = dtw_distance(&existing[i], &existing[j]);
-                if d.is_finite() {
-                    inter_distances.push(d);
+                let max_len = existing[i].len().max(existing[j].len());
+                let band_width = ((max_len as f32) * 0.15).ceil() as usize;
+                if let Some(d) = dtw_distance_with_abandon(
+                    &existing[i], &existing[j], band_width, f32::INFINITY,
+                ) {
+                    if d.is_finite() {
+                        inter_distances.push(d);
+                    }
                 }
             }
         }
@@ -98,7 +103,11 @@ pub fn assess_example(new_example: &Sequence, existing: &[Sequence]) -> Option<Q
 
             let new_distances: Vec<f32> = existing
                 .iter()
-                .map(|ex| dtw_distance(new_example, ex))
+                .filter_map(|ex| {
+                    let max_len = new_example.len().max(ex.len());
+                    let band_width = ((max_len as f32) * 0.15).ceil() as usize;
+                    dtw_distance_with_abandon(new_example, ex, band_width, f32::INFINITY)
+                })
                 .filter(|d| d.is_finite())
                 .collect();
 
@@ -126,12 +135,27 @@ pub fn compute_gesture_consistency(examples: &[Sequence]) -> Option<f32> {
         return None;
     }
 
+    // Downsample for speed (matches threshold stats factor)
+    let downsample_factor = 4;
+    let downsampled: Vec<Sequence> = examples
+        .iter()
+        .map(|seq| seq.iter().step_by(downsample_factor).cloned().collect())
+        .collect();
+
     let mut distances = Vec::new();
-    for i in 0..examples.len() {
-        for j in (i + 1)..examples.len() {
-            let d = dtw_distance(&examples[i], &examples[j]);
-            if d.is_finite() {
-                distances.push(d);
+    for i in 0..downsampled.len() {
+        for j in (i + 1)..downsampled.len() {
+            let max_len = downsampled[i].len().max(downsampled[j].len());
+            let band_width = ((max_len as f32) * 0.15).ceil() as usize;
+            if let Some(d) = dtw_distance_with_abandon(
+                &downsampled[i],
+                &downsampled[j],
+                band_width,
+                f32::INFINITY,
+            ) {
+                if d.is_finite() {
+                    distances.push(d);
+                }
             }
         }
     }

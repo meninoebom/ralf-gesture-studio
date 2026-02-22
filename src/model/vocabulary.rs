@@ -7,8 +7,8 @@ use crate::engine::augmentation::AugmentationConfig;
 use crate::engine::preprocess::PreprocessingConfig;
 
 /// Default coefficient for statistical threshold (μ + σ×coefficient)
-fn default_threshold_coefficient() -> f32 {
-    2.0
+pub fn default_threshold_coefficient() -> f32 {
+    3.0
 }
 
 /// Default consensus threshold (50% of examples must agree)
@@ -128,6 +128,9 @@ pub struct Gesture {
     /// Index of the medoid example (most representative), computed during sync
     #[serde(skip)]
     pub medoid_index: Option<usize>,
+    /// Cached consistency score (coefficient of variation of pairwise DTW distances)
+    #[serde(skip)]
+    pub consistency: Option<f32>,
 }
 
 impl Gesture {
@@ -151,6 +154,7 @@ impl Gesture {
             // Transient
             outlier_example_indices: Vec::new(),
             medoid_index: None,
+            consistency: None,
         }
     }
 

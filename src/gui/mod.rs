@@ -5,7 +5,8 @@ use tauri::State;
 
 use ralf_gesture_studio::engine::{
     assess_example, compute_gesture_consistency, compute_joint_weights, compute_medoid,
-    compute_threshold_stats_banded, generate_augmented, DiagnosticEvent, DiagnosticLogger,
+    compute_threshold_stats_banded, compute_threshold_stats_sdtw, detect_confusion_pairs, generate_augmented,
+    DiagnosticEvent, DiagnosticLogger,
     GestureDiag, HitLog, PoseSmoother, Preprocessor, RecognitionConfig, Recognizer, SessionState,
     TrainingConfig, TrainingSession,
 };
@@ -62,6 +63,8 @@ pub struct AppState {
     smoother: PoseSmoother,
     /// Last frame timestamp for computing dt
     last_frame_time: Option<std::time::Instant>,
+    /// Detected inter-gesture confusion pairs: (gesture_id_a, gesture_id_b, overlap_ratio)
+    confusion_pairs: Vec<(u32, u32, f32)>,
 }
 
 impl AppState {
@@ -116,6 +119,7 @@ impl AppState {
             quality_feedback: Vec::new(),
             smoother: PoseSmoother::new(input_dims),
             last_frame_time: None,
+            confusion_pairs: Vec::new(),
         }
     }
 
@@ -127,6 +131,9 @@ impl AppState {
         use ralf_gesture_studio::engine::weighting::apply_weights_to_sequence;
 
         let was_active = self.recognizer.is_active();
+
+        // Sync vocabulary-level settings to recognition config
+        self.recognition_config.complexity_correction = self.vocabulary.complexity_correction;
 
         self.recognizer = Recognizer::with_config(600, 180, self.recognition_config.clone());
         self.preprocessor.reset();
@@ -259,8 +266,50 @@ impl AppState {
         // Rebuild recognizer with all examples (preprocess → weight → augment)
         self.sync_recognizer();
 
+        // Detect inter-gesture confusion
+        self.update_confusion_pairs();
+
         self.dirty = true;
         self.auto_save();
+    }
+
+    /// Compute inter-gesture confusion pairs across all gestures
+    fn update_confusion_pairs(&mut self) {
+        let gesture_data: Vec<(Vec<Vec<Vec<f32>>>, f32, u32)> = self
+            .vocabulary
+            .gestures
+            .iter()
+            .filter(|g| g.examples.len() >= 2)
+            .map(|g| {
+                let processed: Vec<Vec<Vec<f32>>> = g
+                    .examples
+                    .iter()
+                    .map(|e| self.preprocessor.process_sequence(&e.frames))
+                    .collect();
+                (processed, g.threshold, g.id)
+            })
+            .collect();
+
+        if gesture_data.len() < 2 {
+            self.confusion_pairs.clear();
+            return;
+        }
+
+        let stats_input: Vec<(Vec<Vec<Vec<f32>>>, f32)> = gesture_data
+            .iter()
+            .map(|(examples, threshold, _)| (examples.clone(), *threshold))
+            .collect();
+
+        let raw_pairs = detect_confusion_pairs(&stats_input);
+
+        self.confusion_pairs = raw_pairs
+            .into_iter()
+            .map(|(i, j, ratio)| {
+                let id_a = gesture_data[i].2;
+                let id_b = gesture_data[j].2;
+                (id_a, id_b, ratio)
+            })
+            .collect();
     }
 
     /// Compute threshold statistics for a gesture
@@ -287,7 +336,12 @@ impl AppState {
             .map(|g| g.threshold_coefficient)
             .unwrap_or(2.0);
 
-        if let Some(stats) = compute_threshold_stats_banded(&examples, coefficient, 4, 0.15) {
+        let stats = if self.recognition_config.use_subsequence_dtw {
+            compute_threshold_stats_sdtw(&examples, coefficient, 4)
+        } else {
+            compute_threshold_stats_banded(&examples, coefficient, 4, 0.15)
+        };
+        if let Some(stats) = stats {
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
                 gesture.update_statistics(stats.mean, stats.std);
                 gesture.outlier_example_indices = stats.outlier_indices.clone();
@@ -539,6 +593,17 @@ pub struct VocabularyDto {
     gestures: Vec<GestureDto>,
     augmentation: AugmentationConfigDto,
     joint_weighting: bool,
+    complexity_correction: bool,
+    confusion_pairs: Vec<ConfusionPairDto>,
+}
+
+#[derive(Serialize)]
+pub struct ConfusionPairDto {
+    gesture_id_a: u32,
+    gesture_id_b: u32,
+    gesture_name_a: String,
+    gesture_name_b: String,
+    overlap_ratio: f32,
 }
 
 #[derive(Serialize)]
@@ -698,6 +763,30 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
             multiplier: app.vocabulary.augmentation.multiplier,
         },
         joint_weighting: app.vocabulary.joint_weighting,
+        complexity_correction: app.vocabulary.complexity_correction,
+        confusion_pairs: app
+            .confusion_pairs
+            .iter()
+            .map(|(id_a, id_b, ratio)| {
+                let name_a = app
+                    .vocabulary
+                    .get_gesture(*id_a)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_default();
+                let name_b = app
+                    .vocabulary
+                    .get_gesture(*id_b)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_default();
+                ConfusionPairDto {
+                    gesture_id_a: *id_a,
+                    gesture_id_b: *id_b,
+                    gesture_name_a: name_a,
+                    gesture_name_b: name_b,
+                    overlap_ratio: *ratio,
+                }
+            })
+            .collect(),
     };
 
     let input_status = match app.osc_receiver.state.status {
@@ -1229,6 +1318,18 @@ pub fn set_joint_weighting(
 ) -> Result<(), String> {
     let mut app = state.lock().map_err(|e| e.to_string())?;
     app.vocabulary.joint_weighting = enabled;
+    app.sync_recognizer();
+    app.mark_dirty();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_complexity_correction(
+    state: State<Arc<Mutex<AppState>>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.vocabulary.complexity_correction = enabled;
     app.sync_recognizer();
     app.mark_dirty();
     Ok(())

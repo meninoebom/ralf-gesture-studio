@@ -78,6 +78,11 @@ pub struct RecognitionConfig {
     /// sDTW allows the template to match a subsequence within the window,
     /// ignoring irrelevant prefix/suffix frames (e.g., standing still before gesture).
     pub use_subsequence_dtw: bool,
+
+    /// Enable complexity-invariant distance (CID) correction.
+    /// Normalizes DTW distances by gesture complexity (first-derivative energy)
+    /// so simple and complex gestures produce comparable distance scales.
+    pub complexity_correction: bool,
 }
 
 impl Default for RecognitionConfig {
@@ -96,7 +101,8 @@ impl Default for RecognitionConfig {
             sakoe_chiba_band: 0.15,
             // Margin rejection: require 15% gap between best and second-best
             margin_rejection_ratio: 0.15,
-            use_subsequence_dtw: false,
+            use_subsequence_dtw: true,
+            complexity_correction: false,
         }
     }
 }
@@ -193,6 +199,10 @@ pub struct GestureState {
     consensus_threshold: f32,
     /// Count of consecutive frames above threshold in Recovery state (for distance-based exit)
     recovery_frames_above: usize,
+    /// Precomputed complexity factors for each example (for CID correction)
+    complexity_factors: Vec<f32>,
+    /// Mean complexity factor across all examples (for normalization)
+    mean_complexity_factor: f32,
 }
 
 impl GestureState {
@@ -216,6 +226,8 @@ impl GestureState {
             consensus_enabled: false,
             consensus_threshold: 0.5,
             recovery_frames_above: 0,
+            complexity_factors: Vec::new(),
+            mean_complexity_factor: 1.0,
         }
     }
 
@@ -247,15 +259,27 @@ impl GestureState {
         &self.lb_envelopes
     }
 
-    /// Compute LB_Keogh envelopes for all examples.
-    /// Called at recognition start to enable fast pruning.
+    /// Compute LB_Keogh envelopes and complexity factors for all examples.
+    /// Called at recognition start to enable fast pruning and CID correction.
     pub fn compute_envelopes(&mut self, band_width: usize, downsample: usize) {
         self.lb_envelopes.clear();
+        self.complexity_factors.clear();
         for example in &self.examples {
             // Downsample example before computing envelope
             let example_ds: Sequence = example.iter().step_by(downsample).cloned().collect();
             let envelope = compute_lb_envelope(&example_ds, band_width);
             self.lb_envelopes.push(envelope);
+            self.complexity_factors.push(Recognizer::complexity_factor(&example_ds));
+        }
+        // Precompute mean CF for normalization
+        if !self.complexity_factors.is_empty() {
+            self.mean_complexity_factor = self.complexity_factors.iter().sum::<f32>()
+                / self.complexity_factors.len() as f32;
+            if self.mean_complexity_factor < 1e-6 {
+                self.mean_complexity_factor = 1.0;
+            }
+        } else {
+            self.mean_complexity_factor = 1.0;
         }
     }
 
@@ -552,6 +576,26 @@ impl Recognizer {
         std::mem::take(&mut self.pending_transitions)
     }
 
+    /// Compute complexity factor for a sequence.
+    /// CF = sqrt(sum of squared Euclidean distances between consecutive frames).
+    /// Higher values = more complex (more movement per frame).
+    fn complexity_factor(seq: &Sequence) -> f32 {
+        if seq.len() < 2 {
+            return 1.0;
+        }
+        let mut sum_sq = 0.0f32;
+        for pair in seq.windows(2) {
+            let dist_sq: f32 = pair[0]
+                .iter()
+                .zip(pair[1].iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum();
+            sum_sq += dist_sq;
+        }
+        let cf = sum_sq.sqrt();
+        if cf < 1e-6 { 1.0 } else { cf }
+    }
+
     /// Downsample a sequence by taking every Nth frame
     fn downsample_seq(seq: &Sequence, factor: usize) -> Sequence {
         if factor <= 1 {
@@ -583,6 +627,7 @@ impl Recognizer {
         best_so_far: f32,
         visibility_weights: Option<&[f32]>,
         use_subsequence_dtw: bool,
+        complexity_factors: Option<(&[f32], f32, f32)>, // (per-example CFs, mean CF, window CF)
     ) -> f32 {
         let mut best = best_so_far;
         for (i, example) in examples.iter().enumerate() {
@@ -633,8 +678,17 @@ impl Recognizer {
                 // Use unconstrained DTW (no early abandoning available)
                 dtw_distance(window, &example_ds)
             };
-            if dist < best {
-                best = dist;
+            // Apply CID complexity correction if enabled
+            let corrected = if let Some((cfs, mean_cf, window_cf)) = complexity_factors {
+                let example_cf = cfs.get(i).copied().unwrap_or(1.0);
+                // Normalize CFs by mean so correction is scale-neutral
+                let cf_ratio = (example_cf / mean_cf) * (window_cf / mean_cf);
+                dist * cf_ratio.max(0.1) // Floor at 0.1 to avoid zeroing out distances
+            } else {
+                dist
+            };
+            if corrected < best {
+                best = corrected;
             }
         }
         best
@@ -751,6 +805,22 @@ impl Recognizer {
             // DTW distances. Visibility weighting scales each dimension by w_i,
             // so raw distances are smaller by ~mean(w). Convert best_so_far from
             // normalized space → weighted space, then convert result back.
+            // Build CID correction params if enabled
+            let window_cf = if self.config.complexity_correction {
+                Self::complexity_factor(window_ref)
+            } else {
+                1.0
+            };
+            let cid_params = if self.config.complexity_correction {
+                Some((
+                    gesture.complexity_factors.as_slice(),
+                    gesture.mean_complexity_factor,
+                    window_cf,
+                ))
+            } else {
+                None
+            };
+
             let raw_dist = Self::find_best_distance(
                 window_ref,
                 examples,
@@ -760,6 +830,7 @@ impl Recognizer {
                 best_so_far * visibility_normalizer,
                 vis_weights,
                 self.config.use_subsequence_dtw,
+                cid_params,
             );
             // Normalize visibility-weighted distance to unweighted scale
             let dist = raw_dist / visibility_normalizer;
@@ -1475,5 +1546,34 @@ mod tests {
 
         // With margin rejection, ambiguous match should be suppressed
         assert!(!fired, "ambiguous match between similar gestures should be suppressed");
+    }
+
+    #[test]
+    fn test_complexity_factor_simple_vs_complex() {
+        // Simple sequence: small movements
+        let simple: Sequence = vec![vec![0.0], vec![0.1], vec![0.2], vec![0.3]];
+        // Complex sequence: large movements
+        let complex: Sequence = vec![vec![0.0], vec![5.0], vec![-3.0], vec![8.0]];
+
+        let cf_simple = Recognizer::complexity_factor(&simple);
+        let cf_complex = Recognizer::complexity_factor(&complex);
+
+        assert!(
+            cf_complex > cf_simple,
+            "complex CF ({}) should exceed simple ({})",
+            cf_complex,
+            cf_simple
+        );
+    }
+
+    #[test]
+    fn test_complexity_factor_degenerate() {
+        // Single frame: should return 1.0 (floor)
+        assert_eq!(Recognizer::complexity_factor(&vec![vec![1.0]]), 1.0);
+        // Empty: should return 1.0
+        assert_eq!(Recognizer::complexity_factor(&vec![]), 1.0);
+        // Identical frames: near-zero derivative -> floor at 1.0
+        let still: Sequence = vec![vec![5.0, 5.0]; 10];
+        assert_eq!(Recognizer::complexity_factor(&still), 1.0);
     }
 }

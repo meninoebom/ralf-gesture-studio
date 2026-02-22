@@ -32,6 +32,6 @@ pub use diagnostics::{DiagnosticEvent, DiagnosticLogger, GestureDiag};
 pub use preprocess::Preprocessor;
 pub use quality::assess_example;
 pub use recognizer::{HitLog, RecognitionConfig, Recognizer};
-pub use statistics::compute_threshold_stats;
+pub use statistics::compute_threshold_stats_banded;
 pub use training::{SessionState, TrainingConfig, TrainingSession};
 pub use weighting::compute_joint_weights;

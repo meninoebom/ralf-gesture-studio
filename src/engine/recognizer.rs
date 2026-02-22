@@ -79,12 +79,12 @@ impl Default for RecognitionConfig {
             cooldown_ms: 500,
             // Entry at 100% of threshold
             threshold_high_factor: 1.0,
-            // Frame accumulation: require 3 consecutive frames (~200ms at 15Hz DTW)
-            frames_to_fire: 3,
+            // Frame accumulation: require 2 consecutive frames (~133ms at 15Hz DTW)
+            frames_to_fire: 2,
             // Safety valve: force re-arm after 5s (prevents stuck state for jump)
             max_recovery_ms: 5000,
             // Global cooldown: 1500ms after any gesture fires, block all from Building
-            global_cooldown_ms: 1500,
+            global_cooldown_ms: 1000,
             // Sakoe-Chiba band: 15% of sequence length (recommended for gesture recognition)
             sakoe_chiba_band: 0.15,
         }
@@ -181,6 +181,8 @@ pub struct GestureState {
     consensus_enabled: bool,
     /// Minimum fraction of examples that must agree (default 0.5)
     consensus_threshold: f32,
+    /// Count of consecutive frames above threshold in Recovery state (for distance-based exit)
+    recovery_frames_above: usize,
 }
 
 impl GestureState {
@@ -203,6 +205,7 @@ impl GestureState {
             weights: None,
             consensus_enabled: false,
             consensus_threshold: 0.5,
+            recovery_frames_above: 0,
         }
     }
 
@@ -280,6 +283,7 @@ impl GestureState {
         self.state = RecognitionState::Idle;
         self.frames_below_threshold = 0;
         self.recovery_start = None;
+        self.recovery_frames_above = 0;
         // Note: We don't clear distance_history here - it's useful for the next detection
     }
 
@@ -398,7 +402,17 @@ impl GestureState {
                 if elapsed >= max_recovery {
                     self.reset_to_idle();
                     (false, Some(RecognitionState::Idle), "safety_valve_timeout")
+                } else if distance > self.threshold * config.threshold_high_factor {
+                    // Distance-based recovery: exit when distance rises above threshold
+                    self.recovery_frames_above += 1;
+                    if self.recovery_frames_above >= 2 {
+                        self.reset_to_idle();
+                        (false, Some(RecognitionState::Idle), "distance_recovered")
+                    } else {
+                        (false, None, "")
+                    }
                 } else {
+                    self.recovery_frames_above = 0;
                     (false, None, "")
                 }
             }

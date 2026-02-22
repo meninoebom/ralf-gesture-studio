@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use tauri::State;
 
 use crate::engine::{
-    assess_example, compute_joint_weights, compute_threshold_stats, generate_augmented,
+    assess_example, compute_joint_weights, compute_threshold_stats_banded, generate_augmented,
     DiagnosticEvent, DiagnosticLogger, GestureDiag, HitLog, Preprocessor, RecognitionConfig,
     Recognizer, SessionState, TrainingConfig, TrainingSession,
 };
@@ -269,9 +269,10 @@ impl AppState {
             .map(|g| g.threshold_coefficient)
             .unwrap_or(2.0);
 
-        if let Some(stats) = compute_threshold_stats(&examples, coefficient) {
+        if let Some(stats) = compute_threshold_stats_banded(&examples, coefficient, 4, 0.15) {
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
                 gesture.update_statistics(stats.mean, stats.std);
+                gesture.outlier_example_indices = stats.outlier_indices.clone();
                 self.recognizer.set_threshold(gesture_id, gesture.threshold);
 
                 // Log training completion
@@ -526,6 +527,9 @@ pub struct GestureDto {
     osc_address: String,
     threshold: f32,
     examples: Vec<ExampleDto>,
+    distance_mean: Option<f32>,
+    distance_std: Option<f32>,
+    outlier_example_indices: Vec<usize>,
 }
 
 #[derive(Serialize)]
@@ -649,6 +653,9 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
                         recorded_at: e.recorded_at.to_rfc3339(),
                     })
                     .collect(),
+                distance_mean: g.distance_mean,
+                distance_std: g.distance_std,
+                outlier_example_indices: g.outlier_example_indices.clone(),
             })
             .collect(),
         augmentation: AugmentationConfigDto {

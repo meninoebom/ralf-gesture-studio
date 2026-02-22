@@ -196,10 +196,10 @@ mod tests {
     }
 
     #[test]
-    fn test_preprocessing_config_defaults_off() {
+    fn test_preprocessing_config_defaults_on() {
         let vocab = Vocabulary::new("Test");
-        assert!(!vocab.preprocessing.hip_normalize);
-        assert!(!vocab.preprocessing.scale_normalize);
+        assert!(vocab.preprocessing.hip_normalize);
+        assert!(vocab.preprocessing.scale_normalize);
         assert!(!vocab.preprocessing.velocity_features);
     }
 
@@ -231,7 +231,11 @@ mod tests {
         use crate::engine::preprocess::{PreprocessingConfig, Preprocessor};
 
         // With all preprocessing OFF, output should equal input
-        let config = PreprocessingConfig::default();
+        let config = PreprocessingConfig {
+            hip_normalize: false,
+            scale_normalize: false,
+            velocity_features: false,
+        };
         let preprocessor = Preprocessor::new(config, "mediapipe-pose-33-xy");
 
         let raw_frames: Vec<Vec<f32>> = vec![vec![0.1; 66], vec![0.2; 66], vec![0.3; 66]];

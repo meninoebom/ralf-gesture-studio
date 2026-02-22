@@ -120,6 +120,11 @@ pub struct Gesture {
     /// Minimum fraction of examples below threshold to fire (default 0.5)
     #[serde(default = "default_consensus_threshold")]
     pub consensus_threshold: f32,
+
+    // --- Outlier detection (transient, not persisted) ---
+    /// Indices of examples flagged as outliers during threshold calibration
+    #[serde(skip)]
+    pub outlier_example_indices: Vec<usize>,
 }
 
 impl Gesture {
@@ -140,6 +145,8 @@ impl Gesture {
             // Consensus scoring (default OFF)
             consensus_enabled: false,
             consensus_threshold: default_consensus_threshold(),
+            // Outlier detection (transient)
+            outlier_example_indices: Vec::new(),
         }
     }
 

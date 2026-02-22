@@ -71,6 +71,28 @@
     border-radius: 50%; margin-right: 4px; vertical-align: middle; }
   .ws-status .dot.on { background: #4f4; }
   .ws-status .dot.off { background: #f44; }
+
+  .gesture-buttons {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px; width: 100%; max-width: 800px; margin-bottom: 24px;
+  }
+  .gesture-btn {
+    background: #1a1a1a; border: 2px solid #333; border-radius: 8px;
+    padding: 12px 8px; text-align: center; cursor: pointer;
+    transition: border-color 0.1s, background 0.1s;
+    user-select: none;
+  }
+  .gesture-btn:hover { background: #252525; border-color: #555; }
+  .gesture-btn:active { background: #333; }
+  .gesture-btn .g-num { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+  .gesture-btn .g-name { font-size: 11px; color: #aaa; margin-bottom: 4px; }
+  .gesture-btn .g-info { font-size: 9px; color: #666; line-height: 1.4; }
+  .gesture-btn.unassigned { opacity: 0.4; }
+  .gesture-btn.unassigned:hover { opacity: 0.6; }
+  .gesture-btn.flash {
+    border-color: #4f4 !important; background: #1a2a1a !important;
+    box-shadow: 0 0 12px rgba(68, 255, 68, 0.3);
+  }
 </style>
 </head>
 <body>
@@ -92,6 +114,8 @@
   <span>Stream: <span class="val" id="stream-val">0</span>/s</span>
   <span>Elapsed: <span class="val" id="elapsed-val">0:00</span></span>
 </div>
+
+<div class="gesture-buttons" id="gesture-buttons"></div>
 
 <div class="tracks" id="tracks"></div>
 
@@ -737,6 +761,56 @@ function initState() {
 }
 initState();
 
+// =============================================================================
+// GESTURE BUTTONS — manual trigger + flash on OSC
+// =============================================================================
+
+const GESTURE_COUNT = 10;
+
+function buildGestureButtons() {
+  const container = document.getElementById("gesture-buttons");
+  for (let i = 1; i <= GESTURE_COUNT; i++) {
+    const addr = `/gesture/${i}`;
+    const profile = gestures[addr];
+    const btn = document.createElement("div");
+    btn.className = profile ? "gesture-btn" : "gesture-btn unassigned";
+    btn.id = `gbtn-${i}`;
+
+    let info = "";
+    if (profile) {
+      const intents = (profile.intents || []).join(", ");
+      const signals = (profile.signals || []).join(", ");
+      const parts = [];
+      if (intents) parts.push(`intent: ${intents}`);
+      if (signals) parts.push(`signal: ${signals}`);
+      info = parts.join("<br>");
+    }
+
+    btn.innerHTML = `
+      <div class="g-num">${i}</div>
+      <div class="g-name">${profile ? profile.name : "unassigned"}</div>
+      <div class="g-info">${info || "&nbsp;"}</div>
+    `;
+    btn.addEventListener("click", () => triggerGestureButton(i));
+    container.appendChild(btn);
+  }
+}
+
+function triggerGestureButton(num) {
+  const addr = `/gesture/${num}`;
+  flashGestureButton(num);
+  handleGesture(addr);
+}
+
+function flashGestureButton(num) {
+  const btn = document.getElementById(`gbtn-${num}`);
+  if (!btn) return;
+  btn.classList.add("flash");
+  setTimeout(() => btn.classList.remove("flash"), 300);
+}
+
+buildGestureButtons();
+
 function elapsedMs() {
   if (startTime === 0) return 0;
   return Date.now() - startTime;
@@ -923,6 +997,8 @@ function connectWs() {
   ws.onmessage = (evt) => {
     const data = JSON.parse(evt.data);
     if (data.type === "gesture") {
+      const num = parseInt(data.address.replace("/gesture/", ""), 10);
+      if (num) flashGestureButton(num);
       handleGesture(data.address);
     }
   };

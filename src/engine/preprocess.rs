@@ -38,8 +38,8 @@ pub struct PreprocessingConfig {
 impl Default for PreprocessingConfig {
     fn default() -> Self {
         Self {
-            hip_normalize: false,
-            scale_normalize: false,
+            hip_normalize: true,
+            scale_normalize: true,
             velocity_features: false,
         }
     }

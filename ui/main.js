@@ -303,13 +303,14 @@ function buildExampleList(gesture) {
     gesture.examples.forEach((ex, idx) => {
         const time = new Date(ex.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const duration = (ex.duration_ms / 1000).toFixed(1);
+        const isOutlier = gesture.outlier_example_indices && gesture.outlier_example_indices.includes(idx);
 
         const row = document.createElement('div');
-        row.className = 'example-item';
+        row.className = 'example-item' + (isOutlier ? ' outlier' : '');
 
         const info = document.createElement('span');
         info.className = 'example-info dim';
-        info.textContent = `${time} · ${duration}s · ${ex.frame_count} frames`;
+        info.textContent = `${time} · ${duration}s · ${ex.frame_count} frames${isOutlier ? ' ⚠ outlier' : ''}`;
 
         const btn = document.createElement('button');
         btn.className = 'example-delete-btn';
@@ -727,11 +728,15 @@ async function deleteGesture(id) {
     if (!gesture) return;
 
     if (confirm(`Delete "${gesture.name}"?`)) {
-        await invoke('delete_gesture', { gestureId: id });
-        if (state.selectedGestureId === id) {
-            state.selectedGestureId = null;
+        try {
+            await invoke('delete_gesture', { gestureId: id });
+            if (state.selectedGestureId === id) {
+                state.selectedGestureId = null;
+            }
+            state.lastGesturesHash = null; // Force re-render
+        } catch (e) {
+            console.error('Failed to delete gesture:', e);
         }
-        state.lastGesturesHash = null; // Force re-render
     }
 }
 

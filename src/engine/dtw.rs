@@ -133,6 +133,84 @@ pub fn dtw_distance_constrained(seq1: &Sequence, seq2: &Sequence, band_width: us
     cost[n][m]
 }
 
+/// Subsequence DTW: find the best-matching subsequence of seq1 (window) against seq2 (template).
+///
+/// Unlike standard DTW which forces alignment from the start of both sequences,
+/// sDTW allows the template to align to any contiguous subsequence within the window.
+/// This is critical for sliding-window gesture recognition: the window may contain
+/// standing-still frames before the gesture starts, and sDTW will skip them.
+///
+/// # How it works
+/// - The first column allows free starts: `cost[i][0] = dist(window[i], template[0])`
+///   (not cumulative), so alignment can begin at any window frame.
+/// - The final distance is `min over i of cost[i][m]`, so alignment can end at any
+///   window frame too (open-end).
+/// - The template (seq2) must be fully matched.
+///
+/// # Returns
+/// `Some(distance)` if computation completes, `None` if abandoned or inputs are empty.
+pub fn sdtw_distance(
+    seq1: &Sequence,    // window (longer, may contain irrelevant prefix/suffix)
+    seq2: &Sequence,    // template (shorter, must be fully matched)
+    best_so_far: f32,
+) -> Option<f32> {
+    if seq1.is_empty() || seq2.is_empty() {
+        return None;
+    }
+
+    let n = seq1.len();
+    let m = seq2.len();
+
+    // Full matrix needed to find min over last column
+    // Using two-column approach (iterate over template, track window dimension)
+    // Actually, we iterate rows=window, cols=template, and want min of last column.
+    // Two-row approach: prev_row[j] = cost[i-1][j], curr_row[j] = cost[i][j]
+    let mut prev_row = vec![f32::INFINITY; m + 1];
+    let mut curr_row = vec![f32::INFINITY; m + 1];
+
+    // Free start: cost[0][0] through cost[n][0] are independent (not cumulative)
+    // We handle this by setting prev_row[0] for i=0 and updating curr_row[0] each row.
+    // prev_row represents cost[0][*] initially.
+    // cost[0][0] = dist(window[0], template[0]) but in our 1-indexed scheme:
+    // We need cost[i][0] = 0 for all i (free start on window, no template matched yet)
+    // Then cost[i][j] = dist(window[i], template[j]) + min(cost[i-1][j-1], cost[i-1][j], cost[i][j-1])
+    // And the answer is min over i of cost[i][m]
+
+    // Actually the standard sDTW formulation:
+    // cost[i][0] = 0 for all i   (can start matching template at any window position for free)
+    // cost[0][j] = INF for j > 0 (can't match template without window frames)
+    // Answer: min_i cost[i][m]
+
+    prev_row[0] = 0.0; // cost[0][0] = 0 (free start)
+    // prev_row[j>0] = INF (can't match template frames without window frames)
+
+    let mut best_end = f32::INFINITY;
+
+    for i in 1..=n {
+        curr_row.fill(f32::INFINITY);
+        curr_row[0] = 0.0; // Free start: can begin alignment at any window frame
+
+        for j in 1..=m {
+            let dist = euclidean_distance(&seq1[i - 1], &seq2[j - 1]);
+            let min_prev = prev_row[j - 1].min(prev_row[j]).min(curr_row[j - 1]);
+            curr_row[j] = dist + min_prev;
+        }
+
+        // Track best distance at template end (j = m)
+        if curr_row[m] < best_end {
+            best_end = curr_row[m];
+        }
+
+        std::mem::swap(&mut prev_row, &mut curr_row);
+    }
+
+    if best_end > best_so_far {
+        None
+    } else {
+        Some(best_end)
+    }
+}
+
 /// Calculate DTW distance with Sakoe-Chiba band constraint and early abandoning.
 ///
 /// This function combines two optimizations:

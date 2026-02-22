@@ -7,28 +7,41 @@ use super::dtw::{dtw_distance_with_abandon, Sequence};
 
 /// Find the medoid: the example with lowest mean distance to all others.
 /// Returns the index of the medoid, or None if fewer than 3 examples.
+///
+/// Downsamples sequences by 4x before computing pairwise DTW to keep
+/// computation tractable (10 examples = 90 DTW comparisons).
 pub fn compute_medoid(examples: &[Sequence]) -> Option<usize> {
     if examples.len() < 3 {
         return None;
     }
 
+    // Downsample to keep pairwise computation fast (matches threshold stats factor)
+    let downsample_factor = 4;
+    let downsampled: Vec<Sequence> = examples
+        .iter()
+        .map(|seq| seq.iter().step_by(downsample_factor).cloned().collect())
+        .collect();
+
     // Compute mean distance for each example to all others
     let mut best_idx = 0;
     let mut best_mean = f32::MAX;
 
-    for i in 0..examples.len() {
+    for i in 0..downsampled.len() {
         let mut total = 0.0_f32;
         let mut count = 0;
-        for j in 0..examples.len() {
+        for j in 0..downsampled.len() {
             if i == j {
                 continue;
             }
             // Use banded DTW matching recognizer params (band=0.15, no abandon)
-            let band_width = ((examples[i].len().max(examples[j].len()) as f32) * 0.15).ceil()
-                as usize;
-            if let Some(d) =
-                dtw_distance_with_abandon(&examples[i], &examples[j], band_width, f32::INFINITY)
-            {
+            let band_width = ((downsampled[i].len().max(downsampled[j].len()) as f32) * 0.15)
+                .ceil() as usize;
+            if let Some(d) = dtw_distance_with_abandon(
+                &downsampled[i],
+                &downsampled[j],
+                band_width,
+                f32::INFINITY,
+            ) {
                 total += d;
                 count += 1;
             }

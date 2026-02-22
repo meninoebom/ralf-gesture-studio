@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use super::dtw::{
     compute_lb_envelope, dtw_distance, dtw_distance_visibility_weighted, dtw_distance_with_abandon,
-    lb_keogh, visibility_to_dimension_weights, Frame, LBEnvelope, Sequence,
+    lb_keogh, sdtw_distance, visibility_to_dimension_weights, Frame, LBEnvelope, Sequence,
 };
 use super::weighting::apply_weights_to_sequence;
 
@@ -73,6 +73,11 @@ pub struct RecognitionConfig {
     /// If margin is below this ratio, the match is ambiguous and suppressed.
     /// Set to 0.0 to disable. Only active when 2+ gestures have valid distances.
     pub margin_rejection_ratio: f32,
+
+    /// Use subsequence DTW instead of standard DTW.
+    /// sDTW allows the template to match a subsequence within the window,
+    /// ignoring irrelevant prefix/suffix frames (e.g., standing still before gesture).
+    pub use_subsequence_dtw: bool,
 }
 
 impl Default for RecognitionConfig {
@@ -91,6 +96,7 @@ impl Default for RecognitionConfig {
             sakoe_chiba_band: 0.15,
             // Margin rejection: require 15% gap between best and second-best
             margin_rejection_ratio: 0.15,
+            use_subsequence_dtw: false,
         }
     }
 }
@@ -576,6 +582,7 @@ impl Recognizer {
         sakoe_chiba_band: f32,
         best_so_far: f32,
         visibility_weights: Option<&[f32]>,
+        use_subsequence_dtw: bool,
     ) -> f32 {
         let mut best = best_so_far;
         for (i, example) in examples.iter().enumerate() {
@@ -593,7 +600,13 @@ impl Recognizer {
 
             // Layer 2: Full DTW with early abandoning
             let example_ds = Self::downsample_seq(example, downsample);
-            let dist = if sakoe_chiba_band > 0.0 {
+            let dist = if use_subsequence_dtw {
+                // Subsequence DTW: template matches best subsequence within window
+                match sdtw_distance(window, &example_ds, best) {
+                    Some(d) => d,
+                    None => continue,
+                }
+            } else if sakoe_chiba_band > 0.0 {
                 let max_len = window.len().max(example_ds.len());
                 let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
 
@@ -746,6 +759,7 @@ impl Recognizer {
                 sakoe_chiba_band,
                 best_so_far * visibility_normalizer,
                 vis_weights,
+                self.config.use_subsequence_dtw,
             );
             // Normalize visibility-weighted distance to unweighted scale
             let dist = raw_dist / visibility_normalizer;
@@ -762,6 +776,7 @@ impl Recognizer {
                     self.downsample,
                     sakoe_chiba_band,
                     gesture.threshold,
+                    self.config.use_subsequence_dtw,
                 )
             } else if gesture.consensus_enabled {
                 0.0 // Above threshold, consensus is 0
@@ -786,6 +801,7 @@ impl Recognizer {
         downsample: usize,
         sakoe_chiba_band: f32,
         threshold: f32,
+        use_subsequence_dtw: bool,
     ) -> f32 {
         if examples.is_empty() {
             return 0.0;
@@ -804,7 +820,9 @@ impl Recognizer {
 
             // Full DTW with threshold as abandon cutoff
             let example_ds = Self::downsample_seq(example, downsample);
-            let below = if sakoe_chiba_band > 0.0 {
+            let below = if use_subsequence_dtw {
+                sdtw_distance(window, &example_ds, threshold).is_some()
+            } else if sakoe_chiba_band > 0.0 {
                 let max_len = window.len().max(example_ds.len());
                 let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
                 dtw_distance_with_abandon(window, &example_ds, band_width, threshold).is_some()
@@ -834,6 +852,7 @@ impl Recognizer {
             .unwrap_or(false);
 
         // Find the best-matching gesture index
+        // Find the best-matching gesture index (lowest raw distance)
         let best_idx = distances
             .iter()
             .min_by(|(_, a, _), (_, b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))

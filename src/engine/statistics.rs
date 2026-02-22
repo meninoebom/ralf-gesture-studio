@@ -20,7 +20,7 @@
 //! Based on the Gesture Recognition Toolkit (GRT) by Nick Gillian:
 //! https://github.com/nickgillian/grt
 
-use super::dtw::{dtw_distance, dtw_distance_with_abandon, Sequence};
+use super::dtw::{dtw_distance, dtw_distance_with_abandon, sdtw_distance, Sequence};
 
 /// Statistics computed from training examples for threshold calibration.
 #[derive(Debug, Clone)]
@@ -267,6 +267,132 @@ pub fn compute_threshold_stats_banded(
         }
         if clean.is_empty() {
             all_distances.clone() // Fall back if all are outliers
+        } else {
+            clean
+        }
+    };
+
+    let n = final_distances.len() as f32;
+    let mean = final_distances.iter().sum::<f32>() / n;
+    let variance = final_distances
+        .iter()
+        .map(|d| (d - mean).powi(2))
+        .sum::<f32>()
+        / n;
+    let std = variance.sqrt();
+    let threshold = mean + std * coefficient;
+
+    Some(ThresholdStats {
+        mean,
+        std,
+        threshold,
+        sample_count: all_distances.len(),
+        outlier_indices,
+    })
+}
+
+/// Compute threshold statistics using subsequence DTW for pairwise distances.
+///
+/// Same as `compute_threshold_stats_banded` but uses sDTW, which finds the
+/// best-matching subsequence between each pair. This should be used when
+/// recognition will use sDTW for distance computation.
+pub fn compute_threshold_stats_sdtw(
+    examples: &[Sequence],
+    coefficient: f32,
+    downsample_factor: usize,
+) -> Option<ThresholdStats> {
+    if examples.len() < 2 {
+        return None;
+    }
+
+    let downsampled: Vec<Sequence> = examples
+        .iter()
+        .map(|seq| {
+            if downsample_factor <= 1 {
+                seq.clone()
+            } else {
+                seq.iter().step_by(downsample_factor).cloned().collect()
+            }
+        })
+        .collect();
+
+    let n_examples = downsampled.len();
+    let mut all_distances: Vec<f32> = Vec::new();
+    let mut per_example_sums: Vec<f32> = vec![0.0; n_examples];
+    let mut per_example_counts: Vec<usize> = vec![0; n_examples];
+
+    for i in 0..n_examples {
+        for j in (i + 1)..n_examples {
+            if let Some(dist) = sdtw_distance(
+                &downsampled[i],
+                &downsampled[j],
+                f32::INFINITY,
+            ) {
+                if dist.is_finite() {
+                    all_distances.push(dist);
+                    per_example_sums[i] += dist;
+                    per_example_sums[j] += dist;
+                    per_example_counts[i] += 1;
+                    per_example_counts[j] += 1;
+                }
+            }
+        }
+    }
+
+    if all_distances.is_empty() {
+        return None;
+    }
+
+    let per_example_means: Vec<f32> = (0..n_examples)
+        .map(|i| {
+            if per_example_counts[i] == 0 {
+                f32::INFINITY
+            } else {
+                per_example_sums[i] / per_example_counts[i] as f32
+            }
+        })
+        .collect();
+
+    let finite_means: Vec<f32> = per_example_means
+        .iter()
+        .copied()
+        .filter(|d| d.is_finite())
+        .collect();
+    let pem_mean = finite_means.iter().sum::<f32>() / finite_means.len() as f32;
+    let pem_std = {
+        let var = finite_means
+            .iter()
+            .map(|d| (d - pem_mean).powi(2))
+            .sum::<f32>()
+            / finite_means.len() as f32;
+        var.sqrt()
+    };
+
+    let outlier_cutoff = pem_mean + 2.0 * pem_std;
+    let outlier_indices: Vec<usize> = per_example_means
+        .iter()
+        .enumerate()
+        .filter(|(_, &m)| m > outlier_cutoff && m.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+
+    let final_distances: Vec<f32> = if outlier_indices.is_empty() {
+        all_distances.clone()
+    } else {
+        let mut clean = Vec::new();
+        let mut idx = 0;
+        for i in 0..n_examples {
+            for j in (i + 1)..n_examples {
+                if idx < all_distances.len() {
+                    if !outlier_indices.contains(&i) && !outlier_indices.contains(&j) {
+                        clean.push(all_distances[idx]);
+                    }
+                    idx += 1;
+                }
+            }
+        }
+        if clean.is_empty() {
+            all_distances.clone()
         } else {
             clean
         }

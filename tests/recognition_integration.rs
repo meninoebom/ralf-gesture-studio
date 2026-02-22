@@ -284,6 +284,7 @@ fn test_config() -> RecognitionConfig {
         global_cooldown_ms: 200,
         sakoe_chiba_band: 0.15,
         margin_rejection_ratio: 0.0, // disabled for tests — single-gesture scenarios
+        use_subsequence_dtw: false,
     }
 }
 
@@ -703,5 +704,308 @@ fn real_data_no_cross_trigger() {
             name,
             wrong_hits
         );
+    }
+}
+
+// ============================================================================
+// Benchmark: Performance Criteria
+// ============================================================================
+//
+// Leave-one-out cross-validation on the benchmark vocabulary.
+// For each gesture, each example takes a turn as the "live performance"
+// while the remaining N-1 examples serve as training data.
+//
+// Targets:
+//   - Hit rate >= 90% (correct gesture fires)
+//   - False positive rate <= 5% (wrong gesture fires)
+//   - Detection latency < 800ms (~12 frames at 15Hz DTW)
+
+/// Parsed fixture: gestures + preprocessing config from the vocabulary.
+struct Fixture {
+    gestures: Vec<(String, Vec<Vec<Vec<f32>>>)>,
+    preprocessing: PreprocessingConfig,
+}
+
+/// Parse a .ralf fixture into gestures and its preprocessing config.
+fn load_fixture(filename: &str) -> Fixture {
+    let fixture_path = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), filename);
+    let content = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", fixture_path, e));
+    let vocab: serde_json::Value = serde_json::from_str(&content).expect("Invalid JSON");
+
+    let preprocessing = if let Some(pp) = vocab.get("preprocessing") {
+        PreprocessingConfig {
+            hip_normalize: pp["hip_normalize"].as_bool().unwrap_or(false),
+            scale_normalize: pp["scale_normalize"].as_bool().unwrap_or(false),
+            velocity_features: pp["velocity_features"].as_bool().unwrap_or(false),
+            angle_features: pp["angle_features"].as_bool().unwrap_or(false),
+        }
+    } else {
+        no_preprocessing()
+    };
+
+    let gestures = vocab["gestures"]
+        .as_array()
+        .expect("gestures array")
+        .iter()
+        .map(|g| {
+            let name = g["name"].as_str().unwrap().to_string();
+            let examples: Vec<Vec<Vec<f32>>> = g["examples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|ex| {
+                    ex["frames"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|frame| {
+                            frame
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|v| v.as_f64().unwrap() as f32)
+                                .collect()
+                        })
+                        .collect()
+                })
+                .collect();
+            (name, examples)
+        })
+        .collect();
+
+    Fixture {
+        gestures,
+        preprocessing,
+    }
+}
+
+/// Recognition config for benchmark — matches app defaults but with
+/// margin rejection disabled. The benchmark measures raw recognition
+/// quality; margin rejection is a separate layer tested independently.
+fn benchmark_config() -> RecognitionConfig {
+    RecognitionConfig {
+        cooldown_ms: 200,
+        threshold_high_factor: 1.0,
+        frames_to_fire: 2,
+        max_recovery_ms: 5000,
+        global_cooldown_ms: 200,
+        sakoe_chiba_band: 0.15,
+        margin_rejection_ratio: 0.0,
+        use_subsequence_dtw: true, // sDTW: template matches best subsequence within window
+    }
+}
+
+/// Run leave-one-out recognition for one holdout example.
+/// Returns (correct_hit: bool, false_positive: Option<String>).
+fn run_holdout_trial(
+    all_gestures: &[(String, Vec<Vec<Vec<f32>>>)],
+    preprocessing: &PreprocessingConfig,
+    target_gesture_idx: usize,
+    holdout_idx: usize,
+) -> (bool, Option<String>) {
+    let preprocessor = Preprocessor::new(preprocessing.clone(), "mediapipe-pose-33-xy");
+    let config = benchmark_config();
+    let use_sdtw = config.use_subsequence_dtw;
+    let mut recognizer = Recognizer::with_config(600, 0, config);
+
+    // Train all gestures, excluding the holdout example from the target gesture
+    for (i, (name, examples)) in all_gestures.iter().enumerate() {
+        let gesture_id = (i + 1) as u32;
+        recognizer.add_gesture(gesture_id, name, &format!("/gesture/{}", gesture_id), 0.0);
+
+        let training: Vec<&Vec<Vec<f32>>> = if i == target_gesture_idx {
+            examples
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != holdout_idx)
+                .map(|(_, e)| e)
+                .collect()
+        } else {
+            examples.iter().collect()
+        };
+
+        let processed: Vec<Vec<Vec<f32>>> = training
+            .iter()
+            .map(|e| preprocessor.process_sequence(e))
+            .collect();
+
+        for example in &processed {
+            recognizer.add_example(gesture_id, example.clone());
+        }
+
+        let stats = if use_sdtw {
+            ralf_gesture_studio::engine::statistics::compute_threshold_stats_sdtw(
+                &processed, 3.0, 4,
+            )
+        } else {
+            ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(
+                &processed, 3.0, 4, 0.15,
+            )
+        };
+        if let Some(stats) = stats {
+            recognizer.set_threshold(gesture_id, stats.threshold);
+        }
+    }
+
+    recognizer.start();
+
+    // Build live sequence: standing lead-in → holdout → standing tail
+    let holdout = &all_gestures[target_gesture_idx].1[holdout_idx];
+    let standing_frame = holdout[0].clone();
+    let mut live: Vec<Vec<f32>> = vec![standing_frame.clone(); 200];
+    live.extend(holdout.iter().cloned());
+    live.extend(vec![standing_frame; 100]);
+
+    // Replay and track per-gesture minimum distances
+    let mut preprocessor_live = Preprocessor::new(preprocessing.clone(), "mediapipe-pose-33-xy");
+    let target_name = &all_gestures[target_gesture_idx].0;
+    let mut correct_hit = false;
+    let mut false_positive: Option<String> = None;
+
+    for frame in &live {
+        let processed = preprocessor_live.process_frame(frame);
+        if let Some(result) = recognizer.process_frame(processed) {
+            if let Some(ref hit_name) = result.gesture_name {
+                if hit_name == target_name {
+                    correct_hit = true;
+                } else {
+                    false_positive = Some(hit_name.clone());
+                }
+            }
+        }
+    }
+
+    (correct_hit, false_positive)
+}
+
+#[test]
+fn benchmark_hit_rate() {
+    let fixture = load_fixture("benchmark.ralf");
+    let mut total_trials = 0;
+    let mut correct_hits = 0;
+    let mut false_positives = 0;
+    let mut misses: Vec<String> = Vec::new();
+    let mut fp_details: Vec<String> = Vec::new();
+
+    // Override: test with no preprocessing
+    let preprocessing = no_preprocessing();
+
+    for (gesture_idx, (name, examples)) in fixture.gestures.iter().enumerate() {
+        for holdout_idx in 0..examples.len() {
+            total_trials += 1;
+            let (hit, fp) = run_holdout_trial(
+                &fixture.gestures,
+                &preprocessing,
+                gesture_idx,
+                holdout_idx,
+            );
+
+            if hit {
+                correct_hits += 1;
+            } else {
+                misses.push(format!("{}[{}]", name, holdout_idx));
+            }
+
+            if let Some(wrong_name) = fp {
+                false_positives += 1;
+                fp_details.push(format!(
+                    "{}[{}] triggered '{}'",
+                    name, holdout_idx, wrong_name
+                ));
+            }
+        }
+    }
+
+    let hit_rate = correct_hits as f64 / total_trials as f64;
+    let fp_rate = false_positives as f64 / total_trials as f64;
+
+    eprintln!("\n=== Benchmark Results ===");
+    eprintln!(
+        "Hit rate:  {}/{} ({:.1}%)",
+        correct_hits,
+        total_trials,
+        hit_rate * 100.0
+    );
+    eprintln!(
+        "FP rate:   {}/{} ({:.1}%)",
+        false_positives,
+        total_trials,
+        fp_rate * 100.0
+    );
+    if !misses.is_empty() {
+        eprintln!("Misses:    {:?}", misses);
+    }
+    if !fp_details.is_empty() {
+        eprintln!("FPs:       {:?}", fp_details);
+    }
+    eprintln!("=========================\n");
+
+    assert!(
+        hit_rate >= 0.90,
+        "Hit rate {:.1}% is below 90% target. Misses: {:?}",
+        hit_rate * 100.0,
+        misses
+    );
+    assert!(
+        fp_rate <= 0.05,
+        "False positive rate {:.1}% exceeds 5% target. Details: {:?}",
+        fp_rate * 100.0,
+        fp_details
+    );
+}
+
+/// Diagnostic: print raw DTW distances for each holdout to understand confusion patterns.
+#[test]
+#[ignore] // Run with: cargo test diag_distances -- --ignored --nocapture
+fn diag_distances() {
+    let fixture = load_fixture("benchmark.ralf");
+    let preprocessing = no_preprocessing();
+    let preprocessor = Preprocessor::new(preprocessing.clone(), "mediapipe-pose-33-xy");
+
+    let mut gesture_templates: Vec<(String, Vec<Vec<Vec<f32>>>)> = Vec::new();
+    for (name, examples) in &fixture.gestures {
+        let processed: Vec<Vec<Vec<f32>>> = examples
+            .iter()
+            .map(|e| preprocessor.process_sequence(e))
+            .collect();
+        gesture_templates.push((name.clone(), processed));
+    }
+
+    for (target_idx, (target_name, target_examples)) in gesture_templates.iter().enumerate() {
+        eprintln!("\n--- {} holdout distances (threshold from file) ---", target_name);
+        for holdout_idx in 0..target_examples.len() {
+            let holdout = &target_examples[holdout_idx];
+            eprint!("  [{}]:", holdout_idx);
+            for (gi, (gname, gexamples)) in gesture_templates.iter().enumerate() {
+                let templates: Vec<&Vec<Vec<f32>>> = if gi == target_idx {
+                    gexamples
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != holdout_idx)
+                        .map(|(_, e)| e)
+                        .collect()
+                } else {
+                    gexamples.iter().collect()
+                };
+
+                let mut min_dist = f32::MAX;
+                for tmpl in &templates {
+                    let band =
+                        ((holdout.len().max(tmpl.len()) as f32) * 0.15).ceil() as usize;
+                    if let Some(d) =
+                        ralf_gesture_studio::engine::dtw::dtw_distance_with_abandon(
+                            holdout, tmpl, band, f32::INFINITY,
+                        )
+                    {
+                        if d < min_dist {
+                            min_dist = d;
+                        }
+                    }
+                }
+                eprint!("  {}={:.1}", gname, min_dist);
+            }
+            eprintln!();
+        }
     }
 }

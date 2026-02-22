@@ -965,7 +965,6 @@ impl Recognizer {
             .map(|t| t.elapsed() < Duration::from_millis(self.config.global_cooldown_ms))
             .unwrap_or(false);
 
-        // Find the best-matching gesture index
         // Find the best-matching gesture index (lowest raw distance)
         let best_idx = distances
             .iter()

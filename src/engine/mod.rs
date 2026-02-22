@@ -36,6 +36,6 @@ pub use preprocess::Preprocessor;
 pub use quality::{assess_example, compute_gesture_consistency};
 pub use recognizer::{HitLog, RecognitionConfig, Recognizer};
 pub use smoothing::PoseSmoother;
-pub use statistics::{compute_threshold_stats_banded, compute_threshold_stats_sdtw, detect_confusion_pairs};
+pub use statistics::{compute_threshold_stats_banded, compute_threshold_stats_sdtw, compute_threshold_f1, detect_confusion_pairs};
 pub use training::{SessionState, TrainingConfig, TrainingSession};
 pub use weighting::compute_joint_weights;

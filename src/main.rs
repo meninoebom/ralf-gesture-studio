@@ -44,6 +44,7 @@ fn main() {
             gui::set_augmentation_enabled,
             gui::set_joint_weighting,
             gui::set_complexity_correction,
+            gui::set_f1_threshold,
             gui::set_consensus,
         ])
         .run(tauri::generate_context!())

@@ -316,6 +316,11 @@ pub struct Vocabulary {
     #[serde(default)]
     pub complexity_correction: bool,
 
+    /// Enable F1-optimized thresholds (default OFF)
+    /// Uses negative examples from other gestures to find discriminative thresholds.
+    #[serde(default)]
+    pub f1_threshold: bool,
+
     /// Baseline frames (deprecated - kept for file compatibility)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Vec<Vec<f32>>>,
@@ -357,6 +362,8 @@ impl Vocabulary {
             joint_weighting: false,
             // Complexity correction (default OFF)
             complexity_correction: false,
+            // F1-optimized thresholds (default OFF)
+            f1_threshold: false,
             // Legacy/internal fields
             baseline: None,
             gestures: Vec::new(),

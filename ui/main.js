@@ -78,6 +78,7 @@ function cacheElements() {
     elements.btnAugmentation = document.getElementById('btn-augmentation');
     elements.btnJointWeighting = document.getElementById('btn-joint-weighting');
     elements.btnComplexityCorrection = document.getElementById('btn-complexity-correction');
+    elements.btnF1Threshold = document.getElementById('btn-f1-threshold');
     elements.confusionWarning = document.getElementById('confusion-warning');
 
     elements.performancePanel = document.getElementById('performance-panel');
@@ -169,6 +170,7 @@ function setupEventListeners() {
     // Joint weighting toggle
     elements.btnJointWeighting.addEventListener('click', toggleJointWeighting);
     elements.btnComplexityCorrection.addEventListener('click', toggleComplexityCorrection);
+    elements.btnF1Threshold.addEventListener('click', toggleF1Threshold);
 
     // Diagnostics toggle
     elements.btnToggleDiagnostics.addEventListener('click', toggleDiagnostics);
@@ -233,6 +235,10 @@ function updateFromState(appState) {
         const cc = appState.vocabulary.complexity_correction;
         elements.btnComplexityCorrection.textContent = cc ? 'ON' : 'OFF';
         elements.btnComplexityCorrection.classList.toggle('active', cc);
+
+        const f1 = appState.vocabulary.f1_threshold;
+        elements.btnF1Threshold.textContent = f1 ? 'ON' : 'OFF';
+        elements.btnF1Threshold.classList.toggle('active', f1);
 
         // Confusion warnings
         const pairs = appState.vocabulary.confusion_pairs || [];
@@ -826,6 +832,11 @@ async function toggleJointWeighting() {
 async function toggleComplexityCorrection() {
     const isCurrentlyEnabled = elements.btnComplexityCorrection.textContent !== 'OFF';
     await invoke('set_complexity_correction', { enabled: !isCurrentlyEnabled });
+}
+
+async function toggleF1Threshold() {
+    const isCurrentlyEnabled = elements.btnF1Threshold.textContent !== 'OFF';
+    await invoke('set_f1_threshold', { enabled: !isCurrentlyEnabled });
 }
 
 async function toggleDiagnostics() {

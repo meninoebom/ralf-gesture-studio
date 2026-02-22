@@ -5,7 +5,7 @@ use tauri::State;
 
 use ralf_gesture_studio::engine::{
     assess_example, compute_gesture_consistency, compute_joint_weights, compute_medoid,
-    compute_threshold_stats_banded, compute_threshold_stats_sdtw, detect_confusion_pairs, generate_augmented,
+    compute_threshold_stats_banded, compute_threshold_stats_sdtw, compute_threshold_f1, detect_confusion_pairs, generate_augmented,
     DiagnosticEvent, DiagnosticLogger,
     GestureDiag, HitLog, PoseSmoother, Preprocessor, RecognitionConfig, Recognizer, SessionState,
     TrainingConfig, TrainingSession,
@@ -345,7 +345,22 @@ impl AppState {
             .map(|g| g.threshold_coefficient)
             .unwrap_or(2.0);
 
-        let stats = if self.recognition_config.use_subsequence_dtw {
+        let stats = if self.vocabulary.f1_threshold && self.recognition_config.use_subsequence_dtw {
+            // F1-optimized: collect negative examples from other gestures
+            let negatives: Vec<Vec<Vec<f32>>> = self
+                .vocabulary
+                .gestures
+                .iter()
+                .filter(|g| g.id != gesture_id && !g.examples.is_empty())
+                .flat_map(|g| {
+                    g.examples
+                        .iter()
+                        .map(|e| self.preprocessor.process_sequence(&e.frames))
+                })
+                .collect();
+
+            compute_threshold_f1(&examples, &negatives, 4, self.recognition_config.sakoe_chiba_band, coefficient)
+        } else if self.recognition_config.use_subsequence_dtw {
             compute_threshold_stats_sdtw(&examples, coefficient, 4, self.recognition_config.sakoe_chiba_band)
         } else {
             compute_threshold_stats_banded(&examples, coefficient, 4, 0.15)
@@ -603,6 +618,7 @@ pub struct VocabularyDto {
     augmentation: AugmentationConfigDto,
     joint_weighting: bool,
     complexity_correction: bool,
+    f1_threshold: bool,
     confusion_pairs: Vec<ConfusionPairDto>,
 }
 
@@ -771,6 +787,7 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
         },
         joint_weighting: app.vocabulary.joint_weighting,
         complexity_correction: app.vocabulary.complexity_correction,
+        f1_threshold: app.vocabulary.f1_threshold,
         confusion_pairs: app
             .confusion_pairs
             .iter()
@@ -1352,6 +1369,23 @@ pub fn set_complexity_correction(
 ) -> Result<(), String> {
     let mut app = state.lock().map_err(|e| e.to_string())?;
     app.vocabulary.complexity_correction = enabled;
+    app.sync_recognizer();
+    app.mark_dirty();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_f1_threshold(
+    state: State<Arc<Mutex<AppState>>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut app = state.lock().map_err(|e| e.to_string())?;
+    app.vocabulary.f1_threshold = enabled;
+    // Recompute all thresholds with F1 optimization
+    let gesture_ids: Vec<u32> = app.vocabulary.gestures.iter().map(|g| g.id).collect();
+    for gid in gesture_ids {
+        app.compute_gesture_statistics(gid);
+    }
     app.sync_recognizer();
     app.mark_dirty();
     Ok(())

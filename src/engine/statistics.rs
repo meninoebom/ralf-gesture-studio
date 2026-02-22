@@ -37,6 +37,8 @@ pub struct ThresholdStats {
     pub sample_count: usize,
     /// Indices of examples flagged as outliers (mean distance > overall_mean + 2*sigma)
     pub outlier_indices: Vec<usize>,
+    /// F1 score when threshold was computed via F1 optimization (None for μ+σ)
+    pub f1_score: Option<f32>,
 }
 
 /// Compute threshold statistics from a set of training examples.
@@ -105,6 +107,7 @@ pub fn compute_threshold_stats(examples: &[Sequence], coefficient: f32) -> Optio
         threshold,
         sample_count: all_distances.len(),
         outlier_indices: vec![],
+        f1_score: None,
     })
 }
 
@@ -288,6 +291,7 @@ pub fn compute_threshold_stats_banded(
         threshold,
         sample_count: all_distances.len(),
         outlier_indices,
+        f1_score: None,
     })
 }
 
@@ -418,6 +422,211 @@ pub fn compute_threshold_stats_sdtw(
         threshold,
         sample_count: all_distances.len(),
         outlier_indices,
+        f1_score: None,
+    })
+}
+
+/// Compute F1-optimized threshold using positive and negative distance distributions.
+///
+/// Instead of the heuristic μ+σ approach, this sweeps candidate thresholds against
+/// both positive distances (within-gesture pairwise DTW) and negative distances
+/// (cross-gesture DTW), picking the threshold that maximizes F1-score.
+///
+/// # Arguments
+/// * `positives` - Training examples for this gesture
+/// * `negatives` - Examples from OTHER gestures (used as negative samples)
+/// * `downsample_factor` - Take every Nth frame (must match recognizer's downsample)
+/// * `sakoe_chiba_band` - Fractional band width (must match recognizer's band)
+/// * `coefficient` - Fallback μ+σ coefficient if F1 optimization fails
+///
+/// # Returns
+/// * `Some(ThresholdStats)` with F1-optimal threshold, or μ+σ fallback
+/// * `None` if fewer than 2 positive examples
+pub fn compute_threshold_f1(
+    positives: &[Sequence],
+    negatives: &[Sequence],
+    downsample_factor: usize,
+    sakoe_chiba_band: f32,
+    coefficient: f32,
+) -> Option<ThresholdStats> {
+    if positives.len() < 2 {
+        return None;
+    }
+
+    // Downsample all examples
+    let ds_pos: Vec<Sequence> = positives
+        .iter()
+        .map(|seq| {
+            if downsample_factor <= 1 {
+                seq.clone()
+            } else {
+                seq.iter().step_by(downsample_factor).cloned().collect()
+            }
+        })
+        .collect();
+
+    let ds_neg: Vec<Sequence> = negatives
+        .iter()
+        .map(|seq| {
+            if downsample_factor <= 1 {
+                seq.clone()
+            } else {
+                seq.iter().step_by(downsample_factor).cloned().collect()
+            }
+        })
+        .collect();
+
+    // 1. Positive distances: pairwise sDTW within this gesture's examples
+    let mut positive_distances: Vec<f32> = Vec::new();
+    let mut per_example_sums: Vec<f32> = vec![0.0; ds_pos.len()];
+    let mut per_example_counts: Vec<usize> = vec![0; ds_pos.len()];
+
+    for i in 0..ds_pos.len() {
+        for j in (i + 1)..ds_pos.len() {
+            let max_len = ds_pos[i].len().max(ds_pos[j].len());
+            let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
+            if let Some(dist) = sdtw_distance(&ds_pos[i], &ds_pos[j], band_width, f32::INFINITY) {
+                if dist.is_finite() {
+                    positive_distances.push(dist);
+                    per_example_sums[i] += dist;
+                    per_example_sums[j] += dist;
+                    per_example_counts[i] += 1;
+                    per_example_counts[j] += 1;
+                }
+            }
+        }
+    }
+
+    if positive_distances.is_empty() {
+        return None;
+    }
+
+    // Outlier detection (same as existing functions)
+    let per_example_means: Vec<f32> = (0..ds_pos.len())
+        .map(|i| {
+            if per_example_counts[i] == 0 {
+                f32::INFINITY
+            } else {
+                per_example_sums[i] / per_example_counts[i] as f32
+            }
+        })
+        .collect();
+
+    let finite_means: Vec<f32> = per_example_means
+        .iter()
+        .copied()
+        .filter(|d| d.is_finite())
+        .collect();
+    let pem_mean = finite_means.iter().sum::<f32>() / finite_means.len() as f32;
+    let pem_std = {
+        let var = finite_means
+            .iter()
+            .map(|d| (d - pem_mean).powi(2))
+            .sum::<f32>()
+            / finite_means.len() as f32;
+        var.sqrt()
+    };
+    let outlier_cutoff = pem_mean + 2.0 * pem_std;
+    let outlier_indices: Vec<usize> = per_example_means
+        .iter()
+        .enumerate()
+        .filter(|(_, &m)| m > outlier_cutoff && m.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+
+    // Compute mean/std of positive distances (for stats reporting)
+    let n = positive_distances.len() as f32;
+    let mean = positive_distances.iter().sum::<f32>() / n;
+    let variance = positive_distances
+        .iter()
+        .map(|d| (d - mean).powi(2))
+        .sum::<f32>()
+        / n;
+    let std = variance.sqrt();
+
+    // 2. If no negatives, fall back to μ+σ
+    if ds_neg.is_empty() {
+        return Some(ThresholdStats {
+            mean,
+            std,
+            threshold: mean + std * coefficient,
+            sample_count: positive_distances.len(),
+            outlier_indices,
+            f1_score: None,
+        });
+    }
+
+    // 3. Negative distances: each negative example against each positive example
+    let mut negative_distances: Vec<f32> = Vec::new();
+    for neg in &ds_neg {
+        for pos in &ds_pos {
+            let max_len = neg.len().max(pos.len());
+            let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
+            if let Some(dist) = sdtw_distance(neg, pos, band_width, f32::INFINITY) {
+                if dist.is_finite() {
+                    negative_distances.push(dist);
+                }
+            }
+        }
+    }
+
+    // If no valid negative distances, fall back to μ+σ
+    if negative_distances.is_empty() {
+        return Some(ThresholdStats {
+            mean,
+            std,
+            threshold: mean + std * coefficient,
+            sample_count: positive_distances.len(),
+            outlier_indices,
+            f1_score: None,
+        });
+    }
+
+    // 4. Threshold sweep: 200 steps across the combined range
+    let all_min = positive_distances
+        .iter()
+        .chain(negative_distances.iter())
+        .cloned()
+        .fold(f32::INFINITY, f32::min);
+    let all_max = positive_distances
+        .iter()
+        .chain(negative_distances.iter())
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let steps = 200;
+    let step_size = (all_max - all_min) / steps as f32;
+
+    let mut best_f1 = 0.0_f32;
+    let mut best_threshold = mean + std * coefficient; // fallback
+
+    for s in 0..=steps {
+        let candidate = all_min + step_size * s as f32;
+
+        // TP: positive distances below threshold (correctly accepted)
+        let tp = positive_distances.iter().filter(|&&d| d <= candidate).count() as f32;
+        // FP: negative distances below threshold (incorrectly accepted)
+        let fp = negative_distances.iter().filter(|&&d| d <= candidate).count() as f32;
+        // FN: positive distances above threshold (incorrectly rejected)
+        let fn_ = positive_distances.iter().filter(|&&d| d > candidate).count() as f32;
+
+        let denom = 2.0 * tp + fp + fn_;
+        if denom > 0.0 {
+            let f1 = 2.0 * tp / denom;
+            if f1 > best_f1 {
+                best_f1 = f1;
+                best_threshold = candidate;
+            }
+        }
+    }
+
+    Some(ThresholdStats {
+        mean,
+        std,
+        threshold: best_threshold,
+        sample_count: positive_distances.len(),
+        outlier_indices,
+        f1_score: Some(best_f1),
     })
 }
 

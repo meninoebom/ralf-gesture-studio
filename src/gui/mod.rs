@@ -3,16 +3,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
-use crate::engine::{
+use ralf_gesture_studio::engine::{
     assess_example, compute_joint_weights, compute_threshold_stats_banded, generate_augmented,
     DiagnosticEvent, DiagnosticLogger, GestureDiag, HitLog, Preprocessor, RecognitionConfig,
     Recognizer, SessionState, TrainingConfig, TrainingSession,
 };
-use crate::model::{
+use ralf_gesture_studio::model::{
     default_vocabulary_dir, load_vocabulary as model_load_vocabulary,
     save_vocabulary as model_save_vocabulary,
 };
-use crate::model::{Example, Vocabulary};
+use ralf_gesture_studio::model::{Example, Vocabulary};
 use crate::osc::{ConnectionStatus, OscReceiverHandle, OscSender, ReceivedFrame, SenderStatus};
 
 /// The two modes of the application
@@ -116,7 +116,7 @@ impl AppState {
     /// Rebuilds the recognizer from scratch: preprocess → weight → augment → add.
     /// This is the canonical rebuild path — called after loading, training, or toggling features.
     fn sync_recognizer(&mut self) {
-        use crate::engine::weighting::apply_weights_to_sequence;
+        use ralf_gesture_studio::engine::weighting::apply_weights_to_sequence;
 
         let was_active = self.recognizer.is_active();
 

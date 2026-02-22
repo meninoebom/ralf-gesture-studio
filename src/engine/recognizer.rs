@@ -30,11 +30,6 @@ use super::weighting::apply_weights_to_sequence;
 /// Number of distance samples to keep for slope checking
 const DISTANCE_HISTORY_SIZE: usize = 3;
 
-/// Slope tolerance for entry detection (fraction of current distance).
-/// A slope below this threshold is considered "falling" or "flat minimum".
-/// 0.05 = 5% tolerance (e.g., if distance is 1000, slope up to 50 is allowed).
-const SLOPE_TOLERANCE: f32 = 0.05;
-
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -287,22 +282,23 @@ impl GestureState {
         // Note: We don't clear distance_history here - it's useful for the next detection
     }
 
-    /// Check if distance is falling (negative slope) or flat
-    /// Returns true if distance is decreasing or at a flat minimum
-    /// This helps avoid false triggers on noise/echo with flat minima
+    /// Check if distance is actively falling (negative slope).
+    /// Returns true only when distance is decreasing — indicating the user
+    /// is approaching a gesture. Flat or rising distances are rejected to
+    /// prevent false triggers from resting poses that happen to be below threshold.
+    ///
+    /// Note: record_distance() is called before this, so the current distance
+    /// is already at the back of the history. We compare against the second-to-last.
     fn is_distance_falling(&self, current: f32) -> bool {
         if self.distance_history.len() < 2 {
-            return true; // Not enough history, allow entry
+            return false; // Not enough history — wait for data rather than guess
         }
 
-        // Get previous distance
-        let prev = self.distance_history.back().copied().unwrap_or(current);
+        // Get the previous distance (second-to-last, since current is already at back)
+        let prev = self.distance_history.iter().rev().nth(1).copied().unwrap_or(current);
 
-        // Calculate slope (current - previous)
-        let slope = current - prev;
-
-        // Require negative slope (falling) or very small positive (flat minimum)
-        slope < SLOPE_TOLERANCE * current
+        // Require strictly negative slope (distance is decreasing)
+        current < prev
     }
 
     /// Record a distance value in history (for slope detection)
@@ -393,26 +389,21 @@ impl GestureState {
             }
 
             RecognitionState::Recovery => {
+                // Time-based recovery: re-arm after cooldown expires.
+                // Distance-based recovery was removed because resting distances
+                // often stay below threshold (standing still matches still portions
+                // of training examples), creating a death spiral where recovery
+                // never completes and the safety valve fires false positives.
                 let elapsed = self
                     .recovery_start
                     .map(|t| t.elapsed())
                     .unwrap_or(Duration::ZERO);
-                let max_recovery = Duration::from_millis(config.max_recovery_ms);
+                let recovery_duration = Duration::from_millis(config.cooldown_ms);
 
-                if elapsed >= max_recovery {
+                if elapsed >= recovery_duration {
                     self.reset_to_idle();
-                    (false, Some(RecognitionState::Idle), "safety_valve_timeout")
-                } else if distance > self.threshold * config.threshold_high_factor {
-                    // Distance-based recovery: exit when distance rises above threshold
-                    self.recovery_frames_above += 1;
-                    if self.recovery_frames_above >= 2 {
-                        self.reset_to_idle();
-                        (false, Some(RecognitionState::Idle), "distance_recovered")
-                    } else {
-                        (false, None, "")
-                    }
+                    (false, Some(RecognitionState::Idle), "cooldown_complete")
                 } else {
-                    self.recovery_frames_above = 0;
                     (false, None, "")
                 }
             }
@@ -1128,17 +1119,26 @@ mod tests {
         assert!(!gesture.in_cooldown(Duration::from_millis(50)));
     }
 
+    /// Helper: prime distance history with a high value so the next low value
+    /// registers as "falling" and can enter Building state.
+    fn prime_history(gesture: &mut GestureState, config: &RecognitionConfig) {
+        gesture.process_state_machine(200.0, &config, false);
+        gesture.process_state_machine(200.0, &config, false);
+    }
+
     #[test]
     fn test_state_machine_idle_to_building() {
         let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
         let config = RecognitionConfig::default();
 
-        // Distance below threshold should transition to Building
+        // Prime with high distance so the drop to 50 is "falling"
+        prime_history(&mut gesture, &config);
+
+        // Distance below threshold and falling should transition to Building
         let result = gesture.process_state_machine(50.0, &config, false);
         assert!(!result.should_fire);
         assert_eq!(gesture.recognition_state(), RecognitionState::Building);
         assert_eq!(gesture.frames_below_threshold, 1);
-        // Should have a transition
         assert!(result.transition.is_some());
         let t = result.transition.unwrap();
         assert_eq!(t.from_state, RecognitionState::Idle);
@@ -1153,7 +1153,9 @@ mod tests {
             ..Default::default()
         };
 
-        // Accumulate frames
+        prime_history(&mut gesture, &config);
+
+        // Accumulate frames (falling sequence)
         gesture.process_state_machine(50.0, &config, false); // Building, count=1
         assert_eq!(gesture.recognition_state(), RecognitionState::Building);
 
@@ -1163,7 +1165,6 @@ mod tests {
         let result = gesture.process_state_machine(40.0, &config, false); // Peak!
         assert!(result.should_fire);
         assert_eq!(gesture.recognition_state(), RecognitionState::Peak);
-        // Should have a transition to Peak
         assert!(result.transition.is_some());
         let t = result.transition.unwrap();
         assert_eq!(t.to_state, RecognitionState::Peak);
@@ -1175,14 +1176,14 @@ mod tests {
         let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
         let config = RecognitionConfig::default();
 
-        gesture.process_state_machine(50.0, &config, false); // Building
+        prime_history(&mut gesture, &config);
+        gesture.process_state_machine(50.0, &config, false); // Building (falling from 200)
         assert_eq!(gesture.recognition_state(), RecognitionState::Building);
 
         // Distance rises above threshold - should reset to Idle
         let result = gesture.process_state_machine(150.0, &config, false);
         assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
         assert_eq!(gesture.frames_below_threshold, 0);
-        // Should have a transition back to Idle
         assert!(result.transition.is_some());
         let t = result.transition.unwrap();
         assert_eq!(t.to_state, RecognitionState::Idle);
@@ -1197,7 +1198,9 @@ mod tests {
             ..Default::default()
         };
 
-        // First frame below threshold: Idle → Building → Peak (fires)
+        prime_history(&mut gesture, &config);
+
+        // Falling below threshold: Idle → Building → Peak (fires)
         let result = gesture.process_state_machine(50.0, &config, false);
         assert!(result.should_fire, "Should fire when frames_to_fire=1");
         assert_eq!(gesture.recognition_state(), RecognitionState::Peak);
@@ -1212,28 +1215,30 @@ mod tests {
     }
 
     #[test]
-    fn test_state_machine_recovery_safety_valve_timeout() {
-        // Test safety valve: forced re-arm after max_recovery_ms
+    fn test_state_machine_recovery_cooldown() {
+        // Test time-based recovery: re-arm after cooldown_ms
         let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
         let config = RecognitionConfig {
             frames_to_fire: 1,
-            max_recovery_ms: 100, // Short safety valve for test
+            cooldown_ms: 100, // Short cooldown for test
             ..Default::default()
         };
 
-        // Go to Peak and then Recovery
+        prime_history(&mut gesture, &config);
+
+        // Go to Peak and then Recovery (falling entry)
         gesture.process_state_machine(50.0, &config, false); // Peak
         gesture.process_state_machine(50.0, &config, false); // Recovery
 
-        // Distance stays low
+        // Distance stays low — doesn't matter, recovery is time-based
         gesture.process_state_machine(50.0, &config, false);
 
-        // Wait less than safety valve
+        // Wait less than cooldown
         std::thread::sleep(Duration::from_millis(60));
         gesture.process_state_machine(50.0, &config, false);
         assert_eq!(gesture.recognition_state(), RecognitionState::Recovery);
 
-        // Wait for safety valve
+        // Wait for cooldown to expire
         std::thread::sleep(Duration::from_millis(50)); // Total ~110ms > 100ms
 
         let result = gesture.process_state_machine(50.0, &config, false);
@@ -1241,7 +1246,7 @@ mod tests {
         assert!(result.transition.is_some());
         let t = result.transition.unwrap();
         assert_eq!(t.to_state, RecognitionState::Idle);
-        assert_eq!(t.reason, "safety_valve_timeout");
+        assert_eq!(t.reason, "cooldown_complete");
     }
 
     #[test]
@@ -1250,58 +1255,40 @@ mod tests {
         let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
         let config = RecognitionConfig::default();
 
-        // Distance below threshold but global cooldown active → stay in Idle
+        prime_history(&mut gesture, &config);
+
+        // Distance below threshold and falling, but global cooldown active → stay in Idle
         let result = gesture.process_state_machine(50.0, &config, true); // in_global_cooldown=true
         assert!(!result.should_fire);
         assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
         assert!(result.transition.is_none()); // No transition — suppressed by NMS
 
-        // Same distance without global cooldown → enters Building
-        let result = gesture.process_state_machine(40.0, &config, false); // in_global_cooldown=false
+        // Same distance without global cooldown → enters Building (still falling from 50 to 40)
+        let result = gesture.process_state_machine(40.0, &config, false);
         assert!(!result.should_fire);
         assert_eq!(gesture.recognition_state(), RecognitionState::Building);
     }
 
     #[test]
     fn test_state_machine_slope_check_blocks_flat_entry() {
-        // Test that slope check prevents entry on flat/rising distance
+        // Flat distances below threshold should NOT enter Building
         let mut gesture = GestureState::new(1, "wave", "/gesture/1", 100.0);
         let config = RecognitionConfig::default();
 
-        // Start with high distance, build some history
-        gesture.process_state_machine(150.0, &config, false);
-        gesture.process_state_machine(150.0, &config, false);
-        gesture.process_state_machine(150.0, &config, false);
+        // Build history with flat low values
+        gesture.process_state_machine(50.0, &config, false);
+        gesture.process_state_machine(50.0, &config, false);
+        gesture.process_state_machine(50.0, &config, false);
+
+        // Still in Idle — distance is below threshold but not falling
         assert_eq!(gesture.recognition_state(), RecognitionState::Idle);
 
-        // Drop to below threshold but flat (same value) - should NOT enter Building
-        // because distance is not falling
-        gesture.process_state_machine(50.0, &config, false); // First below threshold
-                                                             // This puts 50.0 in history, but prior was 150.0, so slope is negative (falling)
-                                                             // So this will actually enter Building because 50 < 150 means falling
-
-        // Let me test with truly flat: distance stays at same low value
+        // Rising distances below threshold should also NOT enter Building
         let mut gesture2 = GestureState::new(2, "wave2", "/gesture/2", 100.0);
-        gesture2.process_state_machine(50.0, &config, false); // History: [50]
-        gesture2.process_state_machine(50.0, &config, false); // History: [50, 50]
-        gesture2.process_state_machine(50.0, &config, false); // History: [50, 50, 50]
-
-        // Now distance is flat at 50 (below threshold)
-        // Current = 50, prev = 50, slope = 0 which is < 0.05*50 = 2.5
-        // So flat IS allowed (within 5% tolerance)
-        // This is intentional: flat minimum is OK, rising is not
-
-        // Test rising: distance starts below threshold but rises slightly
-        let mut gesture3 = GestureState::new(3, "wave3", "/gesture/3", 100.0);
-        gesture3.process_state_machine(40.0, &config, false); // History: [40]
-        gesture3.process_state_machine(45.0, &config, false); // History: [40, 45] - rising 12.5%
-                                                              // slope = 45-40 = 5, threshold = 0.05*45 = 2.25
-                                                              // 5 > 2.25, so this is rising and should NOT enter Building
-                                                              // Actually let me check: the first 40 enters Building because it's falling from infinity
-                                                              // The second 45 is still below threshold (< 100), but is it rising?
-
-        // The slope check is only applied when entering Building from Idle
-        // Once in Building, we just check if distance stays below threshold
+        gesture2.process_state_machine(40.0, &config, false);
+        gesture2.process_state_machine(50.0, &config, false); // rising
+        gesture2.process_state_machine(60.0, &config, false); // still rising
+        assert_eq!(gesture2.recognition_state(), RecognitionState::Idle);
     }
 
     #[test]

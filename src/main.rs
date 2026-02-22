@@ -1,6 +1,4 @@
-mod engine;
 mod gui;
-mod model;
 mod osc;
 
 use gui::AppState;
@@ -57,7 +55,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{load_vocabulary, save_vocabulary, Example, Vocabulary};
+    use ralf_gesture_studio::model::{load_vocabulary, save_vocabulary, Example, Vocabulary};
     use tempfile::tempdir;
 
     #[test]
@@ -205,7 +203,7 @@ mod tests {
 
     #[test]
     fn test_preprocessing_config_roundtrip() {
-        use crate::engine::preprocess::PreprocessingConfig;
+        use ralf_gesture_studio::engine::preprocess::PreprocessingConfig;
 
         let mut vocab = Vocabulary::new("Test Preprocessing");
         vocab.preprocessing = PreprocessingConfig {
@@ -228,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_passthrough_preprocessing_matches_raw() {
-        use crate::engine::preprocess::{PreprocessingConfig, Preprocessor};
+        use ralf_gesture_studio::engine::preprocess::{PreprocessingConfig, Preprocessor};
 
         // With all preprocessing OFF, output should equal input
         let config = PreprocessingConfig {
@@ -269,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_augmentation_config_roundtrip() {
-        use crate::engine::augmentation::AugmentationConfig;
+        use ralf_gesture_studio::engine::augmentation::AugmentationConfig;
 
         let mut vocab = Vocabulary::new("Test Augmentation");
         vocab.augmentation = AugmentationConfig {

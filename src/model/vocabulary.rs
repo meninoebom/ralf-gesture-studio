@@ -306,6 +306,12 @@ pub struct Vocabulary {
     #[serde(default)]
     pub joint_weighting: bool,
 
+    /// Enable complexity-invariant distance correction (default OFF)
+    /// Normalizes DTW scores by gesture complexity so simple and complex
+    /// gestures produce comparable distance scales.
+    #[serde(default)]
+    pub complexity_correction: bool,
+
     /// Baseline frames (deprecated - kept for file compatibility)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Vec<Vec<f32>>>,
@@ -345,6 +351,8 @@ impl Vocabulary {
             augmentation: AugmentationConfig::default(),
             // Joint weighting (default OFF)
             joint_weighting: false,
+            // Complexity correction (default OFF)
+            complexity_correction: false,
             // Legacy/internal fields
             baseline: None,
             gestures: Vec::new(),

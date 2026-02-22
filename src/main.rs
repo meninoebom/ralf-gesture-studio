@@ -43,6 +43,7 @@ fn main() {
             gui::is_diagnostics_enabled,
             gui::set_augmentation_enabled,
             gui::set_joint_weighting,
+            gui::set_complexity_correction,
             gui::set_consensus,
         ])
         .run(tauri::generate_context!())

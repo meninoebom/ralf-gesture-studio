@@ -285,6 +285,7 @@ fn test_config() -> RecognitionConfig {
         sakoe_chiba_band: 0.15,
         margin_rejection_ratio: 0.0, // disabled for tests — single-gesture scenarios
         use_subsequence_dtw: false,
+        complexity_correction: false,
     }
 }
 
@@ -793,6 +794,7 @@ fn benchmark_config() -> RecognitionConfig {
         sakoe_chiba_band: 0.15,
         margin_rejection_ratio: 0.0,
         use_subsequence_dtw: true, // sDTW: template matches best subsequence within window
+        complexity_correction: false,
     }
 }
 

@@ -77,6 +77,8 @@ function cacheElements() {
     elements.qualityFeedback = document.getElementById('quality-feedback');
     elements.btnAugmentation = document.getElementById('btn-augmentation');
     elements.btnJointWeighting = document.getElementById('btn-joint-weighting');
+    elements.btnComplexityCorrection = document.getElementById('btn-complexity-correction');
+    elements.confusionWarning = document.getElementById('confusion-warning');
 
     elements.performancePanel = document.getElementById('performance-panel');
     elements.hitDisplay = document.getElementById('hit-display');
@@ -166,6 +168,7 @@ function setupEventListeners() {
 
     // Joint weighting toggle
     elements.btnJointWeighting.addEventListener('click', toggleJointWeighting);
+    elements.btnComplexityCorrection.addEventListener('click', toggleComplexityCorrection);
 
     // Diagnostics toggle
     elements.btnToggleDiagnostics.addEventListener('click', toggleDiagnostics);
@@ -226,6 +229,22 @@ function updateFromState(appState) {
         const jw = appState.vocabulary.joint_weighting;
         elements.btnJointWeighting.textContent = jw ? 'ON' : 'OFF';
         elements.btnJointWeighting.classList.toggle('active', jw);
+
+        const cc = appState.vocabulary.complexity_correction;
+        elements.btnComplexityCorrection.textContent = cc ? 'ON' : 'OFF';
+        elements.btnComplexityCorrection.classList.toggle('active', cc);
+
+        // Confusion warnings
+        const pairs = appState.vocabulary.confusion_pairs || [];
+        if (pairs.length > 0) {
+            elements.confusionWarning.classList.remove('hidden');
+            elements.confusionWarning.innerHTML = pairs.map(p =>
+                `<span class="confusion-item">⚠ "${p.gesture_name_a}" and "${p.gesture_name_b}" may be confused (${Math.round(p.overlap_ratio * 100)}% overlap)</span>`
+            ).join('');
+        } else {
+            elements.confusionWarning.classList.add('hidden');
+            elements.confusionWarning.innerHTML = '';
+        }
     }
 
     // Training state
@@ -568,6 +587,13 @@ function updateMonitor(monitor) {
             ? '<button class="btn-consensus small active" data-id="' + g.id + '">CON</button>'
             : '<button class="btn-consensus small" data-id="' + g.id + '">CON</button>';
 
+        // Distance bar: shows how close distance is to threshold (1.0 = at threshold)
+        const ratio = (g.distance !== null && g.threshold > 0)
+            ? Math.min(1.0, g.distance / g.threshold)
+            : 1.0;
+        const barPercent = Math.round((1.0 - ratio) * 100); // invert: close = full
+        const barColor = ratio < 0.5 ? 'var(--green)' : ratio < 0.8 ? 'var(--yellow, #c6a832)' : 'var(--dim)';
+
         row.innerHTML = `
             <span class="gesture-name col-gesture">${g.name} (${g.example_count})</span>
             <span class="distance col-distance ${distanceColor}">${distanceText}</span>
@@ -576,6 +602,7 @@ function updateMonitor(monitor) {
                 ${g.recent_hit ? '● HIT' : ''}
             </span>
             <span class="col-consensus">${consensusBtn}</span>
+            <div class="distance-bar"><div class="distance-bar-fill" style="width:${barPercent}%;background:${barColor}"></div></div>
         `;
 
         // Event listeners based on mode
@@ -794,6 +821,11 @@ async function toggleAugmentation() {
 async function toggleJointWeighting() {
     const isCurrentlyEnabled = elements.btnJointWeighting.textContent !== 'OFF';
     await invoke('set_joint_weighting', { enabled: !isCurrentlyEnabled });
+}
+
+async function toggleComplexityCorrection() {
+    const isCurrentlyEnabled = elements.btnComplexityCorrection.textContent !== 'OFF';
+    await invoke('set_complexity_correction', { enabled: !isCurrentlyEnabled });
 }
 
 async function toggleDiagnostics() {

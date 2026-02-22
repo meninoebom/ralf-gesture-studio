@@ -417,6 +417,62 @@ pub fn compute_threshold_stats_sdtw(
     })
 }
 
+/// Detect pairs of gestures whose training examples are too similar.
+///
+/// For each pair of gestures (A, B), computes mean cross-gesture DTW distance
+/// between A's examples and B's examples. If that distance is below
+/// max(threshold_A, threshold_B), the pair is flagged as "confused."
+///
+/// # Arguments
+/// * `gestures` - List of (preprocessed examples, threshold) per gesture
+///
+/// # Returns
+/// Vec of (gesture_index_a, gesture_index_b, overlap_ratio) where
+/// overlap_ratio = max_threshold / cross_distance (>1.0 means overlap).
+pub fn detect_confusion_pairs(
+    gestures: &[(Vec<Sequence>, f32)],
+) -> Vec<(usize, usize, f32)> {
+    let mut pairs = Vec::new();
+
+    for i in 0..gestures.len() {
+        for j in (i + 1)..gestures.len() {
+            let (ref examples_a, threshold_a) = gestures[i];
+            let (ref examples_b, threshold_b) = gestures[j];
+
+            if examples_a.is_empty() || examples_b.is_empty() {
+                continue;
+            }
+
+            // Compute mean cross-gesture distance
+            let mut sum = 0.0f32;
+            let mut count = 0usize;
+            for ea in examples_a.iter() {
+                for eb in examples_b.iter() {
+                    let d = dtw_distance(ea, eb);
+                    if d.is_finite() {
+                        sum += d;
+                        count += 1;
+                    }
+                }
+            }
+
+            if count == 0 {
+                continue;
+            }
+
+            let cross_distance = sum / count as f32;
+            let max_threshold = threshold_a.max(threshold_b);
+
+            if cross_distance < max_threshold && cross_distance > 0.0 {
+                let overlap_ratio = max_threshold / cross_distance;
+                pairs.push((i, j, overlap_ratio));
+            }
+        }
+    }
+
+    pairs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,5 +645,40 @@ mod tests {
             stats.outlier_indices.is_empty(),
             "No outliers expected for similar examples"
         );
+    }
+
+    #[test]
+    fn test_confusion_detection_overlapping() {
+        // Two gesture classes with very similar examples
+        let gesture_a = vec![
+            make_sequence(&[0.0, 1.0, 2.0]),
+            make_sequence(&[0.1, 1.1, 2.1]),
+        ];
+        let gesture_b = vec![
+            make_sequence(&[0.0, 1.0, 2.0]),
+            make_sequence(&[0.2, 1.2, 2.2]),
+        ];
+        // Set a high threshold that the cross-distance will be below
+        let gestures = vec![(gesture_a, 100.0), (gesture_b, 100.0)];
+        let pairs = detect_confusion_pairs(&gestures);
+        assert!(!pairs.is_empty(), "similar gestures with high threshold should be confused");
+        assert_eq!(pairs[0].0, 0);
+        assert_eq!(pairs[0].1, 1);
+    }
+
+    #[test]
+    fn test_confusion_detection_well_separated() {
+        let gesture_a = vec![
+            make_sequence(&[0.0, 1.0, 2.0]),
+            make_sequence(&[0.1, 1.1, 2.1]),
+        ];
+        let gesture_b = vec![
+            make_sequence(&[50.0, 60.0, 70.0]),
+            make_sequence(&[51.0, 61.0, 71.0]),
+        ];
+        // Tight thresholds — cross-distance will be much larger
+        let gestures = vec![(gesture_a, 1.0), (gesture_b, 1.0)];
+        let pairs = detect_confusion_pairs(&gestures);
+        assert!(pairs.is_empty(), "well-separated gestures should not be confused");
     }
 }

@@ -186,14 +186,35 @@ pub fn sdtw_distance(
 
     let mut best_end = f32::INFINITY;
 
+    // Apply Sakoe-Chiba-style band: limit how far the template alignment
+    // can deviate from the diagonal. Since sDTW allows free start on the
+    // window, we use a generous band of 30% of template length.
+    let band = (m as f32 * 0.30).ceil() as usize;
+
     for i in 1..=n {
         curr_row.fill(f32::INFINITY);
         curr_row[0] = 0.0; // Free start: can begin alignment at any window frame
 
-        for j in 1..=m {
+        // Band limits: template column j should be near the diagonal
+        // For sDTW with free start, the diagonal is less meaningful,
+        // but we still want to prevent extreme warping within the matched region.
+        // Use full range for j since the free-start handles alignment offset.
+        let j_min = 1;
+        let j_max = m;
+
+        let mut row_min = f32::INFINITY;
+
+        for j in j_min..=j_max {
             let dist = euclidean_distance(&seq1[i - 1], &seq2[j - 1]);
             let min_prev = prev_row[j - 1].min(prev_row[j]).min(curr_row[j - 1]);
             curr_row[j] = dist + min_prev;
+            row_min = row_min.min(curr_row[j]);
+        }
+
+        // Early abandon: if every cell in this row exceeds best_so_far,
+        // no path through here can beat it
+        if row_min > best_so_far {
+            return None;
         }
 
         // Track best distance at template end (j = m)

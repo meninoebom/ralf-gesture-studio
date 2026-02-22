@@ -280,9 +280,10 @@ fn test_config() -> RecognitionConfig {
         cooldown_ms: 200,
         threshold_high_factor: 1.0,
         frames_to_fire: 2,
-        max_recovery_ms: 5000, // unused but kept for struct compat
+        max_recovery_ms: 5000,
         global_cooldown_ms: 200,
         sakoe_chiba_band: 0.15,
+        margin_rejection_ratio: 0.0, // disabled for tests — single-gesture scenarios
     }
 }
 

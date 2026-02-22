@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex};
 use tauri::State;
 
 use ralf_gesture_studio::engine::{
-    assess_example, compute_joint_weights, compute_threshold_stats_banded, generate_augmented,
-    DiagnosticEvent, DiagnosticLogger, GestureDiag, HitLog, Preprocessor, RecognitionConfig,
-    Recognizer, SessionState, TrainingConfig, TrainingSession,
+    assess_example, compute_gesture_consistency, compute_joint_weights,
+    compute_threshold_stats_banded, generate_augmented, DiagnosticEvent, DiagnosticLogger,
+    GestureDiag, HitLog, PoseSmoother, Preprocessor, RecognitionConfig, Recognizer, SessionState,
+    TrainingConfig, TrainingSession,
 };
 use ralf_gesture_studio::model::{
     default_vocabulary_dir, load_vocabulary as model_load_vocabulary,
@@ -57,6 +58,10 @@ pub struct AppState {
     preprocessor: Preprocessor,
     /// Quality feedback from most recent training session (cleared on next training start)
     quality_feedback: Vec<QualityFeedbackEntry>,
+    /// One Euro filter for temporal smoothing of raw pose frames
+    smoother: PoseSmoother,
+    /// Last frame timestamp for computing dt
+    last_frame_time: Option<std::time::Instant>,
 }
 
 impl AppState {
@@ -90,6 +95,7 @@ impl AppState {
             vocabulary.preprocessing.clone(),
             &vocabulary.tracking_system,
         );
+        let input_dims = vocabulary.input.dimensions;
 
         Self {
             vocabulary,
@@ -108,6 +114,8 @@ impl AppState {
             dimension_mismatch: None,
             preprocessor,
             quality_feedback: Vec::new(),
+            smoother: PoseSmoother::new(input_dims),
+            last_frame_time: None,
         }
     }
 
@@ -346,7 +354,16 @@ impl AppState {
                 self.dimension_mismatch = None;
             }
 
-            // If training, add RAW frames to session (stored unprocessed in .ralf files)
+            // Apply One Euro smoothing to reduce MediaPipe jitter
+            let now = std::time::Instant::now();
+            let dt = self
+                .last_frame_time
+                .map(|t| now.duration_since(t).as_secs_f32())
+                .unwrap_or(1.0 / 30.0);
+            self.last_frame_time = Some(now);
+            let frame = self.smoother.smooth(&frame, dt);
+
+            // If training, add smoothed frames to session (stored in .ralf files)
             if self.training_session.state == SessionState::Capturing {
                 self.training_session.add_frame(frame.clone());
             }
@@ -530,6 +547,8 @@ pub struct GestureDto {
     distance_mean: Option<f32>,
     distance_std: Option<f32>,
     outlier_example_indices: Vec<usize>,
+    /// σ/μ ratio of pairwise distances. Low = consistent, high = noisy.
+    consistency: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -656,6 +675,9 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
                 distance_mean: g.distance_mean,
                 distance_std: g.distance_std,
                 outlier_example_indices: g.outlier_example_indices.clone(),
+                consistency: compute_gesture_consistency(
+                    &g.examples.iter().map(|e| e.frames.clone()).collect::<Vec<_>>(),
+                ),
             })
             .collect(),
         augmentation: AugmentationConfigDto {
@@ -837,6 +859,8 @@ pub fn new_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String> 
         app.vocabulary.preprocessing.clone(),
         &app.vocabulary.tracking_system,
     );
+    app.smoother = PoseSmoother::new(app.vocabulary.input.dimensions);
+    app.last_frame_time = None;
     app.sync_recognizer();
 
     Ok(())
@@ -868,6 +892,8 @@ pub fn open_vocabulary(state: State<Arc<Mutex<AppState>>>) -> Result<(), String>
                     app.vocabulary.preprocessing.clone(),
                     &app.vocabulary.tracking_system,
                 );
+                app.smoother = PoseSmoother::new(app.vocabulary.input.dimensions);
+                app.last_frame_time = None;
                 app.sync_recognizer();
 
                 app.osc_sender =

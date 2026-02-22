@@ -66,6 +66,13 @@ pub struct RecognitionConfig {
     /// Also prevents pathological warping (unrealistic time stretching)
     /// Set to 0.0 to disable (use unconstrained DTW)
     pub sakoe_chiba_band: f32,
+
+    // --- Inter-class confusion rejection ---
+    /// Minimum margin between best and second-best gesture scores.
+    /// Computed as (second_best - best) / second_best.
+    /// If margin is below this ratio, the match is ambiguous and suppressed.
+    /// Set to 0.0 to disable. Only active when 2+ gestures have valid distances.
+    pub margin_rejection_ratio: f32,
 }
 
 impl Default for RecognitionConfig {
@@ -82,6 +89,8 @@ impl Default for RecognitionConfig {
             global_cooldown_ms: 1000,
             // Sakoe-Chiba band: 15% of sequence length (recommended for gesture recognition)
             sakoe_chiba_band: 0.15,
+            // Margin rejection: require 15% gap between best and second-best
+            margin_rejection_ratio: 0.15,
         }
     }
 }
@@ -840,6 +849,22 @@ impl Recognizer {
             })
             .unwrap_or(false);
 
+        // Margin-based rejection: suppress when best and second-best are too close
+        let margin_blocked = if self.config.margin_rejection_ratio > 0.0 && distances.len() >= 2 {
+            let mut sorted_dists: Vec<f32> = distances.iter().map(|(_, d, _)| *d).collect();
+            sorted_dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let best = sorted_dists[0];
+            let second = sorted_dists[1];
+            if second > 0.0 {
+                let margin = (second - best) / second;
+                margin < self.config.margin_rejection_ratio
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         let mut hit_result: Option<(u32, String, f32)> = None;
 
         for (idx, gesture) in self.gestures.iter_mut().enumerate() {
@@ -854,8 +879,8 @@ impl Recognizer {
             if let Some(dist) = distance {
                 if Some(idx) == best_idx {
                     // Best-matching gesture: run its state machine
-                    // Consensus gate: treat as global cooldown (suppress entry) if consensus fails
-                    let suppressed = in_global_cooldown || consensus_blocked;
+                    // Suppress entry if in global cooldown, consensus fails, or margin too close
+                    let suppressed = in_global_cooldown || consensus_blocked || margin_blocked;
                     let result = gesture.process_state_machine(dist, &self.config, suppressed);
 
                     if let Some(transition) = result.transition {
@@ -1399,5 +1424,37 @@ mod tests {
         assert_eq!(log.len(), 3);
         let recent = log.recent(5);
         assert_eq!(recent[0].gesture_name, "gesture4");
+    }
+
+    #[test]
+    fn test_margin_rejection_suppresses_ambiguous_match() {
+        let mut config = RecognitionConfig::default();
+        config.margin_rejection_ratio = 0.20; // require 20% margin
+
+        let mut recognizer = Recognizer::with_config(30, 10, config);
+
+        // Two gestures with very similar example data
+        let example_a: Vec<Vec<f32>> = (0..20).map(|i| vec![i as f32 * 0.1, 0.0]).collect();
+        let example_b: Vec<Vec<f32>> = (0..20).map(|i| vec![i as f32 * 0.11, 0.0]).collect();
+
+        recognizer.add_gesture(1, "wave", "/gesture/1", 1000.0);
+        recognizer.add_gesture(2, "wave2", "/gesture/2", 1000.0);
+        recognizer.add_example(1, example_a);
+        recognizer.add_example(2, example_b);
+        recognizer.start();
+
+        // Feed frames that match both gestures similarly
+        let frames: Vec<Vec<f32>> = (0..20).map(|i| vec![i as f32 * 0.105, 0.0]).collect();
+        let mut fired = false;
+        for frame in &frames {
+            if let Some(result) = recognizer.process_frame(frame.clone()) {
+                if result.gesture_id.is_some() {
+                    fired = true;
+                }
+            }
+        }
+
+        // With margin rejection, ambiguous match should be suppressed
+        assert!(!fired, "ambiguous match between similar gestures should be suppressed");
     }
 }

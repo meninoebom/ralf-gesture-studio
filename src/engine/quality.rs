@@ -117,6 +117,40 @@ pub fn assess_example(new_example: &Sequence, existing: &[Sequence]) -> Option<Q
     None
 }
 
+/// Compute the consistency of a gesture's examples (σ/μ ratio of pairwise distances).
+///
+/// Low values (< 0.3) = consistent examples. High values (> 0.6) = noisy/inconsistent.
+/// Returns `None` if fewer than 2 examples.
+pub fn compute_gesture_consistency(examples: &[Sequence]) -> Option<f32> {
+    if examples.len() < 2 {
+        return None;
+    }
+
+    let mut distances = Vec::new();
+    for i in 0..examples.len() {
+        for j in (i + 1)..examples.len() {
+            let d = dtw_distance(&examples[i], &examples[j]);
+            if d.is_finite() {
+                distances.push(d);
+            }
+        }
+    }
+
+    if distances.is_empty() {
+        return None;
+    }
+
+    let mean = distances.iter().sum::<f32>() / distances.len() as f32;
+    if mean < f32::EPSILON {
+        return Some(0.0); // identical examples = perfect consistency
+    }
+
+    let variance = distances.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / distances.len() as f32;
+    let std = variance.sqrt();
+
+    Some(std / mean)
+}
+
 /// Compute total Euclidean displacement across consecutive frames.
 fn compute_total_motion(seq: &Sequence) -> f32 {
     if seq.len() < 2 {
@@ -214,6 +248,34 @@ mod tests {
         assert_eq!(compute_total_motion(&empty), 0.0);
         let single: Sequence = vec![vec![1.0]];
         assert_eq!(compute_total_motion(&single), 0.0);
+    }
+
+    #[test]
+    fn test_consistency_returns_none_for_few_examples() {
+        assert!(compute_gesture_consistency(&[]).is_none());
+        assert!(compute_gesture_consistency(&[make_moving_sequence(30, 1.0)]).is_none());
+    }
+
+    #[test]
+    fn test_consistency_low_for_similar_examples() {
+        let examples = vec![
+            make_moving_sequence(30, 1.0),
+            make_moving_sequence(30, 1.05),
+            make_moving_sequence(30, 0.95),
+        ];
+        let c = compute_gesture_consistency(&examples).unwrap();
+        assert!(c < 0.5, "similar examples should have low consistency ratio: got {}", c);
+    }
+
+    #[test]
+    fn test_consistency_high_for_mixed_examples() {
+        let examples = vec![
+            make_moving_sequence(30, 1.0),
+            make_moving_sequence(30, 1.0),
+            make_moving_sequence(30, 50.0), // very different
+        ];
+        let c = compute_gesture_consistency(&examples).unwrap();
+        assert!(c > 0.3, "mixed examples should have higher consistency ratio: got {}", c);
     }
 
     #[test]

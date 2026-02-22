@@ -622,6 +622,15 @@ input[type="range"]::-webkit-slider-thumb {
     border-left: 2px solid #ffaa00;
 }
 
+.consistency-badge {
+    font-size: 8px;
+    vertical-align: middle;
+    margin-left: 4px;
+}
+.consistency-badge.good { color: #4ade80; }
+.consistency-badge.fair { color: #fbbf24; }
+.consistency-badge.poor { color: #f87171; }
+
 .example-info {
     font-size: var(--font-size-small);
 }

@@ -325,6 +325,13 @@ function buildExampleList(gesture) {
     return list;
 }
 
+function consistencyBadge(consistency) {
+    if (consistency == null) return '';
+    if (consistency < 0.3) return ' <span class="consistency-badge good" title="Consistent examples">●</span>';
+    if (consistency < 0.6) return ' <span class="consistency-badge fair" title="Moderate variance">●</span>';
+    return ' <span class="consistency-badge poor" title="High variance — consider removing outliers">●</span>';
+}
+
 function renderGestures(gestures) {
     // Skip re-render if currently editing a gesture name
     if (state.isEditingGestureName) {
@@ -363,7 +370,7 @@ function renderGestures(gestures) {
                 </span>
             </span>
             <span class="name col-name ${state.selectedGestureId === gesture.id ? 'selected' : ''}"
-                  data-id="${gesture.id}">${gesture.name}</span>
+                  data-id="${gesture.id}">${gesture.name}${consistencyBadge(gesture.consistency)}</span>
             <span class="examples col-examples clickable ${isExpanded ? 'expanded' : ''}"
                   data-id="${gesture.id}"
                   title="${gesture.examples.length > 0 ? 'Click to expand examples' : ''}">${gesture.examples.length}${gesture.examples.length > 0 ? (isExpanded ? ' ▾' : ' ▸') : ''}</span>

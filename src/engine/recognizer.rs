@@ -101,7 +101,7 @@ impl Default for RecognitionConfig {
             sakoe_chiba_band: 0.15,
             // Margin rejection: require 15% gap between best and second-best
             margin_rejection_ratio: 0.15,
-            use_subsequence_dtw: true,
+            use_subsequence_dtw: false, // sDTW works in benchmarks but too slow for real-time (no banding)
             complexity_correction: false,
         }
     }

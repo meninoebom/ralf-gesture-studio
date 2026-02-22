@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use tauri::State;
 
 use ralf_gesture_studio::engine::{
-    assess_example, compute_gesture_consistency, compute_joint_weights,
+    assess_example, compute_gesture_consistency, compute_joint_weights, compute_medoid,
     compute_threshold_stats_banded, generate_augmented, DiagnosticEvent, DiagnosticLogger,
     GestureDiag, HitLog, PoseSmoother, Preprocessor, RecognitionConfig, Recognizer, SessionState,
     TrainingConfig, TrainingSession,
@@ -131,7 +131,7 @@ impl AppState {
         self.recognizer = Recognizer::with_config(600, 180, self.recognition_config.clone());
         self.preprocessor.reset();
 
-        for gesture in &self.vocabulary.gestures {
+        for gesture in &mut self.vocabulary.gestures {
             self.recognizer.add_gesture(
                 gesture.id,
                 &gesture.name,
@@ -163,7 +163,17 @@ impl AppState {
             // Store weights in recognizer for runtime window scaling
             self.recognizer.set_weights(gesture.id, weights.clone());
 
-            for (ex_idx, example) in processed.iter().enumerate() {
+            // Medoid selection: with 3+ examples, use only the most representative one
+            let medoid_idx = compute_medoid(&processed);
+            gesture.medoid_index = medoid_idx;
+
+            let examples_to_add: Vec<(usize, &Vec<Vec<f32>>)> = if let Some(mid) = medoid_idx {
+                vec![(mid, &processed[mid])]
+            } else {
+                processed.iter().enumerate().collect()
+            };
+
+            for (ex_idx, example) in examples_to_add {
                 // Apply joint weights (if any)
                 let scaled = match &weights {
                     Some(w) => apply_weights_to_sequence(example, w),
@@ -549,6 +559,8 @@ pub struct GestureDto {
     outlier_example_indices: Vec<usize>,
     /// σ/μ ratio of pairwise distances. Low = consistent, high = noisy.
     consistency: Option<f32>,
+    /// Index of the medoid example (most representative)
+    medoid_index: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -678,6 +690,7 @@ pub fn get_state(state: State<Arc<Mutex<AppState>>>) -> Result<StateResponse, St
                 consistency: compute_gesture_consistency(
                     &g.examples.iter().map(|e| e.frames.clone()).collect::<Vec<_>>(),
                 ),
+                medoid_index: g.medoid_index,
             })
             .collect(),
         augmentation: AugmentationConfigDto {

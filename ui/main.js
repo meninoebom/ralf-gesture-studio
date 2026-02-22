@@ -304,13 +304,14 @@ function buildExampleList(gesture) {
         const time = new Date(ex.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const duration = (ex.duration_ms / 1000).toFixed(1);
         const isOutlier = gesture.outlier_example_indices && gesture.outlier_example_indices.includes(idx);
+        const isMedoid = gesture.medoid_index === idx;
 
         const row = document.createElement('div');
-        row.className = 'example-item' + (isOutlier ? ' outlier' : '');
+        row.className = 'example-item' + (isOutlier ? ' outlier' : '') + (isMedoid ? ' medoid' : '');
 
         const info = document.createElement('span');
         info.className = 'example-info dim';
-        info.textContent = `${time} · ${duration}s · ${ex.frame_count} frames${isOutlier ? ' ⚠ outlier' : ''}`;
+        info.textContent = `${isMedoid ? '★ ' : ''}${time} · ${duration}s · ${ex.frame_count} frames${isOutlier ? ' ⚠ outlier' : ''}`;
 
         const btn = document.createElement('button');
         btn.className = 'example-delete-btn';

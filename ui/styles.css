@@ -622,6 +622,10 @@ input[type="range"]::-webkit-slider-thumb {
     border-left: 2px solid #ffaa00;
 }
 
+.example-item.medoid {
+    border-left: 2px solid #4ade80;
+}
+
 .consistency-badge {
     font-size: 8px;
     vertical-align: middle;

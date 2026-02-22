@@ -210,6 +210,7 @@ mod tests {
             hip_normalize: true,
             scale_normalize: true,
             velocity_features: false,
+            angle_features: false,
         };
         vocab.add_gesture("wave");
 
@@ -233,6 +234,7 @@ mod tests {
             hip_normalize: false,
             scale_normalize: false,
             velocity_features: false,
+            angle_features: false,
         };
         let preprocessor = Preprocessor::new(config, "mediapipe-pose-33-xy");
 

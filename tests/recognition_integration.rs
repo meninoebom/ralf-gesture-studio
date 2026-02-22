@@ -292,6 +292,7 @@ fn no_preprocessing() -> PreprocessingConfig {
         hip_normalize: false,
         scale_normalize: false,
         velocity_features: false,
+        angle_features: false,
     }
 }
 

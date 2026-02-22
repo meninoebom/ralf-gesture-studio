@@ -121,10 +121,13 @@ pub struct Gesture {
     #[serde(default = "default_consensus_threshold")]
     pub consensus_threshold: f32,
 
-    // --- Outlier detection (transient, not persisted) ---
+    // --- Transient fields (not persisted) ---
     /// Indices of examples flagged as outliers during threshold calibration
     #[serde(skip)]
     pub outlier_example_indices: Vec<usize>,
+    /// Index of the medoid example (most representative), computed during sync
+    #[serde(skip)]
+    pub medoid_index: Option<usize>,
 }
 
 impl Gesture {
@@ -145,8 +148,9 @@ impl Gesture {
             // Consensus scoring (default OFF)
             consensus_enabled: false,
             consensus_threshold: default_consensus_threshold(),
-            // Outlier detection (transient)
+            // Transient
             outlier_example_indices: Vec::new(),
+            medoid_index: None,
         }
     }
 

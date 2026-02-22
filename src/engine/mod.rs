@@ -17,6 +17,7 @@
 //! - `weighting` - Variance-based joint weighting for DTW
 
 pub mod augmentation;
+pub mod averaging;
 pub mod diagnostics;
 pub mod dtw;
 pub mod preprocess;
@@ -29,6 +30,7 @@ pub mod weighting;
 
 // Core types used by the app
 pub use augmentation::generate_augmented;
+pub use averaging::compute_medoid;
 pub use diagnostics::{DiagnosticEvent, DiagnosticLogger, GestureDiag};
 pub use preprocess::Preprocessor;
 pub use quality::{assess_example, compute_gesture_consistency};

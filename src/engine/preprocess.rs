@@ -33,6 +33,9 @@ pub struct PreprocessingConfig {
     /// Append first-derivative (velocity) features, doubling frame dimensionality
     #[serde(default)]
     pub velocity_features: bool,
+    /// Append joint angle features (12 angles at major joints, radians)
+    #[serde(default)]
+    pub angle_features: bool,
 }
 
 impl Default for PreprocessingConfig {
@@ -41,6 +44,7 @@ impl Default for PreprocessingConfig {
             hip_normalize: true,
             scale_normalize: true,
             velocity_features: false,
+            angle_features: false,
         }
     }
 }
@@ -61,6 +65,17 @@ pub struct TrackingLayout {
     pub left_shoulder: usize,
     /// Index of right shoulder joint
     pub right_shoulder: usize,
+    // Angle feature joints
+    pub left_elbow: usize,
+    pub right_elbow: usize,
+    pub left_wrist: usize,
+    pub right_wrist: usize,
+    pub left_knee: usize,
+    pub right_knee: usize,
+    pub left_ankle: usize,
+    pub right_ankle: usize,
+    pub left_index: usize,
+    pub right_index: usize,
 }
 
 impl TrackingLayout {
@@ -73,6 +88,16 @@ impl TrackingLayout {
             right_hip: 24,
             left_shoulder: 11,
             right_shoulder: 12,
+            left_elbow: 13,
+            right_elbow: 14,
+            left_wrist: 15,
+            right_wrist: 16,
+            left_knee: 25,
+            right_knee: 26,
+            left_ankle: 27,
+            right_ankle: 28,
+            left_index: 19,
+            right_index: 20,
         }
     }
 
@@ -147,16 +172,24 @@ impl Preprocessor {
     /// Returns true if the pipeline will change frame dimensionality.
     #[allow(dead_code)]
     pub fn changes_dimensions(&self) -> bool {
-        self.config.velocity_features
+        self.config.velocity_features || self.config.angle_features
     }
+
+    /// Number of angle features appended (12 for MediaPipe).
+    const NUM_ANGLES: usize = 12;
 
     /// Returns the output dimension count for a given raw input dimension count.
     #[allow(dead_code)]
     pub fn output_dimensions(&self, raw_dims: usize) -> usize {
-        if self.config.velocity_features {
-            raw_dims * 2
+        let with_angles = if self.config.angle_features {
+            raw_dims + Self::NUM_ANGLES
         } else {
             raw_dims
+        };
+        if self.config.velocity_features {
+            with_angles * 2
+        } else {
+            with_angles
         }
     }
 
@@ -181,7 +214,12 @@ impl Preprocessor {
             self.apply_scale_normalization(&mut frame);
         }
 
-        // Stage 3: Velocity features
+        // Stage 3: Angle features (append before velocity so velocity covers angles too)
+        if self.config.angle_features {
+            self.apply_angle_features(&mut frame);
+        }
+
+        // Stage 4: Velocity features
         if self.config.velocity_features {
             frame = self.apply_velocity_features(&frame);
         } else {
@@ -212,6 +250,10 @@ impl Preprocessor {
 
             if self.config.scale_normalize {
                 self.apply_scale_normalization(&mut frame);
+            }
+
+            if self.config.angle_features {
+                self.apply_angle_features(&mut frame);
             }
 
             if self.config.velocity_features {
@@ -320,6 +362,87 @@ impl Preprocessor {
         combined.extend_from_slice(&velocity);
         combined
     }
+
+    /// Compute 12 joint angles and append to frame.
+    /// Angles: shoulder, elbow, hip, knee, wrist (left + right) + 2 torso inclinations.
+    fn apply_angle_features(&self, frame: &mut Vec<f32>) {
+        let layout = match &self.layout {
+            Some(l) => l,
+            None => return,
+        };
+        if frame.len() < layout.raw_dimensions {
+            return;
+        }
+
+        let angles = Self::compute_angles(frame, layout);
+        frame.extend_from_slice(&angles);
+    }
+
+    /// Compute 12 joint angles from XY coordinates.
+    /// Each angle is the angle at joint B in the chain A→B→C, in radians [0, π].
+    fn compute_angles(frame: &[f32], layout: &TrackingLayout) -> Vec<f32> {
+        let joint = |idx: usize| -> (f32, f32) {
+            let o = layout.joint_offset(idx);
+            (frame[o], frame[o + 1])
+        };
+
+        // 12 angle triplets: (A, B, C) where angle is measured at B
+        let triplets: [(usize, usize, usize); 12] = [
+            // Left shoulder: hip → shoulder → elbow
+            (layout.left_hip, layout.left_shoulder, layout.left_elbow),
+            // Right shoulder: hip → shoulder → elbow
+            (layout.right_hip, layout.right_shoulder, layout.right_elbow),
+            // Left elbow: shoulder → elbow → wrist
+            (layout.left_shoulder, layout.left_elbow, layout.left_wrist),
+            // Right elbow: shoulder → elbow → wrist
+            (layout.right_shoulder, layout.right_elbow, layout.right_wrist),
+            // Left hip: shoulder → hip → knee
+            (layout.left_shoulder, layout.left_hip, layout.left_knee),
+            // Right hip: shoulder → hip → knee
+            (layout.right_shoulder, layout.right_hip, layout.right_knee),
+            // Left knee: hip → knee → ankle
+            (layout.left_hip, layout.left_knee, layout.left_ankle),
+            // Right knee: hip → knee → ankle
+            (layout.right_hip, layout.right_knee, layout.right_ankle),
+            // Left wrist: elbow → wrist → index
+            (layout.left_elbow, layout.left_wrist, layout.left_index),
+            // Right wrist: elbow → wrist → index
+            (layout.right_elbow, layout.right_wrist, layout.right_index),
+            // Torso left: left_shoulder → left_hip (vertical angle via synthetic vertical point)
+            // We use right_hip as proxy for "below left hip" direction
+            (layout.left_shoulder, layout.left_hip, layout.right_hip),
+            // Torso right: right_shoulder → right_hip → left_hip
+            (layout.right_shoulder, layout.right_hip, layout.left_hip),
+        ];
+
+        triplets
+            .iter()
+            .map(|&(a_idx, b_idx, c_idx)| {
+                let a = joint(a_idx);
+                let b = joint(b_idx);
+                let c = joint(c_idx);
+                angle_at_b(a, b, c)
+            })
+            .collect()
+    }
+}
+
+/// Compute the angle at point B given triangle A-B-C using dot product.
+/// Returns radians in [0, π].
+fn angle_at_b(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
+    let ba = (a.0 - b.0, a.1 - b.1);
+    let bc = (c.0 - b.0, c.1 - b.1);
+
+    let dot = ba.0 * bc.0 + ba.1 * bc.1;
+    let mag_ba = (ba.0 * ba.0 + ba.1 * ba.1).sqrt();
+    let mag_bc = (bc.0 * bc.0 + bc.1 * bc.1).sqrt();
+
+    if mag_ba < 1e-8 || mag_bc < 1e-8 {
+        return std::f32::consts::PI; // Degenerate: straight
+    }
+
+    let cos_angle = (dot / (mag_ba * mag_bc)).clamp(-1.0, 1.0);
+    cos_angle.acos()
 }
 
 #[cfg(test)]
@@ -333,9 +456,20 @@ mod tests {
             raw_dimensions: 6,
             coords_per_joint: 2,
             left_hip: 2,
-            right_hip: 2, // Same as left for simplicity (single hip)
+            right_hip: 2,
             left_shoulder: 0,
             right_shoulder: 1,
+            // Mini layout doesn't have these joints — angle tests use full MediaPipe layout
+            left_elbow: 0,
+            right_elbow: 0,
+            left_wrist: 0,
+            right_wrist: 0,
+            left_knee: 0,
+            right_knee: 0,
+            left_ankle: 0,
+            right_ankle: 0,
+            left_index: 0,
+            right_index: 0,
         }
     }
 
@@ -355,6 +489,7 @@ mod tests {
             hip_normalize: true,
             scale_normalize: false,
             velocity_features: false,
+            angle_features: false,
         };
         let mut p = Preprocessor::new(config, "mediapipe-pose-33-xy");
 
@@ -386,6 +521,7 @@ mod tests {
             hip_normalize: false,
             scale_normalize: true,
             velocity_features: false,
+            angle_features: false,
         };
         let mut p = Preprocessor::new(config, "mediapipe-pose-33-xy");
 
@@ -414,6 +550,7 @@ mod tests {
             hip_normalize: false,
             scale_normalize: true,
             velocity_features: false,
+            angle_features: false,
         };
         let mut p = Preprocessor::new(config, "mediapipe-pose-33-xy");
 
@@ -438,6 +575,7 @@ mod tests {
             hip_normalize: false,
             scale_normalize: false,
             velocity_features: true,
+            angle_features: false,
         };
         let mut p = Preprocessor::new(config, "mediapipe-pose-33-xy");
 
@@ -456,6 +594,7 @@ mod tests {
             hip_normalize: false,
             scale_normalize: false,
             velocity_features: true,
+            angle_features: false,
         };
         let mut p = Preprocessor::new(config, "mediapipe-pose-33-xy");
 
@@ -479,6 +618,7 @@ mod tests {
             hip_normalize: false,
             scale_normalize: false,
             velocity_features: true,
+            angle_features: false,
         };
         let p = Preprocessor::new(config, "mediapipe-pose-33-xy");
 
@@ -510,6 +650,7 @@ mod tests {
                 hip_normalize: true,
                 scale_normalize: true,
                 velocity_features: false,
+                angle_features: false,
             },
             "mediapipe-pose-33-xy",
         );
@@ -520,6 +661,7 @@ mod tests {
                 hip_normalize: false,
                 scale_normalize: false,
                 velocity_features: true,
+                angle_features: false,
             },
             "mediapipe-pose-33-xy",
         );
@@ -532,6 +674,7 @@ mod tests {
             hip_normalize: false,
             scale_normalize: false,
             velocity_features: true,
+            angle_features: false,
         };
         let mut p = Preprocessor::new(config, "mediapipe-pose-33-xy");
 
@@ -553,6 +696,7 @@ mod tests {
             hip_normalize: true,
             scale_normalize: true,
             velocity_features: false,
+            angle_features: false,
         };
         let mut p = Preprocessor::new(config, "unknown-system");
 
@@ -568,6 +712,7 @@ mod tests {
             hip_normalize: true,
             scale_normalize: true,
             velocity_features: true,
+            angle_features: false,
         };
         let mut p = Preprocessor {
             config,
@@ -614,5 +759,65 @@ mod tests {
         assert_eq!(l.joint_offset(24), 48); // Right hip
         assert_eq!(l.joint_offset(11), 22); // Left shoulder
         assert_eq!(l.joint_offset(12), 24); // Right shoulder
+    }
+
+    #[test]
+    fn test_angle_at_b_right_angle() {
+        // Right angle: A=(0,1), B=(0,0), C=(1,0) → π/2
+        let angle = angle_at_b((0.0, 1.0), (0.0, 0.0), (1.0, 0.0));
+        assert!((angle - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_angle_at_b_straight_line() {
+        // Straight: A=(-1,0), B=(0,0), C=(1,0) → π
+        let angle = angle_at_b((-1.0, 0.0), (0.0, 0.0), (1.0, 0.0));
+        assert!((angle - std::f32::consts::PI).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_angle_at_b_degenerate() {
+        // Degenerate: all same point → π
+        let angle = angle_at_b((1.0, 1.0), (1.0, 1.0), (1.0, 1.0));
+        assert!((angle - std::f32::consts::PI).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_angle_features_appends_12_values() {
+        let config = PreprocessingConfig {
+            hip_normalize: false,
+            scale_normalize: false,
+            velocity_features: false,
+            angle_features: true,
+        };
+        let mut p = Preprocessor::new(config, "mediapipe-pose-33-xy");
+        let frame = vec![0.5; 66];
+        let result = p.process_frame(&frame);
+        assert_eq!(result.len(), 66 + 12, "angles should append 12 values");
+    }
+
+    #[test]
+    fn test_output_dimensions_with_angles() {
+        let config = PreprocessingConfig {
+            hip_normalize: false,
+            scale_normalize: false,
+            velocity_features: false,
+            angle_features: true,
+        };
+        let p = Preprocessor::new(config, "mediapipe-pose-33-xy");
+        assert_eq!(p.output_dimensions(66), 78);
+    }
+
+    #[test]
+    fn test_output_dimensions_with_angles_and_velocity() {
+        let config = PreprocessingConfig {
+            hip_normalize: false,
+            scale_normalize: false,
+            velocity_features: true,
+            angle_features: true,
+        };
+        let p = Preprocessor::new(config, "mediapipe-pose-33-xy");
+        // 66 + 12 angles = 78, then × 2 for velocity = 156
+        assert_eq!(p.output_dimensions(66), 156);
     }
 }

@@ -1271,3 +1271,222 @@ fn rc2_f1_vs_musigma_holdout() {
         "F1 strategy should have produced at least one best-F1 score"
     );
 }
+
+// ============================================================================
+// RC-4: Executable echo / false-positive regression guards
+//
+// These lock in three invariants that are otherwise enforced only by
+// convention and by their absence in production logs. See
+// docs/research/2026-06-18-four-way-tension-hardening-analysis.md (RC-4).
+//
+// Design note (verified subtlety): this harness replays frames in a tight,
+// no-sleep loop, but global cooldown and Recovery dwell are WALL-CLOCK
+// (Instant::elapsed). So the buffer-clear-on-hit plus window refill
+// (frame-domain) is the only echo gate the tight loop reliably exercises.
+// The same-gesture guard is scoped to that gate; the wall-clock cooldown is
+// exercised separately with a real sleep.
+// ============================================================================
+
+/// Like `run_recognition`, but returns (gesture_name, distance, threshold) for
+/// every hit so invariants about the firing distance can be asserted.
+fn run_recognition_detailed(
+    training_gestures: &[(&str, &[Vec<Vec<f32>>])],
+    live_sequence: &[Vec<f32>],
+    config: RecognitionConfig,
+    preprocessing: PreprocessingConfig,
+) -> Vec<(String, f32, f32)> {
+    let preprocessor = Preprocessor::new(preprocessing.clone(), "mediapipe-pose-33-xy");
+    let mut recognizer = Recognizer::with_config(600, 0, config);
+
+    for (i, (name, examples)) in training_gestures.iter().enumerate() {
+        let gesture_id = (i + 1) as u32;
+        let osc_address = format!("/gesture/{}", gesture_id);
+        recognizer.add_gesture(gesture_id, name, &osc_address, 0.0);
+        for example in *examples {
+            let processed = preprocessor.process_sequence(example);
+            recognizer.add_example(gesture_id, processed);
+        }
+    }
+    for (i, (_, examples)) in training_gestures.iter().enumerate() {
+        let gesture_id = (i + 1) as u32;
+        let processed: Vec<Vec<Vec<f32>>> = examples
+            .iter()
+            .map(|e| preprocessor.process_sequence(e))
+            .collect();
+        if let Some(stats) =
+            ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(
+                &processed, 3.0, 4, 0.15,
+            )
+        {
+            recognizer.set_threshold(gesture_id, stats.threshold);
+        }
+    }
+
+    recognizer.start();
+
+    let mut hits = Vec::new();
+    let mut preprocessor_live = Preprocessor::new(preprocessing, "mediapipe-pose-33-xy");
+    for frame in live_sequence {
+        let processed = preprocessor_live.process_frame(frame);
+        if let Some(result) = recognizer.process_frame(processed) {
+            if let (Some(id), Some(name)) = (result.gesture_id, result.gesture_name.clone()) {
+                let threshold = recognizer.get_gesture(id).map(|g| g.threshold).unwrap_or(0.0);
+                hits.push((name, result.distance, threshold));
+            }
+        }
+    }
+    hits
+}
+
+/// A config with both wall-clock echo gates disabled, so the only thing that
+/// can prevent a same-gesture re-fire is the frame-domain buffer clear.
+fn echo_guard_config(cooldown_ms: u64, global_cooldown_ms: u64) -> RecognitionConfig {
+    RecognitionConfig {
+        cooldown_ms,
+        threshold_high_factor: 1.0,
+        frames_to_fire: 2,
+        max_recovery_ms: 5000,
+        global_cooldown_ms,
+        sakoe_chiba_band: 0.15,
+        margin_rejection_ratio: 0.0,
+        use_subsequence_dtw: false,
+        complexity_correction: false,
+    }
+}
+
+/// RC-4 guard #1: a hit may NEVER fire while distance is above threshold.
+/// The margin (threshold - distance) must be >= 0. This is a margin>=0 check,
+/// NOT a positive floor: the analysis notes a legitimate +1.8% warm-up hit can
+/// sit right at the threshold, so equality is allowed.
+#[test]
+fn rc4_no_negative_margin_fire() {
+    let training: Vec<Vec<Vec<f32>>> = (1..=5)
+        .map(|s| add_variation(&right_arm_raise(120), s, 0.01))
+        .collect();
+
+    let mut live = standing_still(200);
+    live.extend(add_variation(&right_arm_raise(120), 99, 0.01));
+    live.extend(standing_still(100));
+
+    let hits = run_recognition_detailed(
+        &[("right_arm_raise", &training)],
+        &live,
+        test_config(),
+        no_preprocessing(),
+    );
+
+    assert!(!hits.is_empty(), "gesture should fire at least once");
+    for (name, distance, threshold) in &hits {
+        let margin = threshold - distance;
+        assert!(
+            margin >= 0.0,
+            "{} fired with NEGATIVE margin: distance {:.2} > threshold {:.2} (margin {:.2}). \
+             A hit must never fire above threshold.",
+            name,
+            distance,
+            threshold,
+            margin
+        );
+    }
+}
+
+/// RC-4 guard #2: a single gesture instance fires exactly once, even with BOTH
+/// wall-clock echo gates disabled (`cooldown_ms=0`, `global_cooldown_ms=0`).
+///
+/// A gesture stays below threshold for many consecutive frames as the sliding
+/// window passes over the complete match. With both timer-based cooldowns off,
+/// the ONLY thing preventing it from firing on every one of those frames is the
+/// frame-domain buffer clear: on the hit, the buffer empties and must refill
+/// (window_size frames) before any new detection, by which point the gesture
+/// has slid out of view. So if `buffer.clear()` were removed, this single
+/// instance would produce many hits. Exactly one hit, plus a direct check that
+/// the buffer is empty on the hit frame, proves the clear is the active gate.
+/// This is the frame-domain echo defense the tight no-sleep loop can exercise.
+#[test]
+fn rc4_no_same_gesture_refire_via_buffer_clear() {
+    let preproc = no_preprocessing();
+    let preprocessor = Preprocessor::new(preproc.clone(), "mediapipe-pose-33-xy");
+    let mut recognizer = Recognizer::with_config(600, 0, echo_guard_config(0, 0));
+    recognizer.add_gesture(1, "right_arm_raise", "/gesture/1", 0.0);
+
+    let training: Vec<Vec<Vec<f32>>> = (1..=5)
+        .map(|s| add_variation(&right_arm_raise(120), s, 0.01))
+        .collect();
+    for ex in &training {
+        recognizer.add_example(1, preprocessor.process_sequence(ex));
+    }
+    if let Some(stats) = ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(
+        &training
+            .iter()
+            .map(|e| preprocessor.process_sequence(e))
+            .collect::<Vec<_>>(),
+        3.0,
+        4,
+        0.15,
+    ) {
+        recognizer.set_threshold(1, stats.threshold);
+    }
+    recognizer.start();
+
+    let mut live = standing_still(200);
+    live.extend(add_variation(&right_arm_raise(120), 99, 0.01));
+    live.extend(standing_still(150));
+
+    let window = recognizer.window_size();
+    let mut hit_count = 0usize;
+    let mut buffer_len_at_hit = usize::MAX;
+    let mut preprocessor_live = Preprocessor::new(preproc, "mediapipe-pose-33-xy");
+    for frame in &live {
+        let processed = preprocessor_live.process_frame(frame);
+        if let Some(result) = recognizer.process_frame(processed) {
+            if result.gesture_id.is_some() {
+                hit_count += 1;
+                buffer_len_at_hit = recognizer.buffer.len();
+            }
+        }
+    }
+
+    assert_eq!(
+        hit_count, 1,
+        "expected exactly one hit with all wall-clock cooldowns disabled; got {}. \
+         More than one means the buffer-clear echo defense regressed.",
+        hit_count
+    );
+    // Direct evidence the clear ran: the buffer is emptied on the hit frame,
+    // far below a full window.
+    assert!(
+        buffer_len_at_hit < window,
+        "buffer should be cleared on the hit (len {} < window {}); the clear is the echo gate",
+        buffer_len_at_hit,
+        window
+    );
+}
+
+/// RC-4 guard #3 (wall-clock, labeled): the per-gesture cooldown is real time,
+/// not frames. With a real sleep shorter than the cooldown a re-fire is still
+/// blocked; after sleeping past it, the gesture re-arms. This exercises the
+/// wall-clock gate that the tight no-sleep loop cannot.
+#[test]
+fn rc4_per_gesture_cooldown_is_wall_clock() {
+    use ralf_gesture_studio::engine::recognizer::GestureState;
+    use std::time::Duration;
+
+    let cooldown = Duration::from_millis(200);
+    let mut g = GestureState::new(1, "wave", "/gesture/1", 100.0);
+
+    // Brand-new gesture is not in cooldown.
+    assert!(!g.in_cooldown(cooldown), "fresh gesture should not be in cooldown");
+
+    // After a hit it is in cooldown immediately, and stays so until the
+    // wall-clock window elapses — this is real time, not frames.
+    g.record_hit();
+    assert!(
+        g.in_cooldown(cooldown),
+        "should be in cooldown immediately after a hit"
+    );
+    std::thread::sleep(Duration::from_millis(220));
+    assert!(
+        !g.in_cooldown(cooldown),
+        "cooldown must expire after the wall-clock window passes"
+    );
+}

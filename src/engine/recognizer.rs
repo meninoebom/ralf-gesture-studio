@@ -95,7 +95,7 @@ impl Default for RecognitionConfig {
             frames_to_fire: 2,
             // Safety valve: force re-arm after 5s (prevents stuck state for jump)
             max_recovery_ms: 5000,
-            // Global cooldown: 1500ms after any gesture fires, block all from Building
+            // Global cooldown: 1000ms after any gesture fires, block all from Building
             global_cooldown_ms: 1000,
             // Sakoe-Chiba band: 15% of sequence length (recommended for gesture recognition)
             sakoe_chiba_band: 0.15,

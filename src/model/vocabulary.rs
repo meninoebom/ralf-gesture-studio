@@ -183,6 +183,36 @@ impl Gesture {
         }
     }
 
+    /// Apply calibration statistics and select the recognition threshold (RC-1).
+    ///
+    /// When calibration ran the F1 sweep (signalled by `f1_score.is_some()`),
+    /// `swept_threshold` is the negatives-aware F1-optimal value and MUST be
+    /// used directly. Otherwise we fall back to the μ+σ×coefficient formula.
+    ///
+    /// This exists because the previous code path always called
+    /// `update_statistics(mean, std)`, which unconditionally recomputed
+    /// `μ+σ×coefficient` and silently discarded the swept F1 threshold,
+    /// leaving the F1 feature inert even when enabled. Routing the selection
+    /// through this single method keeps the discard bug from returning. A
+    /// manual override always wins.
+    pub fn apply_threshold_stats(
+        &mut self,
+        mean: f32,
+        std: f32,
+        swept_threshold: f32,
+        f1_score: Option<f32>,
+    ) {
+        self.distance_mean = Some(mean);
+        self.distance_std = Some(std);
+        if !self.threshold_manual_override {
+            self.threshold = if f1_score.is_some() {
+                swept_threshold
+            } else {
+                mean + std * self.threshold_coefficient
+            };
+        }
+    }
+
     /// Clear statistical data (e.g., when examples are removed)
     pub fn clear_statistics(&mut self) {
         self.distance_mean = None;
@@ -414,5 +444,58 @@ impl Vocabulary {
     #[allow(dead_code)]
     pub fn recalculate_next_id(&mut self) {
         self.next_gesture_id = self.gestures.iter().map(|g| g.id).max().unwrap_or(0) + 1;
+    }
+}
+
+#[cfg(test)]
+mod rc1_threshold_routing_tests {
+    //! RC-1 guard: the F1-swept threshold must reach recognition, never be
+    //! discarded in favour of μ+σ×coefficient. See
+    //! docs/research/2026-06-18-four-way-tension-hardening-analysis.md.
+    use super::Gesture;
+
+    #[test]
+    fn f1_swept_threshold_is_used_not_discarded() {
+        let mut g = Gesture::new(1, "test");
+        g.threshold_coefficient = 2.0;
+        let (mean, std) = (10.0_f32, 1.0_f32);
+        let mu_sigma = mean + std * g.threshold_coefficient; // 12.0
+        let swept = 25.0_f32; // F1-optimal, deliberately distinct from μ+σ
+
+        g.apply_threshold_stats(mean, std, swept, Some(0.95));
+
+        assert_eq!(
+            g.threshold, swept,
+            "swept F1 threshold must be the recognition threshold when the F1 sweep ran"
+        );
+        assert_ne!(
+            g.threshold, mu_sigma,
+            "must NOT silently fall back to μ+σ×coefficient (the original discard bug)"
+        );
+        // Mean/std are still recorded for display/recompute.
+        assert_eq!(g.distance_mean, Some(mean));
+        assert_eq!(g.distance_std, Some(std));
+    }
+
+    #[test]
+    fn non_f1_path_falls_back_to_mu_sigma() {
+        let mut g = Gesture::new(1, "test");
+        g.threshold_coefficient = 2.0;
+        // f1_score = None signals the μ+σ path (sDTW/banded calibration); the
+        // swept argument must be ignored.
+        g.apply_threshold_stats(10.0, 1.0, 999.0, None);
+        assert_eq!(g.threshold, 12.0);
+    }
+
+    #[test]
+    fn manual_override_wins_over_f1() {
+        let mut g = Gesture::new(1, "test");
+        g.threshold = 50.0;
+        g.threshold_manual_override = true;
+        g.apply_threshold_stats(10.0, 1.0, 25.0, Some(0.9));
+        assert_eq!(
+            g.threshold, 50.0,
+            "manual override must not be overwritten by calibration"
+        );
     }
 }

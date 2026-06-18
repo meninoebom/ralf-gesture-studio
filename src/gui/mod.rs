@@ -367,7 +367,16 @@ impl AppState {
         };
         if let Some(stats) = stats {
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
-                gesture.update_statistics(stats.mean, stats.std);
+                // RC-1: route the calibration result through apply_threshold_stats
+                // so that when the F1 sweep ran (stats.f1_score.is_some()) the
+                // negatives-aware swept threshold actually reaches recognition,
+                // instead of being silently overwritten by μ+σ×coefficient.
+                gesture.apply_threshold_stats(
+                    stats.mean,
+                    stats.std,
+                    stats.threshold,
+                    stats.f1_score,
+                );
                 gesture.outlier_example_indices = stats.outlier_indices.clone();
                 self.recognizer.set_threshold(gesture_id, gesture.threshold);
 
@@ -514,6 +523,19 @@ impl AppState {
                             threshold,
                             margin_pct,
                         });
+                        // RC-7: every hit clears the frame buffer (recognizer.rs),
+                        // which is the primary echo defense. Emit a greppable NEAR
+                        // marker so the buffer-clear / refill blackout is observable
+                        // in logs. The ~2-3s refill that follows is visible via the
+                        // dropping `buffer_len` in subsequent Recognition events.
+                        self.diagnostic_logger.log(DiagnosticEvent::NearMiss {
+                            frame_num,
+                            gesture_name: name.clone(),
+                            distance: result.distance,
+                            threshold,
+                            margin_pct,
+                            reason: "buffer_cleared",
+                        });
                     }
 
                     self.hit_log
@@ -546,6 +568,14 @@ impl AppState {
         let mut gestures: Vec<GestureDiag> = Vec::new();
         let mut near_misses: Vec<(String, f32, f32, &'static str)> = Vec::new();
 
+        // RC-7: is the global cooldown (NMS) currently suppressing all gestures?
+        // Used to surface a `global_cooldown_block` near-miss when an eligible
+        // gesture is blocked by NMS specifically. Expected to be ~never observed,
+        // because the buffer clear on each hit empties the window (distances go
+        // None) and the ~2-3s refill outlasts the 1s global cooldown. That null
+        // result is the finding: buffer-clear, not the cooldown, is the gate.
+        let in_global_cooldown = self.recognizer.in_global_cooldown();
+
         for (id, name, distance, threshold) in self.recognizer.current_distances() {
             let gesture = self.recognizer.get_gesture(id);
             let in_cooldown = gesture.map(|g| g.in_cooldown(cooldown)).unwrap_or(false);
@@ -567,6 +597,10 @@ impl AppState {
                     near_misses.push((name.clone(), dist, threshold, "above_threshold"));
                 } else if dist < threshold && in_cooldown {
                     near_misses.push((name.clone(), dist, threshold, "in_cooldown"));
+                } else if dist < threshold && in_global_cooldown {
+                    // Eligible (below threshold) but suppressed by the global NMS
+                    // cooldown rather than this gesture's own cooldown.
+                    near_misses.push((name.clone(), dist, threshold, "global_cooldown_block"));
                 }
             }
         }
@@ -1176,6 +1210,10 @@ pub fn delete_example(
 
     // Recompute statistics if enough examples remain
     app.compute_gesture_statistics(gesture_id);
+    // RC-3: confusion pairs depend on every gesture's examples + thresholds, so
+    // they go stale after a deletion. Refresh them here, matching the training
+    // path which recomputes both.
+    app.update_confusion_pairs();
     app.sync_recognizer();
     app.mark_dirty();
 

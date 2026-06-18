@@ -109,22 +109,27 @@ pub struct Vocabulary {
 
 ```rust
 RecognitionConfig {
-    cooldown_ms: 500,              // Per-gesture minimum between hits
+    cooldown_ms: 500,              // Per-gesture minimum; also the Recovery re-arm timer
     threshold_high_factor: 1.0,    // Entry at 100% of threshold
-    frames_to_fire: 3,             // ~200ms confirmation at 15Hz DTW
-    max_recovery_ms: 5000,         // Safety valve: force re-arm after 5s
-    global_cooldown_ms: 1500,      // Block ALL gestures after ANY hit
+    frames_to_fire: 2,             // ~133ms confirmation at 15Hz DTW
+    max_recovery_ms: 5000,         // DEAD in live path: Recovery exits on cooldown_ms, not this
+    global_cooldown_ms: 1000,      // Block ALL gestures after ANY hit
     sakoe_chiba_band: 0.15,        // 15% warping constraint
+    margin_rejection_ratio: 0.0,   // Disabled (required for sDTW; tied distances else)
     use_subsequence_dtw: true,     // sDTW with wavefront banding (93.3% benchmark)
+    complexity_correction: false,  // CID toggle, off by default
 }
 ```
+
+**Recovery exits on `cooldown_complete` after `cooldown_ms` (500ms), not `safety_valve_timeout`.** The `max_recovery_ms` safety valve is a dead constant in the current live path (recognizer.rs:440). Diagnostic logs showing `reason=safety_valve_timeout` are from the pre-2026-02-22 recognizer generation; current-code Recovery→Idle transitions are 100% `cooldown_complete`.
 
 For algorithm details, echo defense design, preprocessing pipeline, threshold calibration, and diagnostic log analysis, see the `dtw-gesture-recognition` skill.
 
 ## Operational Learnings
 
 - **Warm-up effect in first 3-5 seconds.** The sliding window needs real movement data before distances are meaningful. First 3 hits in a session average ~34% margin vs ~68% for the rest. The very first hit may barely clear threshold (6.6% margin observed). This is normal — not a bug. Account for it when analyzing diagnostic logs.
-- **Detection latency ~400ms.** Mean time from Building entry to Peak fire is ~400ms (3 frames of accumulation at ~15Hz DTW rate). This is the baseline responsiveness of the system.
+- **Detection latency ~175-200ms steady-state.** Mean Building-to-Peak time is ~175-200ms (`frames_to_fire=2` → ~133ms confirmation at ~15Hz DTW, plus partial-frame alignment), measured per-gesture median excluding session-start 0ms burst pairs. The old "~400ms" figure assumed `frames_to_fire=3`, which is no longer the default. The real lag a dancer feels is the window fill (~2-3s after a hit), not the confirmation count.
+- **Diagnostic health checks (current-code baselines).** When analyzing diagnostic logs, the healthy current-code thresholds are: Recovery→Idle 100% `cooldown_complete` (NOT `safety_valve_timeout`); minimum inter-hit gap >= `max(global_cooldown_ms=1000ms, window_refill)`, which is ~2033ms for a 122-frame window (NOT 1500ms); Building-to-Peak latency ~175-200ms (NOT 400ms). Flagging a current-code log against the old `safety_valve_timeout` / 1500ms / 400ms baselines is a false alarm that pressures re-adding mechanisms which caused past death-spirals. See `docs/research/2026-06-18-four-way-tension-hardening-analysis.md`.
 - **Jump-style gestures produce tight margins.** Gestures with low inter-example variance (e.g., jumps) get tight auto-thresholds (low σ), resulting in lower margins (~39%) compared to complex gestures like spins (~75%). This is correct behavior — tight thresholds mean precise detection, not fragile detection.
 - **NEVER compute DTW in a Tauri polling command.** `get_state()` is called ~60Hz by the frontend. Any pairwise DTW computation here (even banded) will hang the app once gestures have 8+ examples. Cache expensive results (consistency, thresholds) when data changes, read the cached value in the poll. This caused repeated beach-ball-of-death bugs.
 - **Every DTW call in production must be banded.** Use `dtw_distance_with_abandon` (Sakoe-Chiba banded + early abandoning), never bare `dtw_distance` (unbanded O(N×M) with full matrix allocation). The unbanded version exists only for unit tests. Grep for `dtw_distance(` (without `_with_abandon` or `_constrained`) to audit.

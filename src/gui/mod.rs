@@ -1176,6 +1176,10 @@ pub fn delete_example(
 
     // Recompute statistics if enough examples remain
     app.compute_gesture_statistics(gesture_id);
+    // RC-3: confusion pairs depend on every gesture's examples + thresholds, so
+    // they go stale after a deletion. Refresh them here, matching the training
+    // path which recomputes both.
+    app.update_confusion_pairs();
     app.sync_recognizer();
     app.mark_dirty();
 

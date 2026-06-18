@@ -630,42 +630,77 @@ pub fn compute_threshold_f1(
     })
 }
 
+/// Downsample factor for confusion detection (matches recognition downsampling).
+const CONFUSION_DOWNSAMPLE: usize = 4;
+
+/// Recentred flag cutoff for confusion detection. A pair is flagged when the
+/// cross-gesture distance is below `max_threshold * CONFUSION_FLAG_FACTOR`.
+///
+/// sDTW free-start matches the common idle/standing portions of any two
+/// gestures, so cross-distances run systematically smaller than the
+/// intra-gesture thresholds — the old `cross < max_threshold` cutoff would flag
+/// nearly every pair. Calibrated empirically: on the well-separated benchmark
+/// trio the tightest pair sits at ~0.98× its threshold (must NOT flag), while a
+/// genuinely confusable vocabulary (Arm Sweep / jump / spin) sits at
+/// 0.72–0.85× (must flag). 0.9 splits them cleanly.
+const CONFUSION_FLAG_FACTOR: f32 = 0.9;
+
 /// Detect pairs of gestures whose training examples are too similar.
 ///
-/// For each pair of gestures (A, B), computes mean cross-gesture DTW distance
-/// between A's examples and B's examples. If that distance is below
-/// max(threshold_A, threshold_B), the pair is flagged as "confused."
+/// For each pair (A, B), computes the mean cross-gesture distance between A's
+/// and B's examples and flags the pair when that distance falls below
+/// `max(threshold_A, threshold_B) * CONFUSION_FLAG_FACTOR`.
+///
+/// The distance metric matches recognition: examples are downsampled by
+/// [`CONFUSION_DOWNSAMPLE`] and compared with subsequence DTW (sDTW), the same
+/// metric the recognition thresholds are calibrated against. Using full-
+/// resolution standard DTW here (the previous behaviour) compared a different
+/// metric against sDTW-calibrated thresholds — the exact calibration/recognition
+/// mismatch the system forbids elsewhere. sDTW is asymmetric (free start), so
+/// each example pair is averaged over both directions. Downsampling also makes
+/// each pairwise call ~16× cheaper.
 ///
 /// # Arguments
 /// * `gestures` - List of (preprocessed examples, threshold) per gesture
 ///
 /// # Returns
 /// Vec of (gesture_index_a, gesture_index_b, overlap_ratio) where
-/// overlap_ratio = max_threshold / cross_distance (>1.0 means overlap).
-pub fn detect_confusion_pairs(
-    gestures: &[(Vec<Sequence>, f32)],
-) -> Vec<(usize, usize, f32)> {
+/// overlap_ratio = max_threshold / cross_distance (higher = more overlap).
+pub fn detect_confusion_pairs(gestures: &[(Vec<Sequence>, f32)]) -> Vec<(usize, usize, f32)> {
+    // Downsample every example once, up front.
+    let downsampled: Vec<Vec<Sequence>> = gestures
+        .iter()
+        .map(|(examples, _)| {
+            examples
+                .iter()
+                .map(|seq| seq.iter().step_by(CONFUSION_DOWNSAMPLE).cloned().collect())
+                .collect()
+        })
+        .collect();
+
     let mut pairs = Vec::new();
 
     for i in 0..gestures.len() {
         for j in (i + 1)..gestures.len() {
-            let (ref examples_a, threshold_a) = gestures[i];
-            let (ref examples_b, threshold_b) = gestures[j];
+            let examples_a = &downsampled[i];
+            let examples_b = &downsampled[j];
 
             if examples_a.is_empty() || examples_b.is_empty() {
                 continue;
             }
 
-            // Compute mean cross-gesture distance (banded for performance)
+            // Mean cross-gesture sDTW distance, averaged over both directions.
             let mut sum = 0.0f32;
             let mut count = 0usize;
             for ea in examples_a.iter() {
                 for eb in examples_b.iter() {
                     let max_len = ea.len().max(eb.len());
                     let band_width = ((max_len as f32) * 0.15).ceil() as usize;
-                    if let Some(d) = dtw_distance_with_abandon(ea, eb, band_width, f32::INFINITY) {
-                        if d.is_finite() {
-                            sum += d;
+                    let ab = sdtw_distance(ea, eb, band_width, f32::INFINITY);
+                    let ba = sdtw_distance(eb, ea, band_width, f32::INFINITY);
+                    if let (Some(d_ab), Some(d_ba)) = (ab, ba) {
+                        if d_ab.is_finite() && d_ba.is_finite() {
+                            sum += (d_ab + d_ba) / 2.0;
                             count += 1;
                         }
                     }
@@ -677,9 +712,9 @@ pub fn detect_confusion_pairs(
             }
 
             let cross_distance = sum / count as f32;
-            let max_threshold = threshold_a.max(threshold_b);
+            let max_threshold = gestures[i].1.max(gestures[j].1);
 
-            if cross_distance < max_threshold && cross_distance > 0.0 {
+            if cross_distance < max_threshold * CONFUSION_FLAG_FACTOR && cross_distance > 0.0 {
                 let overlap_ratio = max_threshold / cross_distance;
                 pairs.push((i, j, overlap_ratio));
             }

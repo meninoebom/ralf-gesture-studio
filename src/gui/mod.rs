@@ -367,7 +367,16 @@ impl AppState {
         };
         if let Some(stats) = stats {
             if let Some(gesture) = self.vocabulary.get_gesture_mut(gesture_id) {
-                gesture.update_statistics(stats.mean, stats.std);
+                // RC-1: route the calibration result through apply_threshold_stats
+                // so that when the F1 sweep ran (stats.f1_score.is_some()) the
+                // negatives-aware swept threshold actually reaches recognition,
+                // instead of being silently overwritten by μ+σ×coefficient.
+                gesture.apply_threshold_stats(
+                    stats.mean,
+                    stats.std,
+                    stats.threshold,
+                    stats.f1_score,
+                );
                 gesture.outlier_example_indices = stats.outlier_indices.clone();
                 self.recognizer.set_threshold(gesture_id, gesture.threshold);
 

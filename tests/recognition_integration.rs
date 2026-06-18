@@ -1011,3 +1011,66 @@ fn diag_distances() {
         }
     }
 }
+
+// ============================================================================
+// RC-1: F1-swept threshold reaches recognition (regression guard)
+// ============================================================================
+
+/// End-to-end guard for RC-1: the F1 sweep must (a) run when negatives are
+/// present, (b) produce a threshold distinct from μ+σ for separable classes,
+/// and (c) survive routing through the production selection method. Before the
+/// fix, `compute_gesture_statistics` discarded the swept value by recomputing
+/// μ+σ, leaving the F1 feature inert even when enabled.
+/// See docs/research/2026-06-18-four-way-tension-hardening-analysis.md.
+#[test]
+fn rc1_f1_swept_threshold_separates_and_reaches_gesture() {
+    use ralf_gesture_studio::engine::statistics::compute_threshold_f1;
+    use ralf_gesture_studio::model::Gesture;
+
+    // A short sequence shaped like a ramp, offset to place it in feature space.
+    let make = |offset: f32, jitter: f32| -> Vec<Vec<f32>> {
+        (0..10)
+            .map(|t| {
+                let base = offset + t as f32 * 0.1;
+                vec![base + jitter, base - jitter, base]
+            })
+            .collect()
+    };
+    // Tight positive cluster, and a negative cluster shifted far away.
+    let positives = vec![
+        make(0.0, 0.00),
+        make(0.0, 0.01),
+        make(0.0, 0.02),
+        make(0.0, 0.015),
+    ];
+    let negatives = vec![
+        make(10.0, 0.00),
+        make(10.0, 0.01),
+        make(10.0, 0.02),
+        make(10.0, 0.015),
+    ];
+
+    let stats = compute_threshold_f1(&positives, &negatives, 1, 0.15, 2.0)
+        .expect("F1 calibration should produce stats for separable classes");
+
+    assert!(
+        stats.f1_score.is_some(),
+        "F1 sweep must run (f1_score present) when negatives are supplied"
+    );
+    let mu_sigma = stats.mean + stats.std * 2.0;
+    assert!(
+        (stats.threshold - mu_sigma).abs() > 1e-3,
+        "swept F1 threshold ({}) should differ from μ+σ ({}) for separable classes",
+        stats.threshold,
+        mu_sigma
+    );
+
+    // Route through the production selection path and confirm the swept value lands.
+    let mut g = Gesture::new(1, "test");
+    g.threshold_coefficient = 2.0;
+    g.apply_threshold_stats(stats.mean, stats.std, stats.threshold, stats.f1_score);
+    assert_eq!(
+        g.threshold, stats.threshold,
+        "recognition threshold must equal the swept F1 value, not μ+σ"
+    );
+}

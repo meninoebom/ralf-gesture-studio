@@ -1013,6 +1013,266 @@ fn diag_distances() {
 }
 
 // ============================================================================
+// RC-1: F1-swept threshold reaches recognition (regression guard)
+// ============================================================================
+
+/// End-to-end guard for RC-1: the F1 sweep must (a) run when negatives are
+/// present, (b) produce a threshold distinct from μ+σ for separable classes,
+/// and (c) survive routing through the production selection method. Before the
+/// fix, `compute_gesture_statistics` discarded the swept value by recomputing
+/// μ+σ, leaving the F1 feature inert even when enabled.
+/// See docs/research/2026-06-18-four-way-tension-hardening-analysis.md.
+#[test]
+fn rc1_f1_swept_threshold_separates_and_reaches_gesture() {
+    use ralf_gesture_studio::engine::statistics::compute_threshold_f1;
+    use ralf_gesture_studio::model::Gesture;
+
+    // A short sequence shaped like a ramp, offset to place it in feature space.
+    let make = |offset: f32, jitter: f32| -> Vec<Vec<f32>> {
+        (0..10)
+            .map(|t| {
+                let base = offset + t as f32 * 0.1;
+                vec![base + jitter, base - jitter, base]
+            })
+            .collect()
+    };
+    // Tight positive cluster, and a negative cluster shifted far away.
+    let positives = vec![
+        make(0.0, 0.00),
+        make(0.0, 0.01),
+        make(0.0, 0.02),
+        make(0.0, 0.015),
+    ];
+    let negatives = vec![
+        make(10.0, 0.00),
+        make(10.0, 0.01),
+        make(10.0, 0.02),
+        make(10.0, 0.015),
+    ];
+
+    let stats = compute_threshold_f1(&positives, &negatives, 1, 0.15, 2.0)
+        .expect("F1 calibration should produce stats for separable classes");
+
+    assert!(
+        stats.f1_score.is_some(),
+        "F1 sweep must run (f1_score present) when negatives are supplied"
+    );
+    let mu_sigma = stats.mean + stats.std * 2.0;
+    assert!(
+        (stats.threshold - mu_sigma).abs() > 1e-3,
+        "swept F1 threshold ({}) should differ from μ+σ ({}) for separable classes",
+        stats.threshold,
+        mu_sigma
+    );
+
+    // Route through the production selection path and confirm the swept value lands.
+    let mut g = Gesture::new(1, "test");
+    g.threshold_coefficient = 2.0;
+    g.apply_threshold_stats(stats.mean, stats.std, stats.threshold, stats.f1_score);
+    assert_eq!(
+        g.threshold, stats.threshold,
+        "recognition threshold must equal the swept F1 value, not μ+σ"
+    );
+}
+
+// ============================================================================
+// RC-2: Per-gesture F1-on vs F1-off holdout harness
+//
+// The aggregate benchmark (benchmark_hit_rate) reports a single 93.3%/3.3%
+// number that masks inter-class "stealing". This harness runs leave-one-out
+// twice — μ+σ thresholds vs F1-with-negatives thresholds — and reports the
+// per-gesture hit rate, false-positive count, chosen threshold, and best F1,
+// at BOTH coefficient 2.0 (production) and 3.0 (benchmark default), because
+// the F1 threshold-delta direction can flip between them.
+//
+// It answers, with a measured number, whether the open false-negative corner
+// is a THRESHOLD problem (F1 fixes it) or a DATA problem (F1 cannot). A low
+// per-gesture best-F1 is the direct "data problem" signal.
+//
+// CAVEAT (do not skip): a green result here does NOT license enabling F1 for a
+// dancer. This runs with no preprocessing on a fixed vocabulary; production
+// runs preprocessing on, at coefficient 2.0, on different data. Treat these as
+// a LOWER BOUND; production go/no-go is rehearsal-gated.
+//
+// Marked #[ignore] because it runs leave-one-out four times (~minutes). Run on
+// demand:  cargo test --test recognition_integration -- --ignored rc2
+// See docs/research/2026-06-18-four-way-tension-hardening-analysis.md (RC-2).
+// ============================================================================
+
+/// One leave-one-out trial under a chosen threshold strategy.
+/// Returns (correct_hit, false_positive_name, target_threshold, target_best_f1).
+fn run_holdout_trial_param(
+    all_gestures: &[(String, Vec<Vec<Vec<f32>>>)],
+    preprocessing: &PreprocessingConfig,
+    target_gesture_idx: usize,
+    holdout_idx: usize,
+    coefficient: f32,
+    use_f1: bool,
+) -> (bool, Option<String>, f32, Option<f32>) {
+    use ralf_gesture_studio::engine::statistics::{
+        compute_threshold_f1, compute_threshold_stats_sdtw,
+    };
+    let preprocessor = Preprocessor::new(preprocessing.clone(), "mediapipe-pose-33-xy");
+    let mut recognizer = Recognizer::with_config(600, 0, benchmark_config());
+
+    let mut target_threshold = 0.0_f32;
+    let mut target_best_f1 = None;
+
+    for (i, (name, examples)) in all_gestures.iter().enumerate() {
+        let gesture_id = (i + 1) as u32;
+        recognizer.add_gesture(gesture_id, name, &format!("/gesture/{}", gesture_id), 0.0);
+
+        // Training set: drop the holdout example only from the target gesture.
+        let training: Vec<Vec<Vec<f32>>> = examples
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| !(i == target_gesture_idx && *j == holdout_idx))
+            .map(|(_, e)| preprocessor.process_sequence(e))
+            .collect();
+
+        for example in &training {
+            recognizer.add_example(gesture_id, example.clone());
+        }
+
+        // Threshold strategy.
+        let (threshold, best_f1) = if use_f1 {
+            // Negatives = every OTHER gesture's full example set.
+            let negatives: Vec<Vec<Vec<f32>>> = all_gestures
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .flat_map(|(_, (_, exs))| exs.iter().map(|e| preprocessor.process_sequence(e)))
+                .collect();
+            match compute_threshold_f1(&training, &negatives, 4, 0.15, coefficient) {
+                Some(s) => (s.threshold, s.f1_score),
+                None => (0.0, None),
+            }
+        } else {
+            match compute_threshold_stats_sdtw(&training, coefficient, 4, 0.15) {
+                Some(s) => (s.threshold, None),
+                None => (0.0, None),
+            }
+        };
+        recognizer.set_threshold(gesture_id, threshold);
+        if i == target_gesture_idx {
+            target_threshold = threshold;
+            target_best_f1 = best_f1;
+        }
+    }
+
+    recognizer.start();
+
+    let holdout = &all_gestures[target_gesture_idx].1[holdout_idx];
+    let standing_frame = holdout[0].clone();
+    let mut live: Vec<Vec<f32>> = vec![standing_frame.clone(); 200];
+    live.extend(holdout.iter().cloned());
+    live.extend(vec![standing_frame; 100]);
+
+    let mut preprocessor_live = Preprocessor::new(preprocessing.clone(), "mediapipe-pose-33-xy");
+    let target_name = &all_gestures[target_gesture_idx].0;
+    let mut correct_hit = false;
+    let mut false_positive = None;
+    for frame in &live {
+        let processed = preprocessor_live.process_frame(frame);
+        if let Some(result) = recognizer.process_frame(processed) {
+            if let Some(ref hit_name) = result.gesture_name {
+                if hit_name == target_name {
+                    correct_hit = true;
+                } else {
+                    false_positive = Some(hit_name.clone());
+                }
+            }
+        }
+    }
+    (correct_hit, false_positive, target_threshold, target_best_f1)
+}
+
+#[derive(Default, Clone)]
+struct GestureScore {
+    trials: usize,
+    hits: usize,
+    false_positives: usize,
+    threshold_sum: f32,
+    f1_sum: f32,
+    f1_count: usize,
+}
+
+#[test]
+#[ignore = "measurement harness: leave-one-out x4, run with --ignored"]
+fn rc2_f1_vs_musigma_holdout() {
+    let fixture = load_fixture("jump-wave-spin-test.ralf");
+    let preprocessing = no_preprocessing();
+
+    println!("\n=== RC-2: F1-on vs F1-off per-gesture holdout ===");
+    println!("fixture: jump-wave-spin-test.ralf, {} gestures\n", fixture.gestures.len());
+
+    let mut any_f1_score = false;
+
+    for &coefficient in &[2.0_f32, 3.0_f32] {
+        for &use_f1 in &[false, true] {
+            let mut scores: Vec<GestureScore> =
+                vec![GestureScore::default(); fixture.gestures.len()];
+
+            for (g_idx, (_, examples)) in fixture.gestures.iter().enumerate() {
+                for holdout_idx in 0..examples.len() {
+                    let (hit, fp, threshold, f1) = run_holdout_trial_param(
+                        &fixture.gestures,
+                        &preprocessing,
+                        g_idx,
+                        holdout_idx,
+                        coefficient,
+                        use_f1,
+                    );
+                    let s = &mut scores[g_idx];
+                    s.trials += 1;
+                    if hit {
+                        s.hits += 1;
+                    }
+                    if fp.is_some() {
+                        s.false_positives += 1;
+                    }
+                    s.threshold_sum += threshold;
+                    if let Some(f) = f1 {
+                        s.f1_sum += f;
+                        s.f1_count += 1;
+                        any_f1_score = true;
+                    }
+                }
+            }
+
+            let label = if use_f1 { "F1-with-negatives" } else { "mu+sigma" };
+            println!("--- coefficient {:.1}, strategy {} ---", coefficient, label);
+            println!(
+                "{:<14} {:>8} {:>6} {:>10} {:>9}",
+                "gesture", "hit-rate", "FPs", "threshold", "best-F1"
+            );
+            for (g_idx, (name, _)) in fixture.gestures.iter().enumerate() {
+                let s = &scores[g_idx];
+                let hit_rate = s.hits as f32 / s.trials.max(1) as f32 * 100.0;
+                let avg_thresh = s.threshold_sum / s.trials.max(1) as f32;
+                let avg_f1 = if s.f1_count > 0 {
+                    format!("{:.3}", s.f1_sum / s.f1_count as f32)
+                } else {
+                    "-".to_string()
+                };
+                println!(
+                    "{:<14} {:>7.1}% {:>6} {:>10.1} {:>9}",
+                    name, hit_rate, s.false_positives, avg_thresh, avg_f1
+                );
+            }
+            println!();
+        }
+    }
+
+    // Sanity: the F1 path actually produced F1 scores (i.e. it ran the sweep,
+    // not the no-negatives fallback). The numbers above are the deliverable.
+    assert!(
+        any_f1_score,
+        "F1 strategy should have produced at least one best-F1 score"
+    );
+}
+
+// ============================================================================
 // RC-4: Executable echo / false-positive regression guards
 //
 // These lock in three invariants that are otherwise enforced only by

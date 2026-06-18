@@ -33,7 +33,13 @@ pub enum DiagnosticEvent {
         distance: f32,
         threshold: f32,
         margin_pct: f32,
-        reason: &'static str, // Why it didn't fire
+        // Why it didn't fire (or, for echo-defense observability, what engaged).
+        // Reasons: "above_threshold", "in_cooldown",
+        // "global_cooldown_block" (eligible but suppressed by NMS; expected ~never,
+        // since buffer-clear shadows the global cooldown), and
+        // "buffer_cleared" (emitted at each hit: the buffer was cleared, the
+        // primary echo defense; the ~2-3s refill blackout follows).
+        reason: &'static str,
     },
     /// State machine transition
     StateChange {

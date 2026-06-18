@@ -286,6 +286,7 @@ fn test_config() -> RecognitionConfig {
         margin_rejection_ratio: 0.0, // disabled for tests — single-gesture scenarios
         use_subsequence_dtw: false,
         complexity_correction: false,
+        slope_gate_enabled: true,
     }
 }
 
@@ -795,6 +796,7 @@ fn benchmark_config() -> RecognitionConfig {
         margin_rejection_ratio: 0.0,
         use_subsequence_dtw: true, // sDTW with wavefront banding
         complexity_correction: false,
+        slope_gate_enabled: true,
     }
 }
 
@@ -1010,4 +1012,88 @@ fn diag_distances() {
             eprintln!();
         }
     }
+}
+
+// ============================================================================
+// RC-5: Measure the slope gate's FN-vs-FP value (measure, do not ship a change)
+//
+// The slope gate requires distance to be strictly falling to enter Building,
+// suppressing resting-pose false positives. One Euro smoothing may already
+// remove the jitter it defends against, so its continued value is unmeasured.
+// This experiment toggles the gate (config flag, default ON = production) and
+// measures, on clean vs jitter-injected data:
+//   - FP defense: false fires during a pure noisy-resting segment (no gesture)
+//   - FN cost:    whether a real, clean gesture still fires with the gate on
+//
+// DISCIPLINE: a clean-data green result does NOT license relaxing the gate.
+// Final feel is rehearsal-gated (decision #4, signed off). This only measures.
+// See docs/research/2026-06-18-four-way-tension-hardening-analysis.md (RC-5).
+// ============================================================================
+
+fn slope_gate_config(enabled: bool) -> RecognitionConfig {
+    let mut c = test_config();
+    c.slope_gate_enabled = enabled;
+    c
+}
+
+#[test]
+fn rc5_slope_gate_fn_vs_fp_measurement() {
+    let training: Vec<Vec<Vec<f32>>> = (1..=5)
+        .map(|s| add_variation(&right_arm_raise(120), s, 0.01))
+        .collect();
+
+    // Clean real gesture (FN probe): does it still fire with the gate on?
+    let clean_gesture = {
+        let mut v = standing_still(200);
+        v.extend(add_variation(&right_arm_raise(120), 99, 0.01));
+        v.extend(standing_still(100));
+        v
+    };
+
+    // Pure noisy resting, NO gesture (FP probe): jitter injected into the
+    // standing pose, the exact resting-pose noise the gate defends against.
+    let noisy_resting: Vec<Vec<f32>> = add_variation(&standing_still(600), 42, 0.06);
+
+    let run = |seq: &[Vec<f32>], enabled: bool| -> usize {
+        run_recognition(
+            &[("right_arm_raise", &training)],
+            seq,
+            slope_gate_config(enabled),
+            no_preprocessing(),
+        )
+        .len()
+    };
+
+    let tp_gate_on = run(&clean_gesture, true);
+    let tp_gate_off = run(&clean_gesture, false);
+    let fp_gate_on = run(&noisy_resting, true);
+    let fp_gate_off = run(&noisy_resting, false);
+
+    println!("\n=== RC-5 slope gate FN-vs-FP measurement (clean-data lower bound) ===");
+    println!(
+        "clean gesture hits (TP):   gate ON = {}, gate OFF = {}",
+        tp_gate_on, tp_gate_off
+    );
+    println!(
+        "noisy-resting hits (FP):   gate ON = {}, gate OFF = {}",
+        fp_gate_on, fp_gate_off
+    );
+    println!(
+        "FP suppressed by the gate: {} (OFF {} -> ON {})",
+        fp_gate_off as i64 - fp_gate_on as i64,
+        fp_gate_off,
+        fp_gate_on
+    );
+    println!("DISCIPLINE: clean-data result does NOT license relaxing the gate (rehearsal-gated).");
+
+    // Invariants (not a recommendation): the gate must not INCREASE false
+    // positives, and must not cost the clean true positive on this data.
+    assert!(
+        fp_gate_on <= fp_gate_off,
+        "slope gate should never increase resting-pose false positives"
+    );
+    assert!(
+        tp_gate_on >= 1,
+        "the clean gesture must still fire with the gate enabled (no FN on clean data)"
+    );
 }

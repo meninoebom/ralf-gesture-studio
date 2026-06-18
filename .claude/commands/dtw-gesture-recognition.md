@@ -513,10 +513,10 @@ GestureState (runtime)
 | Window size | First example's length | ~120 frames at 60fps (~2s gesture) |
 | Frame skip | 4 | 15 DTW computations/sec |
 | Downsample | 4 | Compare ~30 frame sequences |
-| Per-gesture cooldown | 500ms | Minimum between same-gesture hits |
-| Global cooldown (NMS) | 1500ms | Block all gestures after any hit |
-| Safety valve | 5000ms | Force re-arm timeout |
-| Frames to fire | 3 | ~200ms confirmation at 15Hz DTW |
+| Per-gesture cooldown | 500ms | Minimum between same-gesture hits; also the Recovery re-arm timer (`cooldown_complete`) |
+| Global cooldown (NMS) | 1000ms | Block all gestures after any hit. Real inter-hit floor is `max(1000ms, window_refill)` ≈ 2033ms for a 122-frame window |
+| Safety valve | 5000ms | DEAD constant in live path: Recovery exits on `cooldown_ms`, not this. `safety_valve_timeout` is a pre-2026-02-22 reason |
+| Frames to fire | 2 | ~133ms confirmation at 15Hz DTW (Building-to-Peak ~175-200ms steady-state, not 400ms) |
 | Sakoe-Chiba band | 0.15 | 15% warping constraint |
 | Threshold | AUTO (μ+σ×2.0) | 6+ examples recommended |
 | Training examples | 6+ | Minimum for stable statistics |
@@ -593,6 +593,8 @@ A state machine with **frame accumulation** for confirmation and **time-based re
 ```
 
 ### ⚠️ CRITICAL INSIGHT: Two-Layer Echo Defense (v0.7.0)
+
+> **v0.8.0 correction (read before using these as diagnostic baselines).** The code below describes the superseded v0.7.0 Recovery design. In current code, **Recovery exits on `cooldown_complete` after `cooldown_ms` (500ms), NOT `safety_valve_timeout` after `max_recovery_ms`** (recognizer.rs:430-448; `max_recovery_ms` is a dead constant in the live path). The real echo defense is the **buffer clear + ~2-3s window refill**, not the global cooldown (which is structurally shadowed by the refill). Healthy current-code diagnostic baselines: Recovery→Idle 100% `cooldown_complete`; min inter-hit gap >= `max(1000ms, window_refill)` ≈ 2033ms (not 1500ms); Building-to-Peak ~175-200ms (not 400ms). Treating a current-code log against the v0.7.0 baselines below is a false alarm. See `docs/research/2026-06-18-four-way-tension-hardening-analysis.md`.
 
 **The #1 learning**: A single mechanism cannot prevent all echo types. Two layers are needed:
 

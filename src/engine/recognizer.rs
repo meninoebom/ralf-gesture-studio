@@ -95,7 +95,7 @@ impl Default for RecognitionConfig {
             frames_to_fire: 2,
             // Safety valve: force re-arm after 5s (prevents stuck state for jump)
             max_recovery_ms: 5000,
-            // Global cooldown: 1500ms after any gesture fires, block all from Building
+            // Global cooldown: 1000ms after any gesture fires, block all from Building
             global_cooldown_ms: 1000,
             // Sakoe-Chiba band: 15% of sequence length (recommended for gesture recognition)
             sakoe_chiba_band: 0.15,
@@ -960,10 +960,7 @@ impl Recognizer {
     /// the gesture must meet its consensus threshold to enter Building state.
     fn run_state_machines(&mut self, distances: &[(usize, f32, f32)]) -> Option<RecognitionResult> {
         // Check global cooldown (NMS: suppress all detections after any hit)
-        let in_global_cooldown = self
-            .last_any_hit_time
-            .map(|t| t.elapsed() < Duration::from_millis(self.config.global_cooldown_ms))
-            .unwrap_or(false);
+        let in_global_cooldown = self.in_global_cooldown();
 
         // Find the best-matching gesture index (lowest raw distance)
         let best_idx = distances
@@ -1163,6 +1160,21 @@ impl Recognizer {
     /// Get the current window size (for debugging display)
     pub fn window_size(&self) -> usize {
         self.window_size
+    }
+
+    /// Whether the global cooldown (NMS) is currently suppressing all gestures.
+    ///
+    /// True for `global_cooldown_ms` after any hit. Exposed for diagnostic
+    /// observability (RC-7): lets the caller emit a `global_cooldown_block`
+    /// near-miss when an otherwise-eligible gesture is suppressed by NMS.
+    /// In practice this is expected to be near-zero, because the buffer clear
+    /// on each hit (and the ~2-3s refill that outlasts the 1s cooldown) is the
+    /// binding echo gate and shadows the global cooldown. That null result is
+    /// itself the finding.
+    pub fn in_global_cooldown(&self) -> bool {
+        self.last_any_hit_time
+            .map(|t| t.elapsed() < Duration::from_millis(self.config.global_cooldown_ms))
+            .unwrap_or(false)
     }
 
     /// Get total example count across all gestures
@@ -1478,6 +1490,15 @@ mod tests {
         recognizer.add_gesture(1, "wave", "/gesture/1", 15.0);
         recognizer.add_gesture(2, "jump", "/gesture/2", 20.0);
         assert_eq!(recognizer.gestures().len(), 2);
+    }
+
+    #[test]
+    fn test_in_global_cooldown_false_before_any_hit() {
+        // RC-7: the observability accessor reports no NMS suppression until a
+        // hit has set last_any_hit_time. (The post-hit true case is exercised
+        // end-to-end by the integration suite / on-logs validation.)
+        let recognizer = Recognizer::new(1000, 100);
+        assert!(!recognizer.in_global_cooldown());
     }
 
     #[test]

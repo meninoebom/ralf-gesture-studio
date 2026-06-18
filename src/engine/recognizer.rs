@@ -278,12 +278,13 @@ impl GestureState {
             let example_ds: Sequence = example.iter().step_by(downsample).cloned().collect();
             let envelope = compute_lb_envelope(&example_ds, band_width);
             self.lb_envelopes.push(envelope);
-            self.complexity_factors.push(Recognizer::complexity_factor(&example_ds));
+            self.complexity_factors
+                .push(Recognizer::complexity_factor(&example_ds));
         }
         // Precompute mean CF for normalization
         if !self.complexity_factors.is_empty() {
-            self.mean_complexity_factor = self.complexity_factors.iter().sum::<f32>()
-                / self.complexity_factors.len() as f32;
+            self.mean_complexity_factor =
+                self.complexity_factors.iter().sum::<f32>() / self.complexity_factors.len() as f32;
             if self.mean_complexity_factor < 1e-6 {
                 self.mean_complexity_factor = 1.0;
             }
@@ -343,7 +344,13 @@ impl GestureState {
         }
 
         // Get the previous distance (second-to-last, since current is already at back)
-        let prev = self.distance_history.iter().rev().nth(1).copied().unwrap_or(current);
+        let prev = self
+            .distance_history
+            .iter()
+            .rev()
+            .nth(1)
+            .copied()
+            .unwrap_or(current);
 
         // Require strictly negative slope (distance is decreasing)
         current < prev
@@ -604,7 +611,11 @@ impl Recognizer {
             sum_sq += dist_sq;
         }
         let cf = sum_sq.sqrt();
-        if cf < 1e-6 { 1.0 } else { cf }
+        if cf < 1e-6 {
+            1.0
+        } else {
+            cf
+        }
     }
 
     /// Trim the standing-still prefix from a window by detecting movement onset.
@@ -619,9 +630,12 @@ impl Recognizer {
         }
 
         // Compute frame-to-frame velocities
-        let velocities: Vec<f32> = seq.windows(2)
+        let velocities: Vec<f32> = seq
+            .windows(2)
             .map(|pair| {
-                pair[0].iter().zip(pair[1].iter())
+                pair[0]
+                    .iter()
+                    .zip(pair[1].iter())
                     .map(|(a, b)| (a - b).powi(2))
                     .sum::<f32>()
                     .sqrt()
@@ -832,7 +846,11 @@ impl Recognizer {
             .filter(|w| !w.is_empty())
             .map(|w| {
                 let mean = w.iter().sum::<f32>() / w.len() as f32;
-                if mean > 1e-6 { mean } else { 1.0 }
+                if mean > 1e-6 {
+                    mean
+                } else {
+                    1.0
+                }
             })
             .unwrap_or(1.0);
 
@@ -1130,8 +1148,7 @@ impl Recognizer {
         visibility: &[f32],
     ) -> Option<RecognitionResult> {
         // Convert per-joint visibility to per-dimension weights (2 coords per joint for XY)
-        self.current_visibility_weights =
-            Some(visibility_to_dimension_weights(visibility, 2));
+        self.current_visibility_weights = Some(visibility_to_dimension_weights(visibility, 2));
         self.process_frame(frame)
     }
 
@@ -1620,7 +1637,10 @@ mod tests {
         }
 
         // With margin rejection, ambiguous match should be suppressed
-        assert!(!fired, "ambiguous match between similar gestures should be suppressed");
+        assert!(
+            !fired,
+            "ambiguous match between similar gestures should be suppressed"
+        );
     }
 
     #[test]

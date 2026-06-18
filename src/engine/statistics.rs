@@ -330,12 +330,9 @@ pub fn compute_threshold_stats_sdtw(
         for j in (i + 1)..n_examples {
             let max_len = downsampled[i].len().max(downsampled[j].len());
             let band_width = ((max_len as f32) * sakoe_chiba_band).ceil() as usize;
-            if let Some(dist) = sdtw_distance(
-                &downsampled[i],
-                &downsampled[j],
-                band_width,
-                f32::INFINITY,
-            ) {
+            if let Some(dist) =
+                sdtw_distance(&downsampled[i], &downsampled[j], band_width, f32::INFINITY)
+            {
                 if dist.is_finite() {
                     all_distances.push(dist);
                     per_example_sums[i] += dist;
@@ -604,11 +601,20 @@ pub fn compute_threshold_f1(
         let candidate = all_min + step_size * s as f32;
 
         // TP: positive distances below threshold (correctly accepted)
-        let tp = positive_distances.iter().filter(|&&d| d <= candidate).count() as f32;
+        let tp = positive_distances
+            .iter()
+            .filter(|&&d| d <= candidate)
+            .count() as f32;
         // FP: negative distances below threshold (incorrectly accepted)
-        let fp = negative_distances.iter().filter(|&&d| d <= candidate).count() as f32;
+        let fp = negative_distances
+            .iter()
+            .filter(|&&d| d <= candidate)
+            .count() as f32;
         // FN: positive distances above threshold (incorrectly rejected)
-        let fn_ = positive_distances.iter().filter(|&&d| d > candidate).count() as f32;
+        let fn_ = positive_distances
+            .iter()
+            .filter(|&&d| d > candidate)
+            .count() as f32;
 
         let denom = 2.0 * tp + fp + fn_;
         if denom > 0.0 {
@@ -912,7 +918,10 @@ mod tests {
         // Set a high threshold that the cross-distance will be below
         let gestures = vec![(gesture_a, 100.0), (gesture_b, 100.0)];
         let pairs = detect_confusion_pairs(&gestures);
-        assert!(!pairs.is_empty(), "similar gestures with high threshold should be confused");
+        assert!(
+            !pairs.is_empty(),
+            "similar gestures with high threshold should be confused"
+        );
         assert_eq!(pairs[0].0, 0);
         assert_eq!(pairs[0].1, 1);
     }
@@ -930,6 +939,9 @@ mod tests {
         // Tight thresholds — cross-distance will be much larger
         let gestures = vec![(gesture_a, 1.0), (gesture_b, 1.0)];
         let pairs = detect_confusion_pairs(&gestures);
-        assert!(pairs.is_empty(), "well-separated gestures should not be confused");
+        assert!(
+            pairs.is_empty(),
+            "well-separated gestures should not be confused"
+        );
     }
 }

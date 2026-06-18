@@ -111,7 +111,11 @@ mod tests {
 
         // Step to 1.0 — smoothed output should lag behind
         let result = smoother.smooth(&[1.0], dt);
-        assert!(result[0] > 0.0 && result[0] < 1.0, "should smooth step: got {}", result[0]);
+        assert!(
+            result[0] > 0.0 && result[0] < 1.0,
+            "should smooth step: got {}",
+            result[0]
+        );
     }
 
     #[test]
@@ -127,7 +131,11 @@ mod tests {
         // After sustained movement, filter should track closely
         let result = smoother.smooth(&[2.0], dt);
         // With beta=0.007 and sustained speed, cutoff adapts up — should be close
-        assert!(result[0] > 1.5, "should track fast movement: got {}", result[0]);
+        assert!(
+            result[0] > 1.5,
+            "should track fast movement: got {}",
+            result[0]
+        );
     }
 
     #[test]

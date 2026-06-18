@@ -34,8 +34,8 @@ pub fn compute_medoid(examples: &[Sequence]) -> Option<usize> {
                 continue;
             }
             // Use banded DTW matching recognizer params (band=0.15, no abandon)
-            let band_width = ((downsampled[i].len().max(downsampled[j].len()) as f32) * 0.15)
-                .ceil() as usize;
+            let band_width =
+                ((downsampled[i].len().max(downsampled[j].len()) as f32) * 0.15).ceil() as usize;
             if let Some(d) = dtw_distance_with_abandon(
                 &downsampled[i],
                 &downsampled[j],
@@ -80,7 +80,11 @@ mod tests {
             (0..20).map(|i| vec![i as f32 * 5.0]).collect(), // outlier
         ];
         let idx = compute_medoid(&examples).unwrap();
-        assert!(idx < 2, "medoid should be one of the two similar examples, got {}", idx);
+        assert!(
+            idx < 2,
+            "medoid should be one of the two similar examples, got {}",
+            idx
+        );
     }
 
     #[test]

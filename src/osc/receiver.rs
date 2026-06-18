@@ -345,7 +345,7 @@ mod tests {
         // Build: joint 0 = (0.1, 0.2, 0.9), joint 1 = (0.3, 0.4, 0.8), ...
         let mut frame_99 = Vec::with_capacity(99);
         for i in 0..33 {
-            frame_99.push(i as f32 * 0.1);       // x
+            frame_99.push(i as f32 * 0.1); // x
             frame_99.push(i as f32 * 0.1 + 0.01); // y
             frame_99.push(1.0 - i as f32 * 0.02); // visibility
         }

@@ -1630,3 +1630,61 @@ fn issue25_varlen_window_truncation_probe() {
     );
     assert_eq!(idle_s + idle_l, 0, "pure idle must not fire any gesture");
 }
+
+// ============================================================================
+// RC-3: Confusion detector uses the recognition metric (sDTW), recentred cutoff
+// ============================================================================
+
+/// Build detect_confusion_pairs input from a fixture: preprocess each gesture's
+/// examples and compute its sDTW threshold (coefficient 3.0, matching the
+/// benchmark calibration).
+fn confusion_input_from_fixture(fname: &str) -> Vec<(Vec<Vec<Vec<f32>>>, f32)> {
+    let fixture = load_fixture(fname);
+    let prep = Preprocessor::new(no_preprocessing(), "mediapipe-pose-33-xy");
+    fixture
+        .gestures
+        .iter()
+        .map(|(_, exs)| {
+            let processed: Vec<Vec<Vec<f32>>> =
+                exs.iter().map(|e| prep.process_sequence(e)).collect();
+            let threshold =
+                ralf_gesture_studio::engine::statistics::compute_threshold_stats_sdtw(
+                    &processed, 3.0, 4, 0.15,
+                )
+                .map(|s| s.threshold)
+                .unwrap_or(0.0);
+            (processed, threshold)
+        })
+        .collect()
+}
+
+/// The well-separated benchmark trio (Squat / Reach Up / Cross Arms) must NOT be
+/// flagged as confused. Before the metric fix, the cross-distances were computed
+/// with full-resolution standard DTW against sDTW thresholds (a metric mismatch);
+/// after the fix the recentred cutoff leaves the well-separated trio clean.
+#[test]
+fn rc3_benchmark_trio_not_flagged() {
+    use ralf_gesture_studio::engine::statistics::detect_confusion_pairs;
+    let input = confusion_input_from_fixture("benchmark.ralf");
+    let pairs = detect_confusion_pairs(&input);
+    assert!(
+        pairs.is_empty(),
+        "well-separated benchmark trio must not be flagged as confused, got: {:?}",
+        pairs
+    );
+}
+
+/// A genuinely confusable vocabulary (Arm Sweep / jump / spin — the RC-2 fixture
+/// where Arm Sweep and jump steal detections) MUST be flagged, so the detector
+/// is not simply silent everywhere. Positive control for the recentred cutoff.
+#[test]
+#[ignore = "uses 12 MB fixture; positive control, run with --ignored rc3"]
+fn rc3_confusable_vocab_is_flagged() {
+    use ralf_gesture_studio::engine::statistics::detect_confusion_pairs;
+    let input = confusion_input_from_fixture("jump-wave-spin-test.ralf");
+    let pairs = detect_confusion_pairs(&input);
+    assert!(
+        !pairs.is_empty(),
+        "confusable Arm Sweep/jump/spin vocabulary should be flagged"
+    );
+}

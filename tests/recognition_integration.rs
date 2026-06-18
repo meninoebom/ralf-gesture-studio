@@ -1490,3 +1490,143 @@ fn rc4_per_gesture_cooldown_is_wall_clock() {
         "cooldown must expire after the wall-clock window passes"
     );
 }
+
+// ============================================================================
+// Issue #25, Step 0: variable-length window probe (measure the penalty first)
+//
+// window_size is pinned to the FIRST trained example's length. A gesture longer
+// than the window is truncated to its last window_size frames before any DTW.
+// The analysis asserts this causes a false-negative penalty for a long gesture
+// in a short-seeded window, but notes the penalty is "asserted, not yet
+// measured" (trim_to_onset + sDTW free-start may absorb much of it). This probe
+// MEASURES it: same vocabulary, window seeded short vs long, report the delta.
+// Per the gating decision, shipping Option A (monotonic-max window) waits on
+// this number. See docs/research/2026-06-18-four-way-tension-hardening-analysis.md.
+// ============================================================================
+
+/// Build a recognizer whose window is seeded by the first example added, train
+/// both a short and a long gesture, and return it ready to run. `seed_long_first`
+/// chooses which gesture's example sets `window_size`.
+fn build_varlen_recognizer(
+    short_examples: &[Vec<Vec<f32>>],
+    long_examples: &[Vec<Vec<f32>>],
+    seed_long_first: bool,
+) -> Recognizer {
+    let prep = Preprocessor::new(no_preprocessing(), "mediapipe-pose-33-xy");
+    let mut recognizer = Recognizer::with_config(2048, 0, benchmark_config());
+    recognizer.add_gesture(1, "short", "/gesture/1", 0.0);
+    recognizer.add_gesture(2, "long", "/gesture/2", 0.0);
+
+    let short_p: Vec<Vec<Vec<f32>>> = short_examples
+        .iter()
+        .map(|e| prep.process_sequence(e))
+        .collect();
+    let long_p: Vec<Vec<Vec<f32>>> = long_examples
+        .iter()
+        .map(|e| prep.process_sequence(e))
+        .collect();
+
+    // The FIRST add_example sets the window. Order controls the seed length.
+    if seed_long_first {
+        for e in &long_p {
+            recognizer.add_example(2, e.clone());
+        }
+        for e in &short_p {
+            recognizer.add_example(1, e.clone());
+        }
+    } else {
+        for e in &short_p {
+            recognizer.add_example(1, e.clone());
+        }
+        for e in &long_p {
+            recognizer.add_example(2, e.clone());
+        }
+    }
+
+    for (gid, ex) in [(1u32, &short_p), (2u32, &long_p)] {
+        if let Some(s) =
+            ralf_gesture_studio::engine::statistics::compute_threshold_stats_sdtw(ex, 3.0, 4, 0.15)
+        {
+            recognizer.set_threshold(gid, s.threshold);
+        }
+    }
+    recognizer.start();
+    recognizer
+}
+
+/// Replay a live sequence and count (short_hits, long_hits).
+fn count_hits(recognizer: &mut Recognizer, live: &[Vec<f32>]) -> (usize, usize) {
+    let mut prep = Preprocessor::new(no_preprocessing(), "mediapipe-pose-33-xy");
+    let (mut short_hits, mut long_hits) = (0usize, 0usize);
+    for frame in live {
+        let processed = prep.process_frame(frame);
+        if let Some(r) = recognizer.process_frame(processed) {
+            match r.gesture_name.as_deref() {
+                Some("short") => short_hits += 1,
+                Some("long") => long_hits += 1,
+                _ => {}
+            }
+        }
+    }
+    (short_hits, long_hits)
+}
+
+#[test]
+fn issue25_varlen_window_truncation_probe() {
+    // Short gesture ~40 frames, long gesture ~200 frames, distinct motions.
+    let short_train: Vec<Vec<Vec<f32>>> = (1..=5)
+        .map(|s| add_variation(&right_arm_raise(40), s, 0.01))
+        .collect();
+    let long_train: Vec<Vec<Vec<f32>>> = (1..=5)
+        .map(|s| add_variation(&left_arm_raise(200), s, 0.01))
+        .collect();
+
+    // Live long-gesture performance: idle lead-in + long gesture + idle tail.
+    let long_live_seq = {
+        let mut v = standing_still(220);
+        v.extend(add_variation(&left_arm_raise(200), 99, 0.01));
+        v.extend(standing_still(120));
+        v
+    };
+    let idle_seq = standing_still(400);
+
+    // Window seeded SHORT (truncates the long gesture to its last ~40 frames).
+    let mut short_seed = build_varlen_recognizer(&short_train, &long_train, false);
+    let (_, long_hits_short_window) = count_hits(&mut short_seed, &long_live_seq);
+
+    // Window seeded LONG (the long gesture fits).
+    let mut long_seed = build_varlen_recognizer(&short_train, &long_train, true);
+    let (_, long_hits_long_window) = count_hits(&mut long_seed, &long_live_seq);
+
+    // Short-gesture pressure in the long-seeded (wide) window.
+    let short_live = {
+        let mut v = standing_still(220);
+        v.extend(add_variation(&right_arm_raise(40), 99, 0.01));
+        v.extend(standing_still(120));
+        v
+    };
+    let mut long_seed2 = build_varlen_recognizer(&short_train, &long_train, true);
+    let (short_hits_wide, _) = count_hits(&mut long_seed2, &short_live);
+
+    // Idle must not fire in either seeding.
+    let mut idle_rec = build_varlen_recognizer(&short_train, &long_train, true);
+    let (idle_s, idle_l) = count_hits(&mut idle_rec, &idle_seq);
+
+    println!("\n=== Issue #25 variable-length window probe ===");
+    println!("long gesture (200 frames):");
+    println!("  hits, SHORT-seeded window (~40): {}", long_hits_short_window);
+    println!("  hits, LONG-seeded  window (~200): {}", long_hits_long_window);
+    println!(
+        "  truncation FN penalty (long-window minus short-window): {}",
+        long_hits_long_window as i64 - long_hits_short_window as i64
+    );
+    println!("short gesture hits in wide window: {}", short_hits_wide);
+    println!("idle-segment hits: short={}, long={}", idle_s, idle_l);
+
+    // Truncation can only hurt the long gesture, never help it.
+    assert!(
+        long_hits_long_window >= long_hits_short_window,
+        "long-seeded window should detect the long gesture at least as often as the truncated short-seeded window"
+    );
+    assert_eq!(idle_s + idle_l, 0, "pure idle must not fire any gesture");
+}

@@ -17,15 +17,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Tauri v2 system libraries. The library + integration tests don't link
-      # the GUI, but the package's build.rs (tauri-build) runs on any cargo
-      # invocation, so install the deps for safety.
-      - name: Install Tauri system dependencies
+      # System libraries the LIB links: ALSA (rodio audio cues) and GTK (rfd
+      # dialogs), plus the Tauri WebKit/GTK stack for build.rs. DEBIAN_FRONTEND
+      # is required: without it Ubuntu 24.04's debconf/needrestart prompts hang
+      # apt-get indefinitely on a non-interactive runner.
+      - name: Install system dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
             libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libxdo-dev \

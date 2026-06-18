@@ -10,6 +10,14 @@ A desktop application for training and recognizing movement gestures using Dynam
 - **Data Format**: JSON (.ralf files)
 - **Requirements**: See `requirements.md` for full specification
 
+## Auto-merge
+
+PRs in this repo use auto-merge. After creating a PR, run `gh pr merge --auto --squash`.
+CI (`.github/workflows/ci.yml`, job `check`) gates on `cargo fmt --all --check` and
+`cargo test --lib --test recognition_integration`; clippy runs advisory. Branch protection
+on `main` requires the `check` status, so a PR merges itself once CI is green. Keep `main`
+fmt-clean (run `cargo fmt --all` before committing) or the format gate fails.
+
 ## Project Context
 
 This application replaces Wekinator for gesture recognition in choreomusical performance. It receives skeleton tracking data via OSC, allows structured training of gesture examples, and emits OSC "hit" signals when gestures are recognized.

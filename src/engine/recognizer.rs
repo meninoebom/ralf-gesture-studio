@@ -83,6 +83,13 @@ pub struct RecognitionConfig {
     /// Normalizes DTW distances by gesture complexity (first-derivative energy)
     /// so simple and complex gestures produce comparable distance scales.
     pub complexity_correction: bool,
+
+    /// Slope gate: require distance to be strictly falling to enter Building.
+    /// Suppresses false positives from resting poses that happen to sit below
+    /// threshold. Default `true` (production behavior). Exposed so the gate's
+    /// FN-vs-FP value can be measured (RC-5) by toggling it off; do NOT relax
+    /// it on clean-data harness evidence alone — final feel is rehearsal-gated.
+    pub slope_gate_enabled: bool,
 }
 
 impl Default for RecognitionConfig {
@@ -103,6 +110,8 @@ impl Default for RecognitionConfig {
             margin_rejection_ratio: 0.0,
             use_subsequence_dtw: true, // sDTW with wavefront banding
             complexity_correction: false,
+            // Slope gate ON by default (current production behavior).
+            slope_gate_enabled: true,
         }
     }
 }
@@ -370,7 +379,9 @@ impl GestureState {
                 if in_global_cooldown {
                     // Global cooldown active - suppress all new detections (NMS)
                     (false, None, "")
-                } else if distance < entry_threshold && self.is_distance_falling(distance) {
+                } else if distance < entry_threshold
+                    && (!config.slope_gate_enabled || self.is_distance_falling(distance))
+                {
                     // Start building
                     self.state = RecognitionState::Building;
                     self.frames_below_threshold = 1;

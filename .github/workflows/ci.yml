@@ -55,5 +55,16 @@ jobs:
       # Gate 2: the real correctness check. Scoped to the lib + integration
       # tests (the GUI bin has no tests and pulls heavier link-time deps).
       # The #[ignore]d measurement harnesses are intentionally not run here.
+      #
+      # Headless runners have no configured Documents dir, so the `directories`
+      # crate's document_dir() returns None and default_vocabulary_dir() fails.
+      # Provide an XDG user-dirs config (the mechanism the crate reads) so that
+      # path resolution behaves like a real desktop.
       - name: Tests
-        run: cargo test --lib --test recognition_integration
+        env:
+          XDG_DOCUMENTS_DIR: ${{ github.workspace }}/Documents
+        run: |
+          mkdir -p "$HOME/.config" "${{ github.workspace }}/Documents"
+          printf 'XDG_DOCUMENTS_DIR="%s/Documents"\n' "${{ github.workspace }}" \
+            > "$HOME/.config/user-dirs.dirs"
+          cargo test --lib --test recognition_integration

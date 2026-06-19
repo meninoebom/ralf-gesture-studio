@@ -915,8 +915,7 @@ mod tests {
     fn test_visibility_weighted_dtw_identical_returns_zero() {
         let seq = vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
         let weights = vec![1.0, 1.0];
-        let result =
-            dtw_distance_visibility_weighted(&seq, &seq, 2, f32::MAX, &weights);
+        let result = dtw_distance_visibility_weighted(&seq, &seq, 2, f32::MAX, &weights);
         assert!(result.is_some());
         assert_eq!(result.unwrap(), 0.0);
     }
@@ -959,7 +958,10 @@ mod tests {
         let weights = vec![1.0];
 
         let result = dtw_distance_visibility_weighted(&seq1, &seq2, 3, 1.0, &weights);
-        assert!(result.is_none(), "Should abandon when distance exceeds best_so_far");
+        assert!(
+            result.is_none(),
+            "Should abandon when distance exceeds best_so_far"
+        );
     }
 
     #[test]
@@ -971,8 +973,7 @@ mod tests {
 
         let weighted =
             dtw_distance_visibility_weighted(&seq1, &seq2, 3, f32::MAX, &weights).unwrap();
-        let standard =
-            dtw_distance_with_abandon(&seq1, &seq2, 3, f32::MAX).unwrap();
+        let standard = dtw_distance_with_abandon(&seq1, &seq2, 3, f32::MAX).unwrap();
 
         assert!(
             (weighted - standard).abs() < 0.01,

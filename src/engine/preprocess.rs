@@ -395,7 +395,11 @@ impl Preprocessor {
             // Left elbow: shoulder → elbow → wrist
             (layout.left_shoulder, layout.left_elbow, layout.left_wrist),
             // Right elbow: shoulder → elbow → wrist
-            (layout.right_shoulder, layout.right_elbow, layout.right_wrist),
+            (
+                layout.right_shoulder,
+                layout.right_elbow,
+                layout.right_wrist,
+            ),
             // Left hip: shoulder → hip → knee
             (layout.left_shoulder, layout.left_hip, layout.left_knee),
             // Right hip: shoulder → hip → knee

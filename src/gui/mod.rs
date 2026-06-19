@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
+use crate::osc::{ConnectionStatus, OscReceiverHandle, OscSender, ReceivedFrame, SenderStatus};
 use ralf_gesture_studio::engine::{
     assess_example, compute_gesture_consistency, compute_joint_weights, compute_medoid,
-    compute_threshold_stats_banded, compute_threshold_stats_sdtw, compute_threshold_f1, detect_confusion_pairs, generate_augmented,
-    DiagnosticEvent, DiagnosticLogger,
-    GestureDiag, HitLog, PoseSmoother, Preprocessor, RecognitionConfig, Recognizer, SessionState,
+    compute_threshold_f1, compute_threshold_stats_banded, compute_threshold_stats_sdtw,
+    detect_confusion_pairs, generate_augmented, DiagnosticEvent, DiagnosticLogger, GestureDiag,
+    HitLog, PoseSmoother, Preprocessor, RecognitionConfig, Recognizer, SessionState,
     TrainingConfig, TrainingSession,
 };
 use ralf_gesture_studio::model::{
@@ -15,7 +16,6 @@ use ralf_gesture_studio::model::{
     save_vocabulary as model_save_vocabulary,
 };
 use ralf_gesture_studio::model::{Example, Vocabulary};
-use crate::osc::{ConnectionStatus, OscReceiverHandle, OscSender, ReceivedFrame, SenderStatus};
 
 /// The two modes of the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,9 +359,20 @@ impl AppState {
                 })
                 .collect();
 
-            compute_threshold_f1(&examples, &negatives, 4, self.recognition_config.sakoe_chiba_band, coefficient)
+            compute_threshold_f1(
+                &examples,
+                &negatives,
+                4,
+                self.recognition_config.sakoe_chiba_band,
+                coefficient,
+            )
         } else if self.recognition_config.use_subsequence_dtw {
-            compute_threshold_stats_sdtw(&examples, coefficient, 4, self.recognition_config.sakoe_chiba_band)
+            compute_threshold_stats_sdtw(
+                &examples,
+                coefficient,
+                4,
+                self.recognition_config.sakoe_chiba_band,
+            )
         } else {
             compute_threshold_stats_banded(&examples, coefficient, 4, 0.15)
         };
@@ -427,7 +438,10 @@ impl AppState {
         let expected_dims = self.vocabulary.input.dimensions;
 
         for received in frames {
-            let ReceivedFrame { coords: frame, visibility } = received;
+            let ReceivedFrame {
+                coords: frame,
+                visibility,
+            } = received;
 
             // Validate frame dimensions against vocabulary config
             if frame.len() != expected_dims {
@@ -470,7 +484,8 @@ impl AppState {
 
             // Feed preprocessed frame to recognizer (with visibility if available)
             let result = if let Some(ref vis) = visibility {
-                self.recognizer.process_frame_with_visibility(processed, vis)
+                self.recognizer
+                    .process_frame_with_visibility(processed, vis)
             } else {
                 self.recognizer.process_frame(processed)
             };
@@ -1413,10 +1428,7 @@ pub fn set_complexity_correction(
 }
 
 #[tauri::command]
-pub fn set_f1_threshold(
-    state: State<Arc<Mutex<AppState>>>,
-    enabled: bool,
-) -> Result<(), String> {
+pub fn set_f1_threshold(state: State<Arc<Mutex<AppState>>>, enabled: bool) -> Result<(), String> {
     let mut app = state.lock().map_err(|e| e.to_string())?;
     app.vocabulary.f1_threshold = enabled;
     // Recompute all thresholds with F1 optimization

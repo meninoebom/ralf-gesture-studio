@@ -6,7 +6,7 @@
 //! 2. **Real data** — Holdout tests using a fixture `.ralf` file with actual MediaPipe recordings.
 //!    These verify the pipeline works with real-world noise and human movement variation.
 
-use ralf_gesture_studio::engine::preprocess::{Preprocessor, PreprocessingConfig};
+use ralf_gesture_studio::engine::preprocess::{PreprocessingConfig, Preprocessor};
 use ralf_gesture_studio::engine::recognizer::{RecognitionConfig, Recognizer};
 
 // ============================================================================
@@ -117,7 +117,12 @@ fn generate_gesture(num_frames: usize, animations: &[(usize, f32, f32)]) -> Vec<
 
         for &(joint_idx, end_x, end_y) in animations {
             let (start_x, start_y) = get_joint(&base, joint_idx);
-            set_joint(&mut frame, joint_idx, lerp(start_x, end_x, t), lerp(start_y, end_y, t));
+            set_joint(
+                &mut frame,
+                joint_idx,
+                lerp(start_x, end_x, t),
+                lerp(start_y, end_y, t),
+            );
 
             // Move connected hand joints with the wrist
             if joint_idx == joint::RIGHT_WRIST {
@@ -244,13 +249,11 @@ fn run_recognition(
             .map(|e| preprocessor.process_sequence(e))
             .collect();
 
-        if let Some(stats) =
-            ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(
-                &processed, 3.0, // coefficient — generous for testing
-                4,    // downsample
-                0.15, // sakoe_chiba_band
-            )
-        {
+        if let Some(stats) = ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(
+            &processed, 3.0,  // coefficient — generous for testing
+            4,    // downsample
+            0.15, // sakoe_chiba_band
+        ) {
             recognizer.set_threshold(gesture_id, stats.threshold);
         }
     }
@@ -420,7 +423,10 @@ fn synthetic_wrong_gesture_does_not_fire() {
         no_preprocessing(),
     );
 
-    let wrong_hits: Vec<_> = hits.iter().filter(|h| h.as_str() == "left_arm_raise").collect();
+    let wrong_hits: Vec<_> = hits
+        .iter()
+        .filter(|h| h.as_str() == "left_arm_raise")
+        .collect();
     assert!(
         wrong_hits.is_empty(),
         "Left arm raise should NOT fire when performing right arm raise, got {} wrong hits",
@@ -462,8 +468,14 @@ fn synthetic_multiple_gestures_in_sequence() {
         no_preprocessing(),
     );
 
-    let right_hits = hits.iter().filter(|h| h.as_str() == "right_arm_raise").count();
-    let left_hits = hits.iter().filter(|h| h.as_str() == "left_arm_raise").count();
+    let right_hits = hits
+        .iter()
+        .filter(|h| h.as_str() == "right_arm_raise")
+        .count();
+    let left_hits = hits
+        .iter()
+        .filter(|h| h.as_str() == "left_arm_raise")
+        .count();
 
     assert!(right_hits >= 1, "Should detect right arm raise");
     assert!(left_hits >= 1, "Should detect left arm raise");
@@ -547,14 +559,12 @@ fn real_data_holdout_fires() {
         }
 
         // Compute threshold
-        if let Some(stats) =
-            ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(
-                &processed_examples,
-                3.0,
-                4,
-                0.15,
-            )
-        {
+        if let Some(stats) = ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(
+            &processed_examples,
+            3.0,
+            4,
+            0.15,
+        ) {
             recognizer.set_threshold(1, stats.threshold);
         }
 
@@ -567,8 +577,8 @@ fn real_data_holdout_fires() {
             let processed = preprocessor_live.process_frame(frame);
             if let Some(result) = recognizer.process_frame(processed) {
                 if let Some(name) = result.gesture_name.clone() {
-                hits.push(name);
-            }
+                    hits.push(name);
+                }
             }
         }
 
@@ -644,11 +654,9 @@ fn real_data_no_cross_trigger() {
             recognizer.add_example(gesture_id, example.clone());
         }
 
-        if let Some(stats) =
-            ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(
-                &processed, 3.0, 4, 0.15,
-            )
-        {
+        if let Some(stats) = ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(
+            &processed, 3.0, 4, 0.15,
+        ) {
             recognizer.set_threshold(gesture_id, stats.threshold);
         }
     }
@@ -898,12 +906,8 @@ fn benchmark_hit_rate() {
     for (gesture_idx, (name, examples)) in fixture.gestures.iter().enumerate() {
         for holdout_idx in 0..examples.len() {
             total_trials += 1;
-            let (hit, fp) = run_holdout_trial(
-                &fixture.gestures,
-                &preprocessing,
-                gesture_idx,
-                holdout_idx,
-            );
+            let (hit, fp) =
+                run_holdout_trial(&fixture.gestures, &preprocessing, gesture_idx, holdout_idx);
 
             if hit {
                 correct_hits += 1;
@@ -977,7 +981,10 @@ fn diag_distances() {
     }
 
     for (target_idx, (target_name, target_examples)) in gesture_templates.iter().enumerate() {
-        eprintln!("\n--- {} holdout distances (threshold from file) ---", target_name);
+        eprintln!(
+            "\n--- {} holdout distances (threshold from file) ---",
+            target_name
+        );
         for holdout_idx in 0..target_examples.len() {
             let holdout = &target_examples[holdout_idx];
             eprint!("  [{}]:", holdout_idx);
@@ -995,13 +1002,13 @@ fn diag_distances() {
 
                 let mut min_dist = f32::MAX;
                 for tmpl in &templates {
-                    let band =
-                        ((holdout.len().max(tmpl.len()) as f32) * 0.15).ceil() as usize;
-                    if let Some(d) =
-                        ralf_gesture_studio::engine::dtw::dtw_distance_with_abandon(
-                            holdout, tmpl, band, f32::INFINITY,
-                        )
-                    {
+                    let band = ((holdout.len().max(tmpl.len()) as f32) * 0.15).ceil() as usize;
+                    if let Some(d) = ralf_gesture_studio::engine::dtw::dtw_distance_with_abandon(
+                        holdout,
+                        tmpl,
+                        band,
+                        f32::INFINITY,
+                    ) {
                         if d < min_dist {
                             min_dist = d;
                         }
@@ -1186,7 +1193,12 @@ fn run_holdout_trial_param(
             }
         }
     }
-    (correct_hit, false_positive, target_threshold, target_best_f1)
+    (
+        correct_hit,
+        false_positive,
+        target_threshold,
+        target_best_f1,
+    )
 }
 
 #[derive(Default, Clone)]
@@ -1206,7 +1218,10 @@ fn rc2_f1_vs_musigma_holdout() {
     let preprocessing = no_preprocessing();
 
     println!("\n=== RC-2: F1-on vs F1-off per-gesture holdout ===");
-    println!("fixture: jump-wave-spin-test.ralf, {} gestures\n", fixture.gestures.len());
+    println!(
+        "fixture: jump-wave-spin-test.ralf, {} gestures\n",
+        fixture.gestures.len()
+    );
 
     let mut any_f1_score = false;
 
@@ -1242,7 +1257,11 @@ fn rc2_f1_vs_musigma_holdout() {
                 }
             }
 
-            let label = if use_f1 { "F1-with-negatives" } else { "mu+sigma" };
+            let label = if use_f1 {
+                "F1-with-negatives"
+            } else {
+                "mu+sigma"
+            };
             println!("--- coefficient {:.1}, strategy {} ---", coefficient, label);
             println!(
                 "{:<14} {:>8} {:>6} {:>10} {:>9}",
@@ -1315,11 +1334,9 @@ fn run_recognition_detailed(
             .iter()
             .map(|e| preprocessor.process_sequence(e))
             .collect();
-        if let Some(stats) =
-            ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(
-                &processed, 3.0, 4, 0.15,
-            )
-        {
+        if let Some(stats) = ralf_gesture_studio::engine::statistics::compute_threshold_stats_banded(
+            &processed, 3.0, 4, 0.15,
+        ) {
             recognizer.set_threshold(gesture_id, stats.threshold);
         }
     }
@@ -1332,7 +1349,10 @@ fn run_recognition_detailed(
         let processed = preprocessor_live.process_frame(frame);
         if let Some(result) = recognizer.process_frame(processed) {
             if let (Some(id), Some(name)) = (result.gesture_id, result.gesture_name.clone()) {
-                let threshold = recognizer.get_gesture(id).map(|g| g.threshold).unwrap_or(0.0);
+                let threshold = recognizer
+                    .get_gesture(id)
+                    .map(|g| g.threshold)
+                    .unwrap_or(0.0);
                 hits.push((name, result.distance, threshold));
             }
         }
@@ -1478,7 +1498,10 @@ fn rc4_per_gesture_cooldown_is_wall_clock() {
     let mut g = GestureState::new(1, "wave", "/gesture/1", 100.0);
 
     // Brand-new gesture is not in cooldown.
-    assert!(!g.in_cooldown(cooldown), "fresh gesture should not be in cooldown");
+    assert!(
+        !g.in_cooldown(cooldown),
+        "fresh gesture should not be in cooldown"
+    );
 
     // After a hit it is in cooldown immediately, and stays so until the
     // wall-clock window elapses — this is real time, not frames.
@@ -1617,8 +1640,14 @@ fn issue25_varlen_window_truncation_probe() {
 
     println!("\n=== Issue #25 variable-length window probe ===");
     println!("long gesture (200 frames):");
-    println!("  hits, SHORT-seeded window (~40): {}", long_hits_short_window);
-    println!("  hits, LONG-seeded  window (~200): {}", long_hits_long_window);
+    println!(
+        "  hits, SHORT-seeded window (~40): {}",
+        long_hits_short_window
+    );
+    println!(
+        "  hits, LONG-seeded  window (~200): {}",
+        long_hits_long_window
+    );
     println!(
         "  truncation FN penalty (long-window minus short-window): {}",
         long_hits_long_window as i64 - long_hits_short_window as i64
@@ -1650,12 +1679,11 @@ fn confusion_input_from_fixture(fname: &str) -> Vec<(Vec<Vec<Vec<f32>>>, f32)> {
         .map(|(_, exs)| {
             let processed: Vec<Vec<Vec<f32>>> =
                 exs.iter().map(|e| prep.process_sequence(e)).collect();
-            let threshold =
-                ralf_gesture_studio::engine::statistics::compute_threshold_stats_sdtw(
-                    &processed, 3.0, 4, 0.15,
-                )
-                .map(|s| s.threshold)
-                .unwrap_or(0.0);
+            let threshold = ralf_gesture_studio::engine::statistics::compute_threshold_stats_sdtw(
+                &processed, 3.0, 4, 0.15,
+            )
+            .map(|s| s.threshold)
+            .unwrap_or(0.0);
             (processed, threshold)
         })
         .collect()

@@ -87,9 +87,9 @@ pub fn assess_example(new_example: &Sequence, existing: &[Sequence]) -> Option<Q
             for j in (i + 1)..existing.len() {
                 let max_len = existing[i].len().max(existing[j].len());
                 let band_width = ((max_len as f32) * 0.15).ceil() as usize;
-                if let Some(d) = dtw_distance_with_abandon(
-                    &existing[i], &existing[j], band_width, f32::INFINITY,
-                ) {
+                if let Some(d) =
+                    dtw_distance_with_abandon(&existing[i], &existing[j], band_width, f32::INFINITY)
+                {
                     if d.is_finite() {
                         inter_distances.push(d);
                     }
@@ -169,7 +169,8 @@ pub fn compute_gesture_consistency(examples: &[Sequence]) -> Option<f32> {
         return Some(0.0); // identical examples = perfect consistency
     }
 
-    let variance = distances.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / distances.len() as f32;
+    let variance =
+        distances.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / distances.len() as f32;
     let std = variance.sqrt();
 
     Some(std / mean)
@@ -288,7 +289,11 @@ mod tests {
             make_moving_sequence(30, 0.95),
         ];
         let c = compute_gesture_consistency(&examples).unwrap();
-        assert!(c < 0.5, "similar examples should have low consistency ratio: got {}", c);
+        assert!(
+            c < 0.5,
+            "similar examples should have low consistency ratio: got {}",
+            c
+        );
     }
 
     #[test]
@@ -299,7 +304,11 @@ mod tests {
             make_moving_sequence(30, 50.0), // very different
         ];
         let c = compute_gesture_consistency(&examples).unwrap();
-        assert!(c > 0.3, "mixed examples should have higher consistency ratio: got {}", c);
+        assert!(
+            c > 0.3,
+            "mixed examples should have higher consistency ratio: got {}",
+            c
+        );
     }
 
     #[test]

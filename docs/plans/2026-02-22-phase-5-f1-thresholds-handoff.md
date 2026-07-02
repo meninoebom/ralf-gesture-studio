@@ -2,7 +2,15 @@
 
 **Date:** 2026-02-22
 **Branch:** `feature/f1-thresholds` (create from main)
-**Status:** Not started. Phases 1-4 are complete and merged to main.
+**Status (updated 2026-07-02):** Items 2-4 (F1 thresholds + GUI + monitor display)
+are SHIPPED, including the RC-1 wiring fix that makes the swept threshold actually
+reach recognition (PR #28) and the RC-2 holdout harness (PR #31). Item 1
+(precompute downsampled examples) is deliberately NOT implemented: the June 2026
+four-way-tension analysis measured it as bit-for-bit identical output with no
+observable latency win — do not mistake it for a latency fix. See
+`docs/research/2026-06-18-four-way-tension-hardening-analysis.md`.
+
+> Historical plan below, kept for context.
 
 ## Context
 
